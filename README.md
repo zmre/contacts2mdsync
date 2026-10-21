@@ -37,7 +37,7 @@ just update-goldens  # rewrite golden files from current output (review the diff
 just mbr-check       # validate the exported fixture notes with the real mbr
 just cli plan --root ~/Notes/Contacts      # dev CLI (reads your real Contacts!)
 just app-cli status                        # CLI through the Debug app binary (app's grant + saved folder)
-nix flake check      # swift-format + mbr validation of the fixtures
+nix flake check      # swift-format, mbr validation of the fixtures, darwin-module eval
 ```
 
 Tests never touch your address book: they use `FakeContactStore`, `InMemoryVault` and temp folders.
@@ -120,9 +120,16 @@ Caveats: ad-hoc builds (`nix build`, `just build`) get a new code signature on e
       modules = [
         contacts2mdsync.darwinModules.default
         {
+          system.primaryUser = "alice";   # nix-darwin installs user agents for this user
           programs.contacts2mdsync.enable = true;
-          # planned (M5): hourly headless sync via a launchd user agent
-          # programs.contacts2mdsync.schedule = { enable = true; interval = 3600; };
+          # Optional: headless sync in the background (launchd user agent).
+          programs.contacts2mdsync.schedule = {
+            enable = true;
+            interval = 3600;              # seconds (launchd StartInterval), the default
+            # calendar = [ { Minute = 0; } ];   # or at fixed times; not with interval
+            # extraArgs = [ "--quiet" ];        # the default
+            # logFile = "/Users/alice/Library/Logs/Contacts2MdSync.log";   # the default
+          };
         }
       ];
     };
@@ -132,4 +139,12 @@ Caveats: ad-hoc builds (`nix build`, `just build`) get a new code signature on e
 
 The app is installed to `/Applications/Nix Apps/Contacts2MdSync.app`, and `contacts2md` (a wrapper that execs the app binary) is put on your `PATH`. For now `packages.default` builds from source with the system Xcode (`__noChroot`), so it needs `sandbox = false` or `relaxed` in your Nix config. Once signed and notarized releases exist, a pure `packages.release` that fetches the release zip will become the default.
 
-Also available: `overlays.default` (adds `pkgs.contacts2mdsync`) and `nix flake check` (swift-format lint, plus validation of the fixture notes with the real mbr from `github:zmre/mbr-markdown-browser`, fetched from zmre.cachix.org).
+`schedule.enable` adds the user agent `launchd.user.agents.contacts2mdsync-sync`, which runs `"/Applications/Nix Apps/Contacts2MdSync.app/Contents/MacOS/Contacts2MdSync" sync --quiet` (the same as `contacts2md sync`) every hour, or at the `calendar` times. It does not run at login, and it runs as a background, low-priority, niced job. Notes:
+
+- Set it up once first: open the app, grant Contacts access, choose the notes folder and run a first sync. Until you do, every run exits 3. Headless runs never prompt. Anything that needs a decision is queued for the app's Review badges and logged as a warning (exit 1).
+- The `sync` command arrives in M3. With an earlier build, the scheduled runs just fail with a usage error.
+- The agent runs the copy of the app in `/Applications/Nix Apps` (option `appPath`), not the store path. That copy is the app you granted Contacts access to, and running its executable lets the headless run use that grant. Whether launchd-started runs keep the grant is still being checked (spike S11).
+- launchd won't expand `~` or create directories. So `logFile` must be an absolute path in a directory that already exists. The default, `~/Library/Logs/Contacts2MdSync.log` for `system.primaryUser`, can be viewed in Console.app. The file is appended to and never rotated. Set `logFile = null` to discard output.
+- Check it with `launchctl print gui/$(id -u)/org.nixos.contacts2mdsync-sync`. Run it right away with `launchctl kickstart gui/$(id -u)/org.nixos.contacts2mdsync-sync`.
+
+Also available: `overlays.default` (adds `pkgs.contacts2mdsync`) and `nix flake check` (swift-format lint, plus validation of the fixture notes with the real mbr from `github:zmre/mbr-markdown-browser`, fetched from zmre.cachix.org, and an evaluation test of the nix-darwin module's schedule options).
