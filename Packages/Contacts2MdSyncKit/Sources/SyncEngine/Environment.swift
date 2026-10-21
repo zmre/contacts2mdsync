@@ -1,3 +1,4 @@
+internal import CryptoKit
 public import Foundation
 internal import Synchronization
 
@@ -53,4 +54,23 @@ public struct FixedClock: SyncClock {
 
     /// Creates the clock.
     public init(_ now: Date) { self.now = now }
+}
+
+/// Lowercase hex SHA-256.
+func hexSHA256(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+/// This device as recorded in decisions and sessions (architecture §11).
+public struct DeviceIdentity: Codable, Hashable, Sendable {
+    /// Stable id (lowercase UUID), created once per device.
+    public var id: String
+    /// Human-readable name (the computer name).
+    public var name: String
+
+    /// Creates an identity.
+    public init(id: String, name: String) {
+        self.id = id
+        self.name = name
+    }
 }

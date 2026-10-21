@@ -44,6 +44,10 @@ mbr-check *args:
 cli *args:
     swift run --package-path {{package}} contacts2md {{args}}
 
+# Run the CLI through the Debug app binary (uses the app's Contacts grant and folder bookmark)
+app-cli *args:
+    {{derived}}/Build/Products/Debug/Contacts2MdSync.app/Contents/MacOS/Contacts2MdSync {{args}}
+
 # Format Swift sources in place
 fmt:
     swift-format format --in-place --recursive --parallel {{swift_paths}}

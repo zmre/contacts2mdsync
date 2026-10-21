@@ -22,30 +22,74 @@ public struct LocalVaultFS: VaultFS {
 
     public func enumerate() throws -> [FileEntry] {
         let keys: [URLResourceKey] = [
-            .isRegularFileKey, .contentModificationDateKey, .fileSizeKey, .ubiquitousItemDownloadingStatusKey,
+            .isRegularFileKey, .isDirectoryKey, .contentModificationDateKey, .fileSizeKey,
+            .ubiquitousItemDownloadingStatusKey,
         ]
+        // Hidden entries are filtered by hand: legacy iCloud placeholders are
+        // hidden files (`.Jane Doe.md.icloud`) that stand for `Jane Doe.md`.
         guard
             let enumerator = FileManager.default.enumerator(
-                at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants])
+                at: root, includingPropertiesForKeys: keys, options: [.skipsPackageDescendants])
         else { return [] }
         let rootPath = root.path(percentEncoded: false)
         let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
         var entries: [FileEntry] = []
         for case let fileURL as URL in enumerator {
+            let name = fileURL.lastPathComponent
             let values = try fileURL.resourceValues(forKeys: Set(keys))
+            if name.hasPrefix(".") {
+                if values.isDirectory == true { enumerator.skipDescendants() }
+                guard let placeholder = Self.placeholderTarget(name), values.isRegularFile == true else { continue }
+                // Standardize the (existing) folder: `standardizedFileURL` only
+                // strips `/private` from paths that exist.
+                let folder = fileURL.deletingLastPathComponent().standardizedFileURL.path(percentEncoded: false)
+                let full = (folder.hasSuffix("/") ? folder : folder + "/") + placeholder
+                guard full.hasPrefix(prefix) else { continue }
+                entries.append(
+                    FileEntry(
+                        path: String(full.dropFirst(prefix.count)),
+                        modificationDate: values.contentModificationDate ?? .distantPast, size: 0, isDataless: true))
+                continue
+            }
             guard values.isRegularFile == true else { continue }
             let full = fileURL.standardizedFileURL.path(percentEncoded: false)
             guard full.hasPrefix(prefix) else { continue }
             let status = values.ubiquitousItemDownloadingStatus
+            let notDownloaded = status != nil && status != .current && status != .downloaded
             entries.append(
                 FileEntry(
                     path: String(full.dropFirst(prefix.count)),
                     modificationDate: values.contentModificationDate ?? .distantPast,
                     size: values.fileSize ?? 0,
-                    isDataless: status != nil && status != .current && status != .downloaded
+                    isDataless: notDownloaded || Self.isDataless(full)
                 ))
         }
         return entries
+    }
+
+    /// `Jane Doe.md` for a legacy iCloud placeholder `.Jane Doe.md.icloud`.
+    static func placeholderTarget(_ name: String) -> String? {
+        guard name.hasPrefix("."), name.hasSuffix(".icloud"), name.count > ".x.icloud".count - 1 else { return nil }
+        let target = String(name.dropFirst().dropLast(".icloud".count))
+        return target.isEmpty || target.hasPrefix(".") ? nil : target
+    }
+
+    /// The `SF_DATALESS` file flag: an APFS file whose bytes live in the cloud.
+    static func isDataless(_ path: String) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return false }
+        return info.st_flags & UInt32(SF_DATALESS) != 0
+    }
+
+    public func list(_ directory: String) throws -> [String] {
+        let url = directory.isEmpty ? root : try self.url(directory)
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return [] }
+        return try FileManager.default.contentsOfDirectory(atPath: url.path(percentEncoded: false)).sorted()
+    }
+
+    public func requestDownload(_ path: String) {
+        guard let fileURL = try? url(path) else { return }
+        try? FileManager.default.startDownloadingUbiquitousItem(at: fileURL)
     }
 
     public func read(_ path: String) throws -> (Data, FileStamp) {

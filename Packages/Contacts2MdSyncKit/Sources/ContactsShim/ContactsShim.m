@@ -71,16 +71,34 @@ static NSError *C2MErrorFromException(NSException *exception) {
         [[CNContactFetchRequest alloc] initWithKeysToFetch:@[ CNContactIdentifierKey, CNContactNoteKey ]];
     @try {
         NSError *fetchError = nil;
+        // Without the entitlement the fetch succeeds and the key is silently
+        // unavailable (spike S2, macOS 27); older systems fail with error 102.
+        // Reading .note is guarded by isKeyAvailable: an unfetched key raises.
+        __block BOOL available = YES;
         BOOL ok = [self enumerateContactsWithFetchRequest:request
                                                     error:&fetchError
                                                usingBlock:^(CNContact *contact, BOOL *stop) {
-                                                   (void)contact.note;
+                                                   available = [contact isKeyAvailable:CNContactNoteKey];
+                                                   if (available) {
+                                                       (void)contact.note;
+                                                   }
                                                    *stop = YES;
                                                }];
-        if (!ok && error != NULL) {
-            *error = fetchError;
+        if (!ok) {
+            if (error != NULL) {
+                *error = fetchError;
+            }
+            return NO;
         }
-        return ok;
+        if (!available) {
+            if (error != NULL) {
+                *error = [NSError errorWithDomain:CNErrorDomain
+                                             code:CNErrorCodeUnauthorizedKeys
+                                         userInfo:@{NSLocalizedDescriptionKey : @"CNContactNoteKey is unavailable"}];
+            }
+            return NO;
+        }
+        return YES;
     } @catch (NSException *exception) {
         if (error != NULL) {
             *error = C2MErrorFromException(exception);

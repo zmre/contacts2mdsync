@@ -15,6 +15,9 @@ public final class InMemoryVault: VaultFS {
     private struct State {
         var files: [String: File] = [:]
         var writes: [String] = []
+        var reads: [String] = []
+        var dataless = Set<String>()
+        var downloadRequests: [String] = []
         var tick: TimeInterval = 0
     }
 
@@ -38,6 +41,25 @@ public final class InMemoryVault: VaultFS {
 
     /// Forgets recorded writes.
     public func resetWrites() { state.withLock { $0.writes = [] } }
+
+    /// Paths read through `read`, in order (hidden paths excluded).
+    public var reads: [String] {
+        state.withLock { $0.reads.filter { !$0.split(separator: "/").contains { $0.hasPrefix(".") } } }
+    }
+
+    /// Forgets recorded reads.
+    public func resetReads() { state.withLock { $0.reads = [] } }
+
+    /// Marks a file as an iCloud placeholder (enumerated as dataless; reading
+    /// it fails like an evicted file would without coordination).
+    public func setDataless(_ path: String, _ dataless: Bool = true) {
+        state.withLock { state in
+            if dataless { state.dataless.insert(path) } else { state.dataless.remove(path) }
+        }
+    }
+
+    /// Paths `requestDownload` was called for.
+    public var downloadRequests: [String] { state.withLock { $0.downloadRequests } }
 
     /// All paths, sorted.
     public var paths: [String] { state.withLock { $0.files.keys.sorted() } }
@@ -66,14 +88,21 @@ public final class InMemoryVault: VaultFS {
     public func enumerate() throws -> [FileEntry] {
         state.withLock { state in
             state.files.filter { path, _ in !path.split(separator: "/").contains { $0.hasPrefix(".") } }
-                .map { FileEntry(path: $0.key, modificationDate: $0.value.modificationDate, size: $0.value.data.count) }
+                .map {
+                    FileEntry(
+                        path: $0.key, modificationDate: $0.value.modificationDate, size: $0.value.data.count,
+                        isDataless: state.dataless.contains($0.key))
+                }
         }
     }
 
     public func read(_ path: String) throws -> (Data, FileStamp) {
         try VaultPath.validate(path)
         return try state.withLock { state in
-            guard let file = state.files[path] else { throw VaultFSError.notFound(path: path) }
+            guard let file = state.files[path], !state.dataless.contains(path) else {
+                throw VaultFSError.notFound(path: path)
+            }
+            state.reads.append(path)
             return (file.data, Self.stamp(file))
         }
     }
@@ -105,6 +134,19 @@ public final class InMemoryVault: VaultFS {
     }
 
     public func exists(_ path: String) -> Bool { state.withLock { $0.files[path] != nil } }
+
+    public func list(_ directory: String) throws -> [String] {
+        let prefix = directory.isEmpty ? "" : directory + "/"
+        return state.withLock { state in
+            Set(
+                state.files.keys.filter { $0.hasPrefix(prefix) }.compactMap {
+                    $0.dropFirst(prefix.count).split(separator: "/").first.map(String.init)
+                }
+            ).sorted()
+        }
+    }
+
+    public func requestDownload(_ path: String) { state.withLock { $0.downloadRequests.append(path) } }
 
     private static func stamp(_ file: File) -> FileStamp {
         FileStamp(modificationDate: file.modificationDate, size: file.data.count, sha256: FileStamp.hash(file.data))

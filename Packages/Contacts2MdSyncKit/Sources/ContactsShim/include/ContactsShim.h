@@ -56,8 +56,10 @@ FOUNDATION_EXPORT NSString *const C2MExceptionNameKey;
 /// `com.apple.developer.contacts.notes` entitlement). Fetches at most one
 /// contact. Exceptions are converted to errors, so this never crashes.
 ///
-/// - Returns: `YES` when notes are readable; `NO` with `error` set otherwise
-///   (`CNErrorCodeUnauthorizedKeys` (102) when the entitlement is missing).
+/// - Returns: `YES` when notes are readable; `NO` with `error` set otherwise:
+///   `CNErrorCodeUnauthorizedKeys` (102) when the fetch fails for lack of the
+///   entitlement, or when it succeeds but `isKeyAvailable(CNContactNoteKey)`
+///   is false (what un-entitled builds see on macOS 27, spike S2).
 - (BOOL)c2m_probeNoteAccessWithError:(NSError *_Nullable *_Nullable)error
     NS_SWIFT_NAME(c2m_probeNoteAccess());
 

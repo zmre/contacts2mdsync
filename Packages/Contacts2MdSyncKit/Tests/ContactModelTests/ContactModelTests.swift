@@ -258,3 +258,48 @@ struct StampTests {
         #expect(contact.isICloudBacked)
     }
 }
+
+@Suite("Card precedence")
+struct CardPrecedenceTests {
+    private func card(
+        _ id: String, _ kind: AccountKind, stamp: UUID? = nil, _ build: (inout CanonicalContact) -> Void
+    )
+        -> AppleCard
+    {
+        var values = CanonicalContact(kind: .person, title: "")
+        build(&values)
+        return AppleCard(id: id, containerID: kind.rawValue, accountKind: kind, stampID: stamp, values: values)
+    }
+
+    @Test("single values: stamped, then iCloud, then other cards; multi values: union by comparison key")
+    func merge() {
+        let google = card("a-google", .google) { contact in
+            contact.jobTitle = "Chief"
+            contact.department = "Ops"
+            contact.emails = [Labeled("home", "PAT@example.com"), Labeled("work", "pat@work.example")]
+            contact.phones = [Labeled("mobile", "+1 415 555 0100")]
+        }
+        let icloud = card("z-icloud", .iCloud) { contact in
+            contact.jobTitle = "CEO"
+            contact.emails = [Labeled("home", "pat@example.com")]
+            contact.phones = [Labeled("mobile", "(415) 555-0100")]
+        }
+        var unified = CanonicalContact(kind: .person, title: "")
+        unified.jobTitle = "Chief"
+        let contact = AppleContact(unifiedID: "SYNTH", cards: [google, icloud], contact: unified)
+        let keyer = DigitsPhoneKeyer()
+        let merged = contact.cardMergedContact(keyer: keyer)
+        #expect(merged.jobTitle == "CEO")
+        #expect(merged.department == "Ops")  // only Google has one
+        #expect(merged.emails == [Labeled("home", "pat@example.com"), Labeled("work", "pat@work.example")])
+        #expect(merged.phones.count == 2)  // digits keyer: "+14155550100" vs "4155550100" differ
+        // A stamped Google card outranks iCloud.
+        var stamped = contact
+        stamped.cards[0].stampID = UUID()
+        #expect(stamped.cardMergedContact(keyer: keyer).jobTitle == "Chief")
+        // Unknown card values (or a single card): the unified view.
+        var unknown = contact
+        unknown.cards[1].values = nil
+        #expect(unknown.cardMergedContact(keyer: keyer) == unified)
+    }
+}

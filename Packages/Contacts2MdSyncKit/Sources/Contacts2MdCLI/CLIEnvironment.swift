@@ -3,6 +3,7 @@ internal import ContactsAdapter
 public import Foundation
 internal import PhoneNumberKeys
 public import SyncEngine
+internal import SyncStateDB
 internal import Synchronization
 public import VaultIndex
 
@@ -19,7 +20,8 @@ public struct CLIEnvironment: Sendable {
     public var makeVault: @Sendable (URL) -> any VaultFS
     /// `true` when `url` is an existing directory.
     public var isDirectory: @Sendable (URL) -> Bool
-    /// Per-device state (`records.json`, `backups/`) lives under here.
+    /// Per-device state lives under here: `<vault_id>/state.sqlite`,
+    /// `backups/`, `device.json`, the folder bookmark and app settings.
     public var stateDirectory: URL
     /// Phone comparison keys for a region.
     public var makeKeyer: @Sendable (String) -> any PhoneKeyer
@@ -29,6 +31,14 @@ public struct CLIEnvironment: Sendable {
     /// Region used when neither `--region` nor the config sets one.
     public var fallbackRegion: String
     public var output: CLIOutput
+    /// Opens the per-device state store in a vault's state folder.
+    public var makeStateStore: @Sendable (URL) throws -> any SyncStateStore
+    /// This device (stable id + name).
+    public var device: @Sendable () throws -> DeviceIdentity
+    /// Turns `--root` (or the saved folder bookmark when omitted) into a folder.
+    public var rootAccess: RootAccess
+    /// `CLI` or `GUI`, recorded with each session.
+    public var trigger: String
 
     /// Creates an environment.
     public init(
@@ -41,7 +51,13 @@ public struct CLIEnvironment: Sendable {
         clock: any SyncClock,
         timeZone: TimeZone,
         fallbackRegion: String,
-        output: CLIOutput
+        output: CLIOutput,
+        makeStateStore: @escaping @Sendable (URL) throws -> any SyncStateStore = CLIEnvironment.openStateStore,
+        device: @escaping @Sendable () throws -> DeviceIdentity = {
+            DeviceIdentity(id: "00000000-0000-4000-8000-00000000d001", name: "Test Mac")
+        },
+        rootAccess: RootAccess = .explicitOnly,
+        trigger: String = "CLI"
     ) {
         self.makeStore = makeStore
         self.makeVault = makeVault
@@ -53,6 +69,17 @@ public struct CLIEnvironment: Sendable {
         self.timeZone = timeZone
         self.fallbackRegion = fallbackRegion
         self.output = output
+        self.makeStateStore = makeStateStore
+        self.device = device
+        self.rootAccess = rootAccess
+        self.trigger = trigger
+    }
+
+    /// Opens the SQLite device state in a vault's state folder (importing an
+    /// M1 `records.json` there once).
+    @Sendable
+    public static func openStateStore(_ directory: URL) throws -> any SyncStateStore {
+        try GRDBSyncStateStore.open(directory: directory)
     }
 
     /// The production environment.
@@ -60,6 +87,7 @@ public struct CLIEnvironment: Sendable {
         let support =
             FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(filePath: NSHomeDirectory()).appending(path: "Library/Application Support")
+        let state = support.appending(path: "Contacts2MdSync")
         return CLIEnvironment(
             makeStore: {
                 guard CNContactStoreAdapter.isAuthorized else { throw ContactStoreError.accessDenied }
@@ -72,13 +100,17 @@ public struct CLIEnvironment: Sendable {
                     atPath: url.path(percentEncoded: false), isDirectory: &isDirectory)
                     && isDirectory.boolValue
             },
-            stateDirectory: support.appending(path: "Contacts2MdSync"),
+            stateDirectory: state,
             makeKeyer: { PhoneNumberKitKeyer(defaultRegion: $0) },
             ids: RandomIDGenerator(),
             clock: SystemClock(),
             timeZone: .current,
             fallbackRegion: Locale.current.region?.identifier ?? "US",
-            output: .standard
+            output: .standard,
+            makeStateStore: openStateStore,
+            device: { try DeviceIdentityFile(directory: state).loadOrCreate() },
+            rootAccess: .bookmark(RootBookmark(directory: state)),
+            trigger: "CLI"
         )
     }
 }

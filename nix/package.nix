@@ -100,10 +100,19 @@ in
       runHook postBuild
     '';
 
+    # bin/contacts2md execs the app binary: the CLI must run as the app's
+    # code identity to use its Contacts grant and folder bookmark
+    # (architecture §15). It lives outside the bundle, so signing below does
+    # not cover (or break on) it.
     installPhase = ''
       runHook preInstall
-      mkdir -p $out/Applications
+      mkdir -p $out/Applications $out/bin
       cp -R $TMPDIR/dd/Build/Products/Release/${appName}.app $out/Applications/
+      cat > $out/bin/contacts2md <<EOF
+      #!/bin/sh
+      exec "$out/Applications/${appName}.app/Contents/MacOS/${appName}" "\$@"
+      EOF
+      chmod +x $out/bin/contacts2md
       runHook postInstall
     '';
 
@@ -141,6 +150,11 @@ in
           exit 1
         fi
       done
+      # The CLI wrapper must exec the signed app binary.
+      /usr/bin/grep -q "Contents/MacOS/${appName}" $out/bin/contacts2md || {
+        echo "error: bin/contacts2md does not exec the app binary" >&2
+        exit 1
+      }
       if /usr/bin/grep -q com.apple.developer.contacts.notes $TMPDIR/entitlements.plist; then
         echo "error: contacts.notes must not be in an ad-hoc build (needs a profile)" >&2
         exit 1

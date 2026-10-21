@@ -43,7 +43,12 @@ public enum MatchKeys {
 /// company would otherwise block each other's export.
 public enum Clustering {
     /// Clusters with more than one member, ordered by first member id.
-    public static func clusters(of contacts: [AppleContact], keyer: any PhoneKeyer) -> [DuplicateCluster] {
+    /// Pairs for which `areDistinct` is true are never joined directly (a
+    /// "distinct people" decision); they can still meet through a third member.
+    public static func clusters(
+        of contacts: [AppleContact], keyer: any PhoneKeyer,
+        areDistinct: (AppleContact, AppleContact) -> Bool = { _, _ in false }
+    ) -> [DuplicateCluster] {
         var parent = Array(contacts.indices)
         func find(_ index: Int) -> Int {
             var root = index
@@ -53,18 +58,18 @@ public enum Clustering {
             return root
         }
 
-        var owner: [String: Int] = [:]
+        var owners: [String: [Int]] = [:]
         var reasons: [Int: Set<String>] = [:]
         var pairReasons: [(member: Int, reason: String)] = []
         for (index, contact) in contacts.enumerated() {
             for (key, reason) in MatchKeys.keys(for: contact.contact, keyer: keyer) {
-                if let other = owner[key], other != index {
+                let others = owners[key] ?? []
+                if let other = others.first(where: { $0 != index && !areDistinct(contact, contacts[$0]) }) {
                     pairReasons.append((index, reason))
                     let (left, right) = (find(index), find(other))
                     if left != right { parent[max(left, right)] = min(left, right) }
-                } else {
-                    owner[key] = index
                 }
+                owners[key, default: []].append(index)
             }
         }
         for (member, reason) in pairReasons { reasons[find(member), default: []].insert(reason) }

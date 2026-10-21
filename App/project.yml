@@ -55,6 +55,10 @@ targets:
         product: SyncEngine
       - package: Contacts2MdSyncKit
         product: Contacts2MdCLI
+      - package: Contacts2MdSyncKit
+        product: ContactsAdapter
+      - package: Contacts2MdSyncKit
+        product: VaultIndex
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zmre.contacts2mdsync

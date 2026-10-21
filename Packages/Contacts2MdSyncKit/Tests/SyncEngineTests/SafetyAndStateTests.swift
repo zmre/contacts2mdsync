@@ -82,22 +82,25 @@ struct StampingTests {
 
 @Suite("State files")
 struct StateTests {
-    @Test("record map JSON round-trips and looks up by unified id or card id")
-    func recordMap() throws {
+    @Test("legacy records.json imports with trusted card ids; lookups ignore the unified id")
+    func legacyRecordMap() throws {
         let url = FileManager.default.temporaryDirectory.appending(path: "c2m-\(UUID().uuidString)/records.json")
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let store = JSONRecordMapStore(url: url)
-        #expect(try store.load() == RecordMap())
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let id = UUID()
-        var map = RecordMap()
-        map[id] = RecordBinding(unifiedID: "u1", cardIDs: ["u1", "g1"], path: "Inbox/A.md")
-        map.lastExport = Date(timeIntervalSince1970: 1_800_000_000)
-        try store.save(map)
-        let loaded = try store.load()
-        #expect(loaded == map)
-        #expect(loaded.recordID(unifiedID: "u1", cardIDs: []) == id)
-        #expect(loaded.recordID(unifiedID: "churned", cardIDs: ["g1"]) == id)
-        #expect(loaded.recordID(unifiedID: "x", cardIDs: ["y"]) == nil)
+        let json = """
+            {"lastExport":"2027-01-15T08:00:00Z","records":{"\(id.uuidString.lowercased())":\
+            {"cardIDs":["u1","g1"],"path":"Inbox/A.md","unifiedID":"u1"}}}
+            """
+        try Data(json.utf8).write(to: url)
+        let map = try #require(try LegacyRecordMapFile.read(url, now: Date()))
+        #expect(map[id]?.path == "Inbox/A.md")
+        #expect(map[id]?.cards.allSatisfy(\.isTrusted) == true)
+        #expect(map.lastExport == Date(timeIntervalSince1970: 1_800_000_000))
+        let lookup = RecordMap.Lookup(map)
+        #expect(lookup.hits(cardIDs: ["g1"]).map(\.recordID) == [id])
+        #expect(lookup.hits(cardIDs: ["u-synthesized"]).isEmpty)
+        #expect(try LegacyRecordMapFile.read(url.appending(path: "nope"), now: Date()) == nil)
     }
 
     @Test("config rendering preserves unknown keys and comments")

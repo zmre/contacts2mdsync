@@ -29,9 +29,12 @@ Packages/Contacts2MdSyncKit/
   MarkdownCodec/    frontmatter split, YAML parse (Yams), span-patching emitter, filenames
   ContactsShim/     Objective-C: @try/@catch wrappers (change history, notes probe, vCard) → NSError
   ContactsAdapter/  CNContactStore ⇄ ContactModel, snapshot, groups, stamp, history
-  VaultIndex/       VaultFS seam + LocalVaultFS, enumeration, id/title/alias/stem indexes
-  SyncEngine/       Planner, Clustering, Executor, RecordMap (M1); Merger, StateStore, Lease, DecisionLog (M2+)
-  Contacts2MdCLI/   CLI library: status / plan / export (M1), sync (M3) — see §15
+  VaultIndex/       VaultFS seam + LocalVaultFS, incremental scan (file cache), id/title/alias/stem indexes
+  SyncEngine/       Planner, Matching, Clustering, Executor, RecordMap, SyncStateStore, DecisionLog (M1–M2);
+                    Merger, Lease (M3+)
+  SyncStateDB/      SyncStateStore on SQLite (GRDB), M1 records.json import
+  Contacts2MdCLI/   CLI library + VaultSession (shared with the app): status / plan / export / review (M1–M2),
+                    sync (M3) — see §15
   contacts2md/      dev executable wrapping Contacts2MdCLI (the app binary runs the same CLI)
   SyncTestSupport/  FakeContactStore, InMemoryVault, fixtures (~60 contacts), golden-file helper
 ```
@@ -44,7 +47,7 @@ Third-party dependencies, pinned via `Package.resolved`:
 |-------------------------|--------------------------------------------|----------|
 | Yams                    | YAML parsing (we emit managed keys ourselves) | M0/M1 |
 | PhoneNumberKit (github.com/PhoneNumberKit/PhoneNumberKit, 5.x) | E.164 comparison keys (behind `PhoneKeyer`) | M1 |
-| GRDB                    | per-device SQLite state                    | M2 (M1 uses a JSON record map) |
+| GRDB (7.x)              | per-device SQLite state (`SyncStateDB`)    | M2 (M1 used a JSON record map) |
 | swift-argument-parser   | CLI                                        | M1       |
 
 PhoneNumberKit moved from `marmelroy/PhoneNumberKit` (4.x, now deprecated) to the `PhoneNumberKit` org (5.x). The keyer always passes an explicit region, because PhoneNumberKit's default region lookup reads `CNContactsUserDefaults`.
@@ -70,11 +73,16 @@ protocol VaultFS: Sendable {                           // VaultIndex; rooted at 
                                                        // .absent | .unchanged(stamp) (CAS on sha256) | .any
   func trash(_ path: String) throws
   func exists(_ path: String) -> Bool
+  func list(_ directory: String) throws -> [String]    // direct children incl. hidden (decision logs)
+  func requestDownload(_ path: String)                 // iCloud: start downloading a dataless file
   // unresolvedConflictVersions(_:) lands with NSFileVersion handling (M6)
 }
 
-protocol RecordMapStore { … }     // M1: JSON file + in-memory; becomes SyncStateStore (GRDB) in M2
-protocol SyncClock, IDGenerator   // (not `Clock`: that name is taken by the stdlib); DeviceIdentity in M6
+protocol RecordMapStore { … }     // load/save the record map (the executor's seam)
+protocol SyncStateStore: RecordMapStore { … }  // M2: + file cache, pending, decision mirror, groups,
+                                               // reported problems, sessions, metadata; GRDB + in-memory
+protocol SyncClock, IDGenerator   // (not `Clock`: that name is taken by the stdlib)
+struct DeviceIdentity             // M2: stable id + computer name (`<state>/device.json`)
 ```
 
 Paths in `VaultFS` are root-relative strings (`Inbox/Jane Doe.md`), never URLs: identity is never a path, and relative strings make fakes and goldens trivial.
@@ -141,7 +149,11 @@ Observed rewrites behind these keys ([spike S5](spikes.md#s5-normalization-catal
 
 **Why decisions are append-only per device.** Each `decisions.jsonl` has one writer, so iCloud never produces conflict copies. Every device reads the union. A follower device can queue intents ("these two are distinct people", "delete confirmed", "opt this file in") for the leader to execute.
 
-Device-state tables: `records` (uuid, unified CN id, underlying card ids + containers, last path, `base_json`, per-field base hashes), `file_cache` (path, mtime, size, sha, uuid), `history_token`, `groups` (CN id ↔ name ↔ tag), `pending` (conflicts, delete queues), `unapplyable`, `sessions`.
+Device-state tables (M2 schema `v1`, `SyncStateDB`): `records` (id, unified id *cache*, last path, `base_json`), `record_cards` (record id, card id, container, account kind, first seen, `stamp_seen`), `field_hashes` (record id, field, sha256 of the base keys), `file_cache` (path, mtime, size, sha256, kind contact/other/problem, sync id, title, aliases, problem, contact-related flag), `groups` (CN group id, container, name, tag), `pending` (review item id, kind, JSON, first seen), `decisions` (mirror of the vault logs), `reported_problems` (sha256 of non-contact files with invalid YAML already reported), `unapplyable` (M3, empty), `sessions` (one JSON row per run, last 500), `meta` (`last_export`, `pending_computed_at`; `history_token` from M5).
+
+`base_json` is the Apple side at the last export as comparison keys per markdown field (`emails`, `job_title`, …, plus `name`: the person-name and title keys). M2 already uses it in the one-way export (markdown-schema §4a) and to corroborate untrusted card ids; M3 merges against it.
+
+The vault-side decision log is `.c2mdsync/devices/<device-id>/decisions.jsonl`, one JSON object per line: `{"id", "kind", "at", "device_id", "device_name", "contacts": [{"card_ids", "title"}], "path", "sync_id", "item"}`. Kinds: `distinct-people` (contacts pairwise distinct; with `path`: the contact is not the person in that note), `sync-only` (keep `contacts[0]`, exclude the rest), `ignore-candidate` (`path` or `sync_id`), `adopt` (`path` → `contacts[0]`), `dup-id-keep` (`path` keeps `sync_id`). Contacts are referenced by underlying card ids, never the unified id. Every device reads the union; unknown kinds are ignored, unreadable lines reported as warnings.
 
 ## 5. Sync cycle
 
@@ -236,6 +248,21 @@ Write targets:
 
 Always a dry-run plan first: N files to create, M existing notes to adopt, K clusters to review, J ambiguous matches. Nothing is written until the user clicks **Run First Sync**. A vCard backup of all contacts (`CNContactVCardSerialization`) is written to Application Support before every session that writes to Apple; the last 10 are kept.
 
+### What M2 implements
+
+Adds to the M1 export below:
+
+1. **Identity cascade** (`ExportPlanner` + `Matching`): stamp on any card → cached underlying card ids → matching against unbound notes. Several different stamps on one unified contact → `merge-records` review (`WARNING duplicate`), both notes left alone. Cached ids: a record is claimed by the contact sharing its strongest card (trusted beats untrusted, iCloud beats others; a tie leaves both unbound for the cascade and clustering). Untrusted ids (Google cards never seen with their stamp) are kept as *provisional* hints and bind only when the record's base (else its note) shares a name or strong key with the contact. The unified id is stored but never used for identity.
+2. **Relocation**: a record whose cards all vanished (Google churn, lost ids) leaves an *orphaned* note; an unbound contact matching it at ≥ 0.9 with no rival is rebound to it silently (`relinked`). Never treated as a delete.
+3. **Adoption**: unbound contacts are scored against hand-written contact notes (no `c2mdsync.id`) and orphaned notes. Name keys on the note side are the title, aliases and person name (hand-written notes often have only a title); a bare nickname never counts. ≥ 0.9 with exactly one candidate each way is adopted automatically on the device's first import for the vault (`--auto-adopt first-import|always|never`); any other match — including name-only (0.3) — blocks creation and becomes a `possible match` review item. An adopted note keeps its path, title, body, unknown keys and markdown-only values, and gains a `c2mdsync.id`.
+4. **Clusters** now run on card-precedence values and skip pairs declared distinct; members excluded by a sync-only decision are left out (no review, not exported). A cluster with every member decided is not reported again.
+5. **Decisions** (above) are honoured by the planner and recorded with `contacts2md review decide` / `adopt-all` (§15).
+6. **Vault index**: incremental scan with the file cache (unchanged non-contact and problem files are not re-read; contact notes always are), duplicate ids (paused unless a `dup-id-keep` decision picks the copy), mbr name resolution (title → alias → stem), duplicate titles warned across all contact notes, `scope.markdown.exclude_paths` globs skipped. Dataless files (iCloud `ubiquitousItemDownloadingStatus`, the `SF_DATALESS` flag, or legacy `.Name.md.icloud` placeholders) are never read: known ones keep their cached facts (a bound note that is dataless is skipped, not missing); unknown ones are asked to download and hold back *new* notes for that run (`WARNING icloud`, override `--allow-undownloaded`). A record whose note is not found while unknown placeholders exist is skipped, not reported missing. Notes written by an export are added to the file cache immediately.
+7. **Invalid YAML**: contact-looking files (`type: person|organization` or `c2mdsync:` in the text) are review items; other notes are reported once per content hash (`WARNING yaml`) and never affect the exit code.
+8. **Moves**: a moved note is updated in place; when only its relative `image:` changed, the update is a `fixup` (not a content change); the record's path is updated.
+9. **Apple values by card precedence** (`AppleContact.cardMergedContact`): the adapter reads every underlying card's fields (no images) and the engine applies the precedence in *Stamping and write targets*; with any card's values unknown it falls back to the unified view.
+10. **Backups**: every note about to be rewritten is copied to `<state>/<vault_id>/backups/notes-<timestamp>/` first (last 10 kept); vCard backups moved to the same folder.
+
 ### What M1 implements (one-way export)
 
 `ExportPlanner` → `ExportPlan` → `ExportExecutor` (SyncEngine). The plan holds final, validated bytes; executing it only writes.
@@ -248,7 +275,7 @@ Always a dry-run plan first: N files to create, M existing notes to adopt, K clu
 6. **Executor**: images first, then config, then notes; every note write is compare-and-swap (`.absent` for new, `.unchanged(sha)` for updates), so a note edited between plan and execute is reported, not overwritten. Bindings are saved only for notes that were written or already identical.
 7. **Stamping** (the only Apple write in M1) requires a `BackupReceipt`, which only `VCardBackup.backup` can create, and is off unless the user passes `--stamp`.
 
-Per-device state for M1 is `~/Library/Application Support/Contacts2MdSync/<vault_id>/records.json` (`RecordMap`: record id → unified id, card ids, last path, plus `lastExport`). GRDB replaces it in M2 (the `RecordMapStore` protocol is the seam); keeping JSON in M1 avoided a schema we would immediately migrate.
+Per-device state for M1 was `~/Library/Application Support/Contacts2MdSync/<vault_id>/records.json`. M2 replaces it with `state.sqlite` in the same folder; on first open an existing `records.json` is imported (cards marked trusted, account kinds refreshed by the next export) and renamed `records.json.imported`.
 
 ## 7. Three-way merge
 
@@ -408,8 +435,30 @@ common: --quiet  --verbose
 - `--stamp` requires `--yes`; it takes a vCard backup to `<state>/backups/` first and refuses to stamp if that fails (nothing is written at all in that case).
 - `--default-folder` / `--region` are saved into `.c2mdsync/config.yaml`.
 - Plan lines: `create md`, `update md <path>  (changed keys)`, `write image`, `write config`, `stamp apple`; executed lines: `created`, `updated`, `wrote`, `backup`, `stamped`. Then `WARNING …` lines, the `summary` line, and for dry runs a `note` line.
-- `--json` is not implemented yet (M3, with `sync`); the header has no `device=` until device identity lands (M6).
+- `--json` is not implemented yet (M3, with `sync`).
 - Usage errors exit 64 (ArgumentParser's `EX_USAGE`), in addition to the table below.
+
+**M2 as implemented** (app binary also dispatches on `review`):
+
+```
+contacts2md status [--root <dir>]
+contacts2md plan   [--root <dir>] [--default-folder F] [--region R] [--restore-missing]
+                   [--auto-adopt first-import|always|never] [--allow-undownloaded]
+contacts2md export [same as plan] [--yes [--backup] [--stamp]]
+contacts2md review [list] [--root <dir>]
+contacts2md review decide <item-id> <choice> [--root <dir>]
+contacts2md review adopt-all [--min-confidence 0.3] [--root <dir>]
+common: --quiet  --verbose
+```
+
+- `--root` is optional: without it the folder chosen in the app is used (an app-scope security-scoped bookmark in `<state>/root.bookmark`; the CLI resolves it and calls `startAccessingSecurityScopedResource`). With `--root` inside that folder the bookmark is still used for sandbox access. No bookmark and no `--root`, or a bookmark that no longer resolves → exit 3 with a message to open the app. Never prompts.
+- The header is `contacts2md <command>  <time>  device=<computer name>  root=<path>`.
+- `plan` and `export` save the pending review queue to the device state; `review list` reads it (no Contacts access needed) and prints `item <id>  <summary>` plus its choices. Item ids are stable (`dup-…`, `match-…`, `copy-…`, `merge-…`, `missing-…`, `invalid-…`, `icloud-…`). `review decide` appends a decision to this device's log; it takes effect on the next `plan`/`export`. Choices: duplicates `distinct` | `only:N`; possible matches `adopt` | `distinct` | `ignore`; copied notes `keep:N`; merge-records, missing and invalid items have no CLI choice. `review adopt-all` adopts every pending match whose note is claimed by one contact.
+- `export --yes` copies every note it will rewrite to `<state>/<vault_id>/backups/notes-<time>/` first; `--backup` also saves a vCard backup (always done before `--stamp`; the app's first export always does it).
+- New output lines: `adopt md <path>  ← "<title>" adopted (reasons)` / `adopted`, `fixup md <path>  (image path after move)` / `fixed`, `backup md <folder>`, `WARNING match|duplicate|copied|missing|invalid|icloud|yaml|decision …  [<item-id>]`, and `adopted N` in the summary.
+- Exit 1 only for contact-related review items or skipped contacts that need a decision; non-contact notes with invalid YAML and contacts excluded by decisions do not count.
+- `status` adds `review <n> pending (as of …)` and Apple `linked=` / `cards=` counts.
+- `bin/contacts2md` in the nix package (and `just app-cli`) execs the app binary.
 
 ### What runs vs. what is skipped
 

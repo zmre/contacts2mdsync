@@ -106,19 +106,29 @@ public struct AppleCard: Hashable, Sendable {
     public var accountKind: AccountKind
     /// `x-c2mdsync:<uuid>` stamp found on this card, if any.
     public var stampID: UUID?
+    /// This card's own field values (no image), when the store read them.
+    /// `nil` means "unknown": the engine then uses the unified view
+    /// (`AppleContact.contact`). See `AppleContact.cardMergedContact`.
+    public var values: CanonicalContact?
 
     /// Creates a card.
-    public init(id: String, containerID: String, accountKind: AccountKind, stampID: UUID? = nil) {
+    public init(
+        id: String, containerID: String, accountKind: AccountKind, stampID: UUID? = nil,
+        values: CanonicalContact? = nil
+    ) {
         self.id = id
         self.containerID = containerID
         self.accountKind = accountKind
         self.stampID = stampID
+        self.values = values
     }
 }
 
 /// One unified Apple contact as the engine sees it.
 public struct AppleContact: Hashable, Sendable {
-    /// Unified contact identifier (one of its cards' ids; may churn).
+    /// Unified contact identifier. For a single card it is the card's id; for
+    /// linked cards Contacts synthesizes an id that is neither card's and is
+    /// volatile (spike S4/S9). Never use it as identity: cache only.
     public var unifiedID: String
     /// Underlying cards; at least one.
     public var cards: [AppleCard]
@@ -129,6 +139,10 @@ public struct AppleContact: Hashable, Sendable {
     public var contact: CanonicalContact
     /// Original image bytes (`imageData`), if any.
     public var imageData: Data?
+    /// `true` when Contacts has a thumbnail but no original image data (seen
+    /// after an iCloud round trip, spike S5). The image is then *unknown*:
+    /// never treated as removed, never replaced by the thumbnail.
+    public var imageUnavailable: Bool
     /// Groups any underlying card belongs to.
     public var groupIDs: [String]
 
@@ -138,14 +152,19 @@ public struct AppleContact: Hashable, Sendable {
         cards: [AppleCard],
         contact: CanonicalContact,
         imageData: Data? = nil,
+        imageUnavailable: Bool = false,
         groupIDs: [String] = []
     ) {
         self.unifiedID = unifiedID
         self.cards = cards
         self.contact = contact
         self.imageData = imageData
+        self.imageUnavailable = imageUnavailable
         self.groupIDs = groupIDs
     }
+
+    /// Underlying card ids, in card order.
+    public var cardIDs: [String] { cards.map(\.id) }
 
     /// Distinct stamp ids across cards, in card order.
     public var stampIDs: [UUID] {

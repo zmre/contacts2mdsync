@@ -89,16 +89,25 @@ struct IdempotencyTests {
         #expect(harness.vault.writes.isEmpty)
     }
 
-    @Test("a lost record map without stamps never duplicates: existing notes block creation")
+    @Test("a lost record map without stamps never duplicates: notes are relinked or proposed")
     func lostMapCreateGate() throws {
         let harness = ExportHarness()
         try harness.export()
         try harness.records.save(RecordMap())
         let plan = try harness.plan()
-        let reviewed = plan.reviews.filter { if case .possibleMatch = $0 { true } else { false } }
-        // Every previously exported contact (all but Stella, who is stamped) matches its old note.
+        let proposed = plan.reviews.compactMap { review -> String? in
+            if case .possibleMatch(_, let path, _, _) = review { return path }
+            return nil
+        }
+        // Every previously exported contact (all but Stella, who is stamped)
+        // is either matched back to its old note (email/phone + name, first
+        // import → auto) or proposed for review; nothing is created.
         #expect(plan.creates.isEmpty, "\(plan.creates.map(\.path))")
-        #expect(reviewed.count == harness.files.keys.filter { $0.hasPrefix("Inbox/") }.count - 1)
+        let notes = harness.files.keys.filter { $0.hasPrefix("Inbox/") }
+        let bound = Set(plan.bindings.values.map(\.path))
+        #expect(notes.allSatisfy { bound.contains($0) || proposed.contains($0) })
+        #expect(!proposed.isEmpty && !bound.isEmpty)
+        #expect(plan.updates.isEmpty)  // same ids, same content: nothing to rewrite
     }
 
     @Test("a contact already stamped by another vault keeps its id here")
@@ -211,8 +220,9 @@ struct DuplicateTests {
         #expect(!plan.creates.contains { $0.title == "Gail Both" })
         #expect(
             plan.reviews.contains {
-                if case .possibleMatch(let title, let path, let reason) = $0 {
-                    title == "Gail Both" && path == "People/Gail.md" && reason == "same email"
+                if case .possibleMatch(let contact, let path, let confidence, let reasons) = $0 {
+                    contact.title == "Gail Both" && path == "People/Gail.md" && reasons == ["same email"]
+                        && confidence == 0.7
                 } else {
                     false
                 }

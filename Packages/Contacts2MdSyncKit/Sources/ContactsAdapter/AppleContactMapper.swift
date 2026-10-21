@@ -21,18 +21,20 @@ public enum AppleContactMapper {
             CNContactEmailAddressesKey, CNContactPhoneNumbersKey, CNContactUrlAddressesKey,
             CNContactSocialProfilesKey, CNContactInstantMessageAddressesKey, CNContactPostalAddressesKey,
             CNContactBirthdayKey, CNContactDatesKey, CNContactRelationsKey,
-            CNContactImageDataKey, CNContactImageDataAvailableKey,
+            CNContactImageDataKey, CNContactImageDataAvailableKey, CNContactThumbnailImageDataKey,
         ]
         if includeNote { keys.append(CNContactNoteKey) }
         return keys.map { $0 as NSString }
     }
 
-    /// Keys fetched for underlying cards (identity, stamp, matching hints).
-    public static var cardKeys: [any CNKeyDescriptor] {
-        [
-            CNContactIdentifierKey, CNContactUrlAddressesKey, CNContactGivenNameKey, CNContactFamilyNameKey,
-            CNContactOrganizationNameKey,
-        ].map { $0 as NSString }
+    /// Keys fetched for underlying cards: every field except images, so the
+    /// engine can compute values by card precedence (architecture §6) instead
+    /// of trusting the unified view's blend.
+    public static func cardKeys(includeNote: Bool) -> [any CNKeyDescriptor] {
+        let imageKeys: Set<String> = [
+            CNContactImageDataKey, CNContactImageDataAvailableKey, CNContactThumbnailImageDataKey,
+        ]
+        return keysToFetch(includeNote: includeNote).filter { !imageKeys.contains(($0 as? String) ?? "") }
     }
 
     /// The canonical contact for `contact`. `title` is left empty (it is
@@ -93,6 +95,15 @@ public enum AppleContactMapper {
         return contact.urlAddresses.lazy.compactMap { SyncStamp.id(fromURL: $0.value as String) }.first
     }
 
+    /// `true` when Contacts reports no original image data but has a
+    /// thumbnail (seen after an iCloud round trip, spike S5): image unknown.
+    public static func imageUnavailable(of contact: CNContact) -> Bool {
+        guard contact.isKeyAvailable(CNContactImageDataAvailableKey), !contact.imageDataAvailable,
+            contact.isKeyAvailable(CNContactThumbnailImageDataKey)
+        else { return false }
+        return contact.thumbnailImageData?.isEmpty == false
+    }
+
     /// Original image bytes, when fetched and present.
     public static func imageData(of contact: CNContact) -> Data? {
         guard contact.isKeyAvailable(CNContactImageDataAvailableKey), contact.imageDataAvailable,
@@ -114,8 +125,34 @@ public enum AppleContactMapper {
 
     private static func social(_ entry: CNLabeledValue<CNSocialProfile>) -> Labeled<SocialHandle>? {
         let profile = entry.value
-        guard let value = clean(profile.urlString) ?? clean(profile.username) else { return nil }
+        let username = clean(profile.username)
+        var url = clean(profile.urlString)
+        if let candidate = url, let username,
+            isSynthesizedProfileURL(candidate, service: profile.service, username: username)
+        {
+            url = nil
+        }
+        guard let value = url ?? username else { return nil }
         return Labeled(LabelMap.serviceLabel(service: profile.service, label: entry.label), SocialHandle(value))
+    }
+
+    /// Contacts fills in `urlString` for known services on save (spike S5:
+    /// Twitter `zzspike` → `http://twitter.com/zzspike`). Such a URL is not
+    /// exported, so a bare handle stays a bare handle (markdown-schema §2).
+    static func isSynthesizedProfileURL(_ url: String, service: String?, username: String) -> Bool {
+        let templates: [String: [String]] = [
+            "twitter": ["http://twitter.com/%@", "http://www.twitter.com/%@", "http://x.com/%@"],
+            "facebook": ["http://www.facebook.com/%@", "http://facebook.com/%@"],
+            "flickr": ["http://www.flickr.com/photos/%@"],
+            "linkedin": ["http://www.linkedin.com/in/%@"],
+            "myspace": ["http://www.myspace.com/%@"],
+            "sinaweibo": ["http://weibo.com/n/%@"],
+        ]
+        let key = (service ?? "").lowercased().replacingOccurrences(of: " ", with: "")
+        let lowered = url.lowercased()
+        return (templates[key] ?? []).contains {
+            $0.replacingOccurrences(of: "%@", with: username.lowercased()) == lowered
+        }
     }
 
     private static func im(_ entry: CNLabeledValue<CNInstantMessageAddress>) -> Labeled<IMHandle>? {

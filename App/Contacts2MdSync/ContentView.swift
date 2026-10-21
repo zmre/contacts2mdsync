@@ -51,7 +51,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
 
 struct ContentView: View {
     @State private var selection: SidebarItem? = .overview
-    @State private var access = ContactsAccessModel()
+    @State private var setup = SetupModel()
 
     var body: some View {
         NavigationSplitView {
@@ -62,7 +62,7 @@ struct ContentView: View {
         } detail: {
             switch selection ?? .overview {
             case .overview:
-                OverviewView(access: access)
+                SetupView(model: setup)
             case let item:
                 ContentUnavailableView(
                     item.title,

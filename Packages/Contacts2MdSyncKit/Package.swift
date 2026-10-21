@@ -6,6 +6,7 @@
 // Dependency graph (arrows point at dependencies):
 //
 //   contacts2md (exe) -> Contacts2MdCLI -> SyncEngine      -> VaultIndex -> MarkdownCodec -> ContactModel, Yams
+//                                       -> SyncStateDB     -> SyncEngine, GRDB
 //                                       -> ContactsAdapter -> ContactModel, ContactsShim
 //                                       -> PhoneNumberKeys -> ContactModel, PhoneNumberKit
 //                                       -> ArgumentParser
@@ -15,8 +16,8 @@
 // through the `ContactStore` protocol (ContactModel), implemented by
 // ContactsAdapter for real and by SyncTestSupport's FakeContactStore in tests.
 //
-// GRDB (per-device sync state) is deferred to M2; M1 keeps its small record
-// map in a JSON file (see SyncEngine/RecordMapStore.swift).
+// Per-device sync state (architecture §4) is defined by the `SyncStateStore`
+// protocol in SyncEngine; SyncStateDB implements it on SQLite via GRDB.
 
 import PackageDescription
 
@@ -39,6 +40,7 @@ let package = Package(
         .library(name: "ContactsAdapter", targets: ["ContactsAdapter"]),
         .library(name: "VaultIndex", targets: ["VaultIndex"]),
         .library(name: "SyncEngine", targets: ["SyncEngine"]),
+        .library(name: "SyncStateDB", targets: ["SyncStateDB"]),
         .library(name: "Contacts2MdCLI", targets: ["Contacts2MdCLI"]),
         .library(name: "SyncTestSupport", targets: ["SyncTestSupport"]),
         .executable(name: "contacts2md", targets: ["contacts2md"]),
@@ -47,6 +49,7 @@ let package = Package(
         .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.0"),
         .package(url: "https://github.com/PhoneNumberKit/PhoneNumberKit.git", from: "5.0.12"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.0"),
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.11.1"),
     ],
     targets: [
         .target(
@@ -93,12 +96,21 @@ let package = Package(
             swiftSettings: swiftSettings
         ),
         .target(
+            name: "SyncStateDB",
+            dependencies: [
+                "SyncEngine",
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            swiftSettings: swiftSettings
+        ),
+        .target(
             name: "Contacts2MdCLI",
             dependencies: [
                 "ContactModel",
                 "ContactsAdapter",
                 "PhoneNumberKeys",
                 "SyncEngine",
+                "SyncStateDB",
                 "VaultIndex",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
@@ -138,6 +150,11 @@ let package = Package(
                 "SyncEngine", "SyncTestSupport", "ContactModel", "MarkdownCodec", "VaultIndex", "PhoneNumberKeys",
             ],
             exclude: ["Fixtures"],
+            swiftSettings: swiftSettings
+        ),
+        .testTarget(
+            name: "SyncStateDBTests",
+            dependencies: ["SyncStateDB", "SyncEngine", "ContactModel", "VaultIndex"],
             swiftSettings: swiftSettings
         ),
         .testTarget(

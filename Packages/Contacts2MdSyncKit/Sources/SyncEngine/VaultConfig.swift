@@ -34,6 +34,9 @@ public struct VaultConfig: Hashable, Sendable {
     public var defaultRegion: String?
     /// Apple group → managed tag, in file order.
     public var groups: [GroupTag]
+    /// `scope.markdown.exclude_paths` globs: notes there are never scanned.
+    /// Read-only here (the `scope:` block is preserved verbatim).
+    public var excludePaths: [String] = []
 
     /// Creates a configuration.
     public init(
@@ -91,6 +94,12 @@ public struct VaultConfig: Hashable, Sendable {
         config.defaultFolder = value("default_folder") ?? config.defaultFolder
         config.imagesFolder = value("images_folder") ?? config.imagesFolder
         config.defaultRegion = value("default_region")
+        if case .mapping(let scope)? = fields.first(where: { $0.key == "scope" })?.value,
+            case .mapping(let markdown)? = scope.first(where: { $0.key == "markdown" })?.value,
+            case .sequence(let paths)? = markdown.first(where: { $0.key == "exclude_paths" })?.value
+        {
+            config.excludePaths = paths.compactMap(\.scalarText).filter { !$0.isEmpty }
+        }
         if case .mapping(let groups)? = fields.first(where: { $0.key == "groups" })?.value {
             config.groups = groups.compactMap { entry in
                 entry.value.scalarText.map { GroupTag(group: entry.key, tag: $0) }

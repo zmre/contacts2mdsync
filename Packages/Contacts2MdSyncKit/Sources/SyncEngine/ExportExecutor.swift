@@ -8,6 +8,10 @@ public struct ExportResult: Sendable {
     public var updated: [FileChange] = []
     public var imagesWritten: [ImageWrite] = []
     public var configWritten = false
+    /// Folder holding copies of every existing note before it was rewritten.
+    public var noteBackup: URL?
+    /// File-cache entries for the notes written (merge into the scan's cache).
+    public var writtenCache: [String: FileCacheEntry] = [:]
     /// Files that could not be written (changed underneath us, I/O errors).
     public var failures: [(path: String, message: String)] = []
 
@@ -26,19 +30,29 @@ public struct ExportExecutor: Sendable {
     public let fs: any VaultFS
     public let records: any RecordMapStore
     public let clock: any SyncClock
+    /// When set, existing notes are copied here before being rewritten.
+    public let noteBackups: NoteBackup?
 
     /// Creates an executor.
-    public init(fs: any VaultFS, records: any RecordMapStore, clock: any SyncClock = SystemClock()) {
+    public init(
+        fs: any VaultFS, records: any RecordMapStore, clock: any SyncClock = SystemClock(),
+        noteBackups: NoteBackup? = nil
+    ) {
         self.fs = fs
         self.records = records
         self.clock = clock
+        self.noteBackups = noteBackups
     }
 
     /// Executes `plan`. Never throws for per-file problems (see
-    /// `ExportResult.failures`); throws only if the record map cannot be saved.
+    /// `ExportResult.failures`); throws only if the note backup or the
+    /// record map cannot be saved (a failed backup writes nothing).
     public func execute(_ plan: ExportPlan) throws -> ExportResult {
         var result = ExportResult()
         var failedRecords = Set<UUID>()
+        if let noteBackups, !plan.updates.isEmpty {
+            result.noteBackup = try noteBackups.backup(plan.updates.map(\.path), from: fs)
+        }
 
         for image in plan.images {
             do {
@@ -58,7 +72,9 @@ public struct ExportExecutor: Sendable {
         }
         for change in plan.creates + plan.updates {
             do {
-                _ = try fs.write(change.data, to: change.path, expecting: change.expecting)
+                let stamp = try fs.write(change.data, to: change.path, expecting: change.expecting)
+                result.writtenCache[change.path] = VaultIndex.cacheEntry(
+                    path: change.path, data: change.data, stamp: stamp)
                 if case .absent = change.expecting {
                     result.created.append(change)
                 } else {
@@ -75,6 +91,56 @@ public struct ExportExecutor: Sendable {
         map.lastExport = clock.now
         try records.save(map)
         return result
+    }
+}
+
+extension ExportResult {
+    /// `cache` (from the scan) with the written notes' entries.
+    public func fileCache(updating cache: [String: FileCacheEntry]) -> [String: FileCacheEntry] {
+        cache.merging(writtenCache) { _, written in written }
+    }
+}
+
+/// Copies of notes about to be rewritten (adoptions and updates), so a first
+/// export over hand-written notes can be undone by hand:
+/// `<directory>/notes-<timestamp>/<root-relative path>`, newest `keep` kept.
+public struct NoteBackup: Sendable {
+    public let directory: URL
+    public let keep: Int
+    public let clock: any SyncClock
+
+    /// Creates a backup writer (default: keep the last 10).
+    public init(directory: URL, keep: Int = 10, clock: any SyncClock = SystemClock()) {
+        self.directory = directory
+        self.keep = keep
+        self.clock = clock
+    }
+
+    /// Copies `paths` from `fs`; returns the backup folder.
+    public func backup(_ paths: [String], from fs: any VaultFS) throws -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.dateFormat = "yyyyMMdd'T'HHmmss'Z'"
+        var folder = directory.appending(
+            path: "notes-\(formatter.string(from: clock.now))", directoryHint: .isDirectory)
+        var suffix = 2
+        while FileManager.default.fileExists(atPath: folder.path(percentEncoded: false)) {
+            folder = directory.appending(path: "notes-\(formatter.string(from: clock.now))-\(suffix)")
+            suffix += 1
+        }
+        for path in paths {
+            let (data, _) = try fs.read(path)
+            let url = folder.appending(path: path)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: url, options: .withoutOverwriting)
+        }
+        let old = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("notes-") }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        for stale in old.dropFirst(keep) { try FileManager.default.removeItem(at: stale) }
+        return folder
     }
 }
 

@@ -169,6 +169,44 @@ struct MapperTests {
         #expect(AppleContactMapper.imageData(of: contact) == Data([0xFF, 0xD8, 0xFF]))
     }
 
+    @Test("a profile URL Contacts synthesized from the username is not exported (spike S5)")
+    func synthesizedSocialURL() {
+        let contact = CNMutableContact()
+        contact.socialProfiles = [
+            labeled(
+                nil,
+                CNSocialProfile(
+                    urlString: "http://twitter.com/zzspike", username: "zzspike", userIdentifier: nil,
+                    service: CNSocialProfileServiceTwitter)),
+            labeled(
+                nil,
+                CNSocialProfile(
+                    urlString: "https://twitter.com/zzspike/likes", username: "zzspike", userIdentifier: nil,
+                    service: CNSocialProfileServiceTwitter)),
+        ]
+        let mapped = AppleContactMapper.canonical(from: contact)
+        #expect(
+            mapped.social == [
+                Labeled("twitter", SocialHandle("zzspike")),
+                Labeled("twitter", SocialHandle("https://twitter.com/zzspike/likes")),
+            ])
+        #expect(
+            AppleContactMapper.isSynthesizedProfileURL(
+                "HTTP://www.facebook.com/Jo", service: "Facebook", username: "jo"))
+        #expect(
+            !AppleContactMapper.isSynthesizedProfileURL("http://twitter.com/jo", service: "Facebook", username: "jo"))
+    }
+
+    @Test("card keys are the full key set without image keys")
+    func cardKeys() {
+        let keys = AppleContactMapper.cardKeys(includeNote: false).compactMap { $0 as? String }
+        #expect(keys.contains(CNContactJobTitleKey) && keys.contains(CNContactUrlAddressesKey))
+        #expect(!keys.contains(CNContactImageDataKey) && !keys.contains(CNContactThumbnailImageDataKey))
+        #expect(
+            AppleContactMapper.keysToFetch(includeNote: false).compactMap { $0 as? String }
+                .contains(CNContactThumbnailImageDataKey))
+    }
+
     @Test("the fetch key set includes the note key only when entitled")
     func keys() {
         let withNote = AppleContactMapper.keysToFetch(includeNote: true).compactMap { $0 as? String }

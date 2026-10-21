@@ -19,6 +19,17 @@ public protocol VaultFS: Sendable {
     func trash(_ path: String) throws
     /// `true` when a file exists at `path`.
     func exists(_ path: String) -> Bool
+    /// Names of the entries directly inside `directory` (root-relative, `""`
+    /// for the root), including hidden ones, sorted. Empty when it does not exist.
+    func list(_ directory: String) throws -> [String]
+    /// Asks iCloud Drive to download a dataless file in the background.
+    /// Never blocks; a no-op for file systems without placeholders.
+    func requestDownload(_ path: String)
+}
+
+extension VaultFS {
+    /// Default: nothing to download.
+    public func requestDownload(_ path: String) {}
 }
 
 /// One enumerated file.

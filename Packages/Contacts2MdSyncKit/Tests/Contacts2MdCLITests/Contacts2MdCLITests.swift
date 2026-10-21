@@ -29,11 +29,12 @@ final class CLIHarness: Sendable {
 
     deinit { try? FileManager.default.removeItem(at: stateDirectory) }
 
-    func run(_ arguments: [String], isDirectory: Bool = true) -> CLIRun {
-        let output = CLIOutput.capturing()
+    func environment(
+        output: CLIOutput = .capturing(), isDirectory: Bool = true, rootAccess: RootAccess = .explicitOnly
+    ) -> CLIEnvironment {
         let store = self.store
         let vault = self.vault
-        let environment = CLIEnvironment(
+        return CLIEnvironment(
             makeStore: { store },
             makeVault: { _ in vault },
             isDirectory: { _ in isDirectory },
@@ -43,16 +44,27 @@ final class CLIHarness: Sendable {
             clock: FixedClock(Date(timeIntervalSince1970: 1_800_000_000)),
             timeZone: TimeZone(identifier: "UTC") ?? .current,
             fallbackRegion: "US",
-            output: output
+            output: output,
+            rootAccess: rootAccess
         )
+    }
+
+    func run(_ arguments: [String], isDirectory: Bool = true, rootAccess: RootAccess = .explicitOnly) -> CLIRun {
+        let output = CLIOutput.capturing()
+        let environment = environment(output: output, isDirectory: isDirectory, rootAccess: rootAccess)
         let code = Contacts2MdCLI.run(arguments, environment: environment)
         return CLIRun(code: code, out: output.stdout, err: output.stderr)
     }
 
+    /// vCard backups in any vault's state folder.
     var backups: [String] {
-        (try? FileManager.default.contentsOfDirectory(
-            atPath: stateDirectory.appending(path: "backups").path(percentEncoded: false)))
-            ?? []
+        let vaults =
+            (try? FileManager.default.contentsOfDirectory(atPath: stateDirectory.path(percentEncoded: false))) ?? []
+        return vaults.flatMap { vault in
+            let folder = stateDirectory.appending(path: vault).appending(path: "backups")
+            return ((try? FileManager.default.contentsOfDirectory(atPath: folder.path(percentEncoded: false))) ?? [])
+                .filter { $0.hasSuffix(".vcf") }
+        }
     }
 }
 
@@ -66,6 +78,7 @@ struct CLITests {
         #expect(!Contacts2MdCLI.isCLIInvocation([]))
         #expect(!Contacts2MdCLI.isCLIInvocation(["-NSDocumentRevisionsDebugMode", "YES"]))
         #expect(!Contacts2MdCLI.isCLIInvocation(["sync"]))  // M3
+        #expect(Contacts2MdCLI.isCLIInvocation(["review", "list"]))
     }
 
     @Test("plan prints the dry run with stable prefixes and writes nothing")
@@ -76,13 +89,16 @@ struct CLITests {
         #expect(code == 1)  // the Chris Martin duplicate needs review
         #expect(err.isEmpty)
         let lines = out.split(separator: "\n").map(String.init)
-        #expect(lines.first == "contacts2md plan  2027-01-15T08:00:00Z  root=/vault")
+        #expect(lines.first == "contacts2md plan  2027-01-15T08:00:00Z  device=Test Mac  root=/vault")
         #expect(lines.contains("create   md     Inbox/Jane Doe.md"))
         #expect(lines.contains("write    image  _images/00000000-0000-4000-8000-000000000002.jpg"))
         #expect(lines.contains("write    config .c2mdsync/config.yaml"))
         #expect(
             lines.contains { $0.hasPrefix("WARNING  duplicate  \"Chris Martin\" (iCloud), \"Chris Martin\" (Google)") })
-        #expect(lines.contains { $0.hasPrefix("summary  apple c/u/d 0/0/0  md c/u/d 59/0/0  unchanged 0  skipped 1") })
+        #expect(
+            lines.contains {
+                $0.hasPrefix("summary  apple c/u/d 0/0/0  md c/u/d 59/0/0  adopted 0  unchanged 0  skipped 1")
+            })
         #expect(lines.last?.hasPrefix("note     dry run: nothing written") == true)
         #expect(harness.vault.paths.isEmpty)
     }
@@ -109,7 +125,7 @@ struct CLITests {
 
         harness.vault.resetWrites()
         let second = harness.run(["export", "--root", "/vault", "--yes"])
-        #expect(second.out.contains("md c/u/d 0/0/0  unchanged 59"))
+        #expect(second.out.contains("md c/u/d 0/0/0  adopted 0  unchanged 59"))
         #expect(!second.out.contains("created "))
         #expect(harness.vault.writes.isEmpty)
     }
@@ -169,10 +185,11 @@ struct CLITests {
         #expect(before.out.contains("vault    not configured"))
         _ = harness.run(["export", "--root", "/vault", "--yes"])
         let after = harness.run(["status", "--root", "/vault"])
-        #expect(after.code == 0)
+        #expect(after.code == 1)  // the Chris Martin cluster is pending review
+        #expect(after.out.contains("review   1 pending (as of 2027-01-15T08:00:00Z"))
         #expect(after.out.contains("vault    configured  id=00000000-0000-4000-8000-000000000001"))
         #expect(after.out.contains("notes    59 contact notes (59 linked, 0 markdown-only), 0 other notes"))
-        #expect(after.out.contains("apple    access granted  contacts=60  notes=available"))
+        #expect(after.out.contains("apple    access granted  contacts=60  linked=2  cards=62  notes=available"))
         #expect(after.out.contains("export   last 2027-01-15T08:00:00Z  records=59"))
     }
 
@@ -191,4 +208,98 @@ struct CLITests {
         #expect(out.contains("USAGE: contacts2md"))
         #expect(out.contains("export"))
     }
+
+    @Test("without --root and without a saved folder: exit 3, never prompts")
+    func unconfiguredRoot() {
+        let run = CLIHarness().run(["plan"])
+        #expect(run.code == 3)
+        #expect(run.err.contains("no notes folder"))
+    }
+
+    @Test("without --root the saved folder (bookmark) is used and released afterwards")
+    func bookmarkRoot() {
+        let closed = Counter()
+        let access = RootAccess { root in
+            #expect(root == nil)
+            return ResolvedRoot(url: URL(filePath: "/saved", directoryHint: .isDirectory)) { closed.increment() }
+        }
+        let harness = CLIHarness()
+        let run = harness.run(["export", "--yes"], rootAccess: access)
+        #expect(run.code == 1)
+        #expect(run.out.hasPrefix("contacts2md export  2027-01-15T08:00:00Z  device=Test Mac  root=/saved\n"))
+        #expect(run.out.contains("note     dry run") == false)
+        #expect(harness.vault.exists("Inbox/Jane Doe.md"))
+        #expect(closed.value == 1)
+    }
+
+    @Test("review list → decide → the next plan honours the decision")
+    func reviewFlow() throws {
+        let harness = CLIHarness()
+        _ = harness.run(["export", "--root", "/vault", "--yes"])
+        let list = harness.run(["review", "list", "--root", "/vault"])
+        #expect(list.code == 1)
+        let line = try #require(list.out.split(separator: "\n").first { $0.hasPrefix("item     dup-") })
+        let id = String(line.split(separator: " ", omittingEmptySubsequences: true)[1])
+        #expect(list.out.contains("choices: distinct | only:1 | only:2"))
+
+        let bad = harness.run(["review", "decide", id, "adopt", "--root", "/vault"])
+        #expect(bad.code == 64 && bad.err.contains("invalid choice"))
+        #expect(harness.run(["review", "decide", "dup-nope", "distinct", "--root", "/vault"]).code == 64)
+
+        let decided = harness.run(["review", "decide", id, "distinct", "--root", "/vault"])
+        #expect(decided.code == 0)
+        #expect(decided.out.contains("decided  review \(id) → distinct"))
+        let log = try #require(
+            harness.vault.text(".c2mdsync/devices/00000000-0000-4000-8000-00000000d001/decisions.jsonl"))
+        #expect(log.contains("\"kind\":\"distinct-people\""))
+        #expect(harness.run(["review", "list", "--root", "/vault"]).out.contains("1 decided items take effect"))
+
+        let plan = harness.run(["plan", "--root", "/vault"])
+        #expect(plan.code == 0, "\(plan.out)")
+        #expect(plan.out.contains("create   md     Inbox/Chris Martin 2.md"))
+        #expect(!plan.out.contains("WARNING  duplicate"))
+    }
+
+    @Test("review adopt-all adopts pending one-to-one matches")
+    func adoptAll() {
+        let vault = InMemoryVault(files: ["People/Bob Smith.md": "---\ntype: person\ntitle: Bob Smith\n---\nmine\n"])
+        let harness = CLIHarness(vault: vault)
+        _ = harness.run(["export", "--root", "/vault", "--yes"])
+        #expect(!harness.vault.exists("Inbox/Bob Smith.md"))
+        let adopt = harness.run(["review", "adopt-all", "--root", "/vault"])
+        #expect(adopt.out.contains("1 adoptions recorded"), "\(adopt.out)")
+        let export = harness.run(["export", "--root", "/vault", "--yes"])
+        #expect(export.out.contains("adopted  md     People/Bob Smith.md  ← \"Bob Smith\" adopted (decision)"))
+        #expect(export.out.contains("backup   md     "))
+        #expect(harness.vault.text("People/Bob Smith.md")?.contains("c2mdsync:\n  id: ") == true)
+        #expect(harness.vault.text("People/Bob Smith.md")?.hasSuffix("---\nmine\n") == true)
+    }
+
+    @Test("stored status for the app: nil before the first export, then records and pending items")
+    func storedStatus() throws {
+        let harness = CLIHarness()
+        let session = VaultSession(root: URL(filePath: "/vault"), environment: harness.environment())
+        #expect(try session.storedStatus() == nil)
+        _ = harness.run(["export", "--root", "/vault", "--yes"])
+        let status = try #require(try session.storedStatus())
+        #expect(status.records == 59 && status.pendingReview == 1)
+        #expect(status.lastExport == Date(timeIntervalSince1970: 1_800_000_000))
+    }
+
+    @Test("review commands need a configured vault")
+    func reviewUnconfigured() {
+        let run = CLIHarness().run(["review", "list", "--root", "/vault"])
+        #expect(run.code == 3)
+        #expect(run.err.contains("not configured"))
+    }
+}
+
+/// Thread-safe counter for callbacks.
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() { lock.withLock { count += 1 } }
+
+    var value: Int { lock.withLock { count } }
 }

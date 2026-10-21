@@ -6,7 +6,15 @@ internal import Synchronization
 /// ways that matter to the engine: unified contacts spanning iCloud / Google /
 /// local cards, groups only in iCloud and local containers, images, name-only
 /// relations, and a switchable notes entitlement (no entitlement → no notes,
-/// `notesAvailable == false`, exactly like error 102 on a real store).
+/// `notesAvailable == false`, like the silently unavailable key on a real store).
+///
+/// Spike behaviours (S4/S9) on demand:
+/// - `synthesizeLinkedIDs`: a contact with several cards gets a synthesized
+///   unified id that is neither card's id and changes on every snapshot;
+/// - `link(_:)`: Contacts auto-linking two contacts (cards keep their own
+///   values; unified single-valued fields follow the last card, like
+///   "most recently saved wins");
+/// - `churnGoogleCardIDs()`: Google replacing new cards, so their ids change once.
 ///
 /// Never touches Contacts.framework.
 public final class FakeContactStore: ContactStore {
@@ -18,6 +26,9 @@ public final class FakeContactStore: ContactStore {
         var batches: [(batch: AppleWriteBatch, author: String)] = []
         var accessGranted = true
         var vCardExports = 0
+        var synthesizeLinkedIDs = false
+        var snapshots = 0
+        var churned = Set<String>()
     }
 
     private let state: Mutex<State>
@@ -31,6 +42,58 @@ public final class FakeContactStore: ContactStore {
     ) {
         state = Mutex(
             State(contacts: contacts, containers: containers, groups: groups, notesEntitled: notesEntitled))
+    }
+
+    /// Linked contacts get a fresh synthesized unified id on every snapshot.
+    public func setSynthesizeLinkedIDs(_ enabled: Bool) { state.withLock { $0.synthesizeLinkedIDs = enabled } }
+
+    /// Links the contacts with these (stored) unified ids into one, as
+    /// Contacts does on its own for same-name iCloud + Google cards. Each card
+    /// keeps its own values; the unified view takes single-valued fields from
+    /// the last contact and the union of multi-valued ones.
+    public func link(_ unifiedIDs: [String]) {
+        state.withLock { state in
+            let members = unifiedIDs.compactMap { id in state.contacts.first { $0.unifiedID == id } }
+            guard members.count > 1 else { return }
+            state.contacts.removeAll { unifiedIDs.contains($0.unifiedID) }
+            var cards: [AppleCard] = []
+            for member in members {
+                for var card in member.cards {
+                    if card.values == nil { card.values = member.contact }
+                    cards.append(card)
+                }
+            }
+            var unified = members.last?.contact ?? members[0].contact
+            for member in members.dropLast() {
+                unified.emails += member.contact.emails.filter { !unified.emails.contains($0) }
+                unified.phones += member.contact.phones.filter { !unified.phones.contains($0) }
+            }
+            state.contacts.append(
+                AppleContact(
+                    unifiedID: members[0].unifiedID, cards: cards, contact: unified,
+                    imageData: members.compactMap(\.imageData).last,
+                    groupIDs: Array(Set(members.flatMap(\.groupIDs))).sorted()))
+        }
+    }
+
+    /// Changes every Google card id once (`x` → `x~google-sync`), like Google
+    /// sync replacing a newly created card. Single-card contacts' unified ids
+    /// change with them; stamps and values are kept.
+    public func churnGoogleCardIDs() {
+        state.withLock { state in
+            for contactIndex in state.contacts.indices {
+                var contact = state.contacts[contactIndex]
+                for cardIndex in contact.cards.indices where contact.cards[cardIndex].accountKind == .google {
+                    let old = contact.cards[cardIndex].id
+                    guard !state.churned.contains(old) else { continue }
+                    let new = old + "~google-sync"
+                    state.churned.insert(new)
+                    contact.cards[cardIndex].id = new
+                    if contact.unifiedID == old { contact.unifiedID = new }
+                }
+                state.contacts[contactIndex] = contact
+            }
+        }
     }
 
     /// Simulates Contacts access being denied.
@@ -66,9 +129,17 @@ public final class FakeContactStore: ContactStore {
     public func snapshot() throws -> AppleSnapshot {
         try state.withLock { state in
             guard state.accessGranted else { throw ContactStoreError.accessDenied }
-            let contacts = state.contacts.map { contact in
+            state.snapshots += 1
+            let generation = state.snapshots
+            let contacts = state.contacts.enumerated().map { offset, contact in
                 var copy = contact
-                if !state.notesEntitled { copy.contact.body = nil }
+                if !state.notesEntitled {
+                    copy.contact.body = nil
+                    for index in copy.cards.indices { copy.cards[index].values?.body = nil }
+                }
+                if state.synthesizeLinkedIDs, copy.cards.count > 1 {
+                    copy.unifiedID = "SYNTH-\(generation)-\(offset)"
+                }
                 return copy
             }
             return AppleSnapshot(

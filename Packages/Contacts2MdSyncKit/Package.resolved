@@ -1,6 +1,15 @@
 {
-  "originHash" : "6e0d3bb3309ce05ec18f7d74466665ee2980409a1e6ec274029a4e189b28d13f",
+  "originHash" : "4cc65fc1a1d199d3f65bdf00a3d66a804c156cb898d25f53ce2c4e0738c89d67",
   "pins" : [
+    {
+      "identity" : "grdb.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/groue/GRDB.swift.git",
+      "state" : {
+        "revision" : "b83108d10f42680d78f23fe4d4d80fc88dab3212",
+        "version" : "7.11.1"
+      }
+    },
     {
       "identity" : "phonenumberkit",
       "kind" : "remoteSourceControl",

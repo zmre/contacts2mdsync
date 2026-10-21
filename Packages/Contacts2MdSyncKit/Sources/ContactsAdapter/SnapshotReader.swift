@@ -5,10 +5,14 @@ internal import Foundation
 /// Reads a full `AppleSnapshot`: unified contacts, the underlying cards of
 /// each (`unifyResults = false`), containers, and iCloud/local groups.
 ///
-/// Card → unified mapping: a unified contact's identifier is one of its
-/// cards' identifiers, so most cards map directly. The rest are checked with
+/// Card → unified mapping: a single card's unified id is its own id, so those
+/// map directly. A linked contact's unified id is synthesized (neither card's
+/// id, spike S4), so its cards are found with
 /// `isUnifiedWithContact(withIdentifier:)` against unified contacts with the
 /// same name, then, as a last resort, `unifiedContact(withIdentifier:)`.
+///
+/// Each card is read with every field except images (`AppleCard.values`) so
+/// the engine can apply card precedence instead of the unified blend.
 struct SnapshotReader {
     let store: CNContactStore
 
@@ -16,7 +20,7 @@ struct SnapshotReader {
         let notesAvailable = CNContactStoreAdapter.notesAvailable(in: store)
         let containers = try CNContactStoreAdapter.containers(in: store)
         let unified = try fetchUnified(includeNote: notesAvailable)
-        let cards = try fetchCards(in: containers, unified: unified)
+        let cards = try fetchCards(in: containers, unified: unified, includeNote: notesAvailable)
         let groups = try fetchGroups(in: containers, unifiedIDByCard: cards.unifiedIDByCard)
         let contacts = unified.map { contact in
             let ownCards = cards.byUnified[contact.identifier] ?? []
@@ -26,6 +30,7 @@ struct SnapshotReader {
                     ? [AppleCard(id: contact.identifier, containerID: "", accountKind: .unknown)] : ownCards,
                 contact: AppleContactMapper.canonical(from: contact),
                 imageData: AppleContactMapper.imageData(of: contact),
+                imageUnavailable: AppleContactMapper.imageUnavailable(of: contact),
                 groupIDs: groups.byUnified[contact.identifier] ?? []
             )
         }
@@ -48,12 +53,12 @@ struct SnapshotReader {
     }
 
     /// 2. Underlying cards per container, mapped to their unified contact.
-    private func fetchCards(in containers: [AppleContainer], unified: [CNContact]) throws -> Cards {
+    private func fetchCards(in containers: [AppleContainer], unified: [CNContact], includeNote: Bool) throws -> Cards {
         let unifiedByID = Dictionary(unified.map { ($0.identifier, $0) }, uniquingKeysWith: { first, _ in first })
         let byName = Dictionary(grouping: unified, by: Self.nameKey)
         var result = Cards()
         for container in containers {
-            let request = CNContactFetchRequest(keysToFetch: AppleContactMapper.cardKeys)
+            let request = CNContactFetchRequest(keysToFetch: AppleContactMapper.cardKeys(includeNote: includeNote))
             request.predicate = CNContact.predicateForContactsInContainer(withIdentifier: container.id)
             request.unifyResults = false
             var cards: [CNContact] = []
@@ -64,7 +69,8 @@ struct SnapshotReader {
                 result.byUnified[owner, default: []].append(
                     AppleCard(
                         id: card.identifier, containerID: container.id, accountKind: container.kind,
-                        stampID: AppleContactMapper.stampID(of: card)))
+                        stampID: AppleContactMapper.stampID(of: card),
+                        values: AppleContactMapper.canonical(from: card)))
             }
         }
         return result
