@@ -135,14 +135,10 @@ struct SetupView: View {
 
     private var exportSection: some View {
         Section {
-            if let preview = model.preview {
-                Label(
-                    "\(preview.toCreate.formatted()) files will be created in \(model.defaultFolder)/",
-                    systemImage: "checkmark")
-                Label("\(preview.toAdopt.formatted()) existing files will gain a sync id", systemImage: "checkmark")
-                Label("A backup of all contacts and of every rewritten note is saved first", systemImage: "checkmark")
-            }
             if let outcome = model.outcome {
+                Label("Export finished", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.headline)
                 CountRow("Created", outcome.created)
                 CountRow("Adopted", outcome.adopted)
                 CountRow("Updated", outcome.updated)
@@ -164,6 +160,16 @@ struct SetupView: View {
                     }
                     .foregroundStyle(.secondary)
                 }
+            }
+            if let preview = model.preview, model.outcome == nil || preview.toCreate + preview.toAdopt > 0 {
+                if model.outcome != nil {
+                    Text("Next export would:").font(.subheadline).foregroundStyle(.secondary)
+                }
+                Label(
+                    "\(preview.toCreate.formatted()) files will be created in \(model.defaultFolder)/",
+                    systemImage: "checkmark")
+                Label("\(preview.toAdopt.formatted()) existing files will gain a sync id", systemImage: "checkmark")
+                Label("A backup of all contacts and of every rewritten note is saved first", systemImage: "checkmark")
             }
             HStack {
                 Spacer()
