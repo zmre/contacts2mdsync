@@ -66,7 +66,13 @@ struct MainView: View {
             confirming?.title ?? "", isPresented: isConfirming, titleVisibility: .visible, presenting: confirming
         ) { override in
             Button(override.button, role: override.isRisky ? .destructive : nil) {
-                Task { await model.syncNow(override.request) }
+                Task {
+                    if case .takeOver = override {
+                        await model.takeOver()
+                    } else {
+                        await model.syncNow(override.request)
+                    }
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: { override in
@@ -134,7 +140,7 @@ struct MainView: View {
                 .disabled(busy)
         case .appleWritesDisabled, .identity:
             SettingsLink { Text("Open Settings…") }
-        case .waitingForDevice(let name, _, let expires):
+        case .waitingForDevice(let name, _, let expires), .leaderElsewhere(let name, let expires, _):
             Button("Take Over…") { confirming = .takeOver(device: name, expires: expires) }
                 .disabled(busy)
         case .localRunInProgress:

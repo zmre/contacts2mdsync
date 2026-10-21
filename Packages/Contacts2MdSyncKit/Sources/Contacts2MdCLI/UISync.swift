@@ -192,6 +192,10 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
     case appleWritesDisabled(held: Int)
     /// Another device leads syncing. Action: Take Over (confirmed).
     case waitingForDevice(name: String, since: Date, expires: Date)
+    /// Another device leads syncing and this Mac has not synced the folder
+    /// yet: its first export waits (nothing is written while another
+    /// device leads). Action: Take Over (confirmed).
+    case leaderElsewhere(name: String, expires: Date, stale: Bool)
     /// Another run on this Mac is syncing.
     case localRunInProgress
     /// Several devices without stamps. Action: Open Settings.
@@ -202,7 +206,7 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         case .breaker: "breaker"
         case .blastRadius: "blast-radius"
         case .appleWritesDisabled: "apple-writes"
-        case .waitingForDevice: "lease"
+        case .waitingForDevice, .leaderElsewhere: "lease"
         case .localRunInProgress: "local-lock"
         case .identity: "identity"
         }
@@ -227,6 +231,8 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         case .waitingForDevice(let name, let since, let expires):
             return "Waiting for \(name). It started syncing \(UIFormat.relativeDay(since)); "
                 + "this Mac syncs when it finishes (expires \(UIFormat.relativeDay(expires)))."
+        case .leaderElsewhere(let name, let expires, let stale):
+            return Self.leaderElsewhereMessage(name: name, expires: expires, stale: stale, now: Date())
         case .localRunInProgress:
             return "Another sync is running on this Mac (the command line or a scheduled run). Try again shortly."
         case .identity:
@@ -240,7 +246,7 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         switch self {
         case .breaker: .error
         case .blastRadius, .identity: .warning
-        case .appleWritesDisabled, .waitingForDevice, .localRunInProgress: .info
+        case .appleWritesDisabled, .waitingForDevice, .leaderElsewhere, .localRunInProgress: .info
         }
     }
 
@@ -256,6 +262,9 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
     /// - `plan`: the latest dry run (breaker, blast radius, held changes, identity).
     /// - `outcome`: the last Sync Now (lease, lock and breaker right away).
     /// - `status`: stored status (lease held by another device, identity).
+    ///   While this Mac has not synced the folder (`lastExport == nil`),
+    ///   another device's lease gives `leaderElsewhere` (its first export
+    ///   waits) instead of `waitingForDevice`.
     public static func banners(
         status: StoredStatus?, plan: UISyncPlanSummary?, outcome: UISyncOutcome?, deviceID: String, now: Date
     ) -> [UIBanner] {
@@ -273,7 +282,13 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         default: break
         }
         if let lease = otherLease(status: status, outcome: outcome, deviceID: deviceID, now: now) {
-            banners.append(.waitingForDevice(name: lease.deviceName, since: lease.acquiredAt, expires: lease.expiresAt))
+            if let status, status.lastExport == nil {
+                banners.append(
+                    .leaderElsewhere(name: lease.deviceName, expires: lease.expiresAt, stale: lease.isStale(at: now)))
+            } else {
+                banners.append(
+                    .waitingForDevice(name: lease.deviceName, since: lease.acquiredAt, expires: lease.expiresAt))
+            }
         } else if outcome == .localRunInProgress {
             banners.append(.localRunInProgress)
         }
@@ -281,6 +296,17 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
             banners.append(.identity(warning))
         }
         return banners
+    }
+
+    /// "Mac B is syncing this folder; this Mac will follow." The first
+    /// export (app and `contacts2md export --yes`) while another device leads.
+    public static func leaderElsewhereMessage(name: String, expires: Date, stale: Bool, now: Date) -> String {
+        let ends = UIFormat.relativeDay(expires, now: now)
+        var message =
+            "\(name) is syncing this folder; this Mac will follow. Nothing is written here while \(name) "
+            + "leads: run the first sync again once it stops (its turn ends by \(ends))"
+        message += stale ? ". \(name) has not checked in for over 10 minutes; Take Over if it is off or stuck." : "."
+        return message
     }
 
     /// The unexpired lease of another device, from the last outcome or the stored status.

@@ -30,6 +30,18 @@ struct OverviewView: View {
                 Text(model.live.liveLine).font(.caption).foregroundStyle(.secondary).monospacedDigit()
             }
             .padding(.vertical, 2)
+            if let follower = model.follower {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(follower.text)
+                        Text(follower.detail).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } icon: {
+                    Image(systemName: follower.isError ? "exclamationmark.triangle" : "person.2.wave.2")
+                }
+                .foregroundStyle(follower.isError ? .red : .primary)
+            }
             if !model.lastFailures.isEmpty {
                 let count = model.lastFailures.count
                 Label(

@@ -98,14 +98,33 @@ struct WatchPrinter: Sendable {
             if !quiet { output.line("running  \(kind.rawValue)") }
         case .finished(let summary):
             print(summary)
-        case .blocked(.breaker(let message)):
-            output.error("ERROR    \(message)")
         case .blocked(let reason):
-            if !quiet { output.line("note     blocked: \(reason.message)") }
+            print(blocked: reason)
         case .failed(let message):
             output.error("ERROR    sync failed: \(message)")
+        case .following(let holder, let check?):
+            print(following: holder, check)
         default:
             break
+        }
+    }
+
+    /// The breaker is an error; other blocked runs are notes.
+    private func print(blocked reason: SyncBlockReason) {
+        if case .breaker(let message) = reason {
+            output.error("ERROR    \(message)")
+        } else if !quiet {
+            output.line("note     blocked: \(reason.message)")
+        }
+    }
+
+    /// Another device leads: what this Mac's dry run found, or why it failed.
+    private func print(following holder: LeaseHolder, _ check: FollowerCheck) {
+        switch check {
+        case .failed(let message):
+            output.error("ERROR    following \(holder.deviceName); this Mac could not check what is left: \(message)")
+        case .checked(let summary):
+            if !quiet { output.line("follow   \(holder.deviceName) leads; still to do: \(summary.line)") }
         }
     }
 

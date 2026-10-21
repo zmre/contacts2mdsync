@@ -2,8 +2,8 @@ import Contacts2MdCLI
 import SwiftUI
 
 /// Duplicates (docs/ui.md §7): unlinked contacts that look like one person,
-/// copied notes sharing a sync id, and linked contacts carrying several
-/// sync ids. Group list on the left, side-by-side cards on the right.
+/// copied notes sharing a sync id, linked contacts carrying several sync
+/// ids, and files iCloud kept several differing versions of (M6). Group list on the left, side-by-side cards on the right.
 struct DuplicatesView: View {
     let model: AppModel
     @State private var selectedID: String?
@@ -98,6 +98,15 @@ private struct DuplicateDetail: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                } else if group.kind == .fileVersions {
+                    Text(
+                        "Two devices changed this file before seeing each other's change, and iCloud kept both. "
+                            + "Keep the current contents or one of the versions; the device that leads syncing "
+                            + "applies your choice on its next sync."
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(20)
@@ -145,6 +154,8 @@ private struct DuplicateDetail: View {
                 Button("Not Duplicates") { confirming = .notDuplicates }
             } else if group.kind == .mergeRecords {
                 Button("Open in Contacts") { model.openInContacts(cardIDs: group.allCardIDs) }
+            } else if group.kind == .fileVersions, let path = group.cards.first?.path {
+                Button("Reveal in Finder") { model.revealInFinder(path: path) }
             }
             Button("Ignore for Now") { model.snooze(group.id) }
                 .help("Hide until the next sync")
@@ -169,6 +180,8 @@ private struct DuplicateDetail: View {
         case .syncOnly(let member): "Sync only \(memberCard(member)?.heading ?? "this contact")?"
         case .keepSyncID: "Keep the sync id on this file?"
         case .pickSurvivingFile(_, let path): "Keep \(path)?"
+        case .keepCurrentVersion: "Keep the current version of \(group.title)?"
+        case .keepOtherVersion(let index): "Keep version \(index + 1) of \(group.title)?"
         case .ignoreForNow, nil: ""
         }
     }
@@ -179,6 +192,8 @@ private struct DuplicateDetail: View {
         case .syncOnly: "Sync Only This One"
         case .keepSyncID: "Keep This One"
         case .pickSurvivingFile: "Keep This File"
+        case .keepCurrentVersion: "Keep Current"
+        case .keepOtherVersion: "Keep This Version"
         case .ignoreForNow: "Ignore for Now"
         }
     }
@@ -197,6 +212,8 @@ private struct DuplicateDetail: View {
                 + "will be treated as a copy and not synced."
         case .pickSurvivingFile(_, let path):
             return group.keepFileMessage(keeping: path, appleWrites: model.vaultOptions?.appleWrites ?? false)
+        case .keepCurrentVersion, .keepOtherVersion:
+            return group.keepVersionMessage(action)
         case .ignoreForNow:
             return ""
         }
@@ -238,11 +255,19 @@ private struct DuplicateCardView: View {
             .frame(width: 200, alignment: .leading)
             .frame(minHeight: 150, alignment: .top)
         } label: {
-            Label(card.heading, systemImage: card.source == .note ? "doc.text" : "person.crop.circle")
+            Label(card.heading, systemImage: icon)
                 .foregroundStyle(.secondary)
         }
         .contentShape(Rectangle())
         .onTapGesture { model.inspect(InspectorItem(card, group: group), open: true) }
+    }
+
+    private var icon: String {
+        switch card.source {
+        case .note: "doc.text"
+        case .fileVersion: "doc.on.doc"
+        case .contact: "person.crop.circle"
+        }
     }
 
     @ViewBuilder private var cardActions: some View {
@@ -262,6 +287,12 @@ private struct DuplicateCardView: View {
                 case .pickSurvivingFile:
                     Button("Keep This File") { choose(action) }
                         .help("Keep this note synced with the contact; the others are detached")
+                case .keepCurrentVersion:
+                    Button("Keep Current") { choose(action) }
+                        .help("Keep the file as it is on this Mac; the other versions are discarded")
+                case .keepOtherVersion:
+                    Button("Keep This Version") { choose(action) }
+                        .help("Replace the file with this version on the next sync")
                 case .syncOnly, .notDuplicates, .ignoreForNow:
                     EmptyView()
                 }

@@ -276,7 +276,8 @@ struct ExportCommand: ParsableCommand, EnvironmentCommand {
         abstract: "One-way export Apple Contacts → markdown.",
         discussion: """
             Without --yes this only prints the plan (same as `plan`). Existing notes are copied to \
-            the state folder's backups/ before they are rewritten.
+            the state folder's backups/ before they are rewritten. With --yes it takes the vault \
+            lease like `sync`; while another device leads it prints a note, writes nothing and exits 0.
             """
     )
 
@@ -294,13 +295,19 @@ struct ExportCommand: ParsableCommand, EnvironmentCommand {
         help: "Also stamp each exported contact's iCloud card with its sync id (writes to Contacts; backs up first).")
     var stamp = false
 
+    @Flag(
+        name: .long,
+        help: "Take the vault lease from another device first (otherwise an export while it leads writes nothing).")
+    var takeOver = false
+
     func validate() throws {
         if stamp && !yes { throw ValidationError("--stamp writes to Contacts and requires --yes") }
+        if takeOver && !yes { throw ValidationError("--take-over requires --yes") }
     }
 
     func run(in environment: CLIEnvironment) -> CLIExitCode {
         Session(options: options, environment: environment, command: "export")
-            .export(export.request, write: yes, stamp: stamp, backup: backup)
+            .export(export.request, write: yes, stamp: stamp, backup: backup, takeOver: takeOver)
     }
 }
 

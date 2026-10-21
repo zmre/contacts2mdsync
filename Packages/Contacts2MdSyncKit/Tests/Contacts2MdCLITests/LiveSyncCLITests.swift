@@ -111,12 +111,11 @@ struct VaultSyncRunnerTests {
     func leaseHeld() throws {
         let harness = CLIHarness.exported()
         let other = DeviceIdentity(id: "other-device", name: "Other Mac")
-        _ = try LeaseManager(fs: harness.vault, device: other, clock: harness.clock, settle: 0).acquire(
-            otherDevicesKnown: false)
+        _ = try LeaseManager(fs: harness.vault, device: other, clock: harness.clock, settle: 0).takeOver()
         harness.store.editCard("bob:icloud") { $0.jobTitle = "Chef" }
         harness.vault.resetWrites()
         let outcome = harness.runner().runNow(request) { _ in }
-        guard case .following(let holder, let summary?) = outcome else {
+        guard case .following(let holder, .checked(let summary)) = outcome else {
             Issue.record("expected following, got \(outcome)")
             return
         }

@@ -91,6 +91,14 @@ public struct StoredStatus: Hashable, Sendable {
     public var fileVersionConflicts = 0
     /// Every device that synced this vault (`.c2mdsync/devices/<id>.json`).
     public var devices: [DeviceRecord] = []
+
+    /// Creates a status (the remaining fields start empty).
+    public init(lastExport: Date?, records: Int, pendingReview: Int, pendingAsOf: Date?) {
+        self.lastExport = lastExport
+        self.records = records
+        self.pendingReview = pendingReview
+        self.pendingAsOf = pendingAsOf
+    }
 }
 
 /// One planning/export run against a notes root, shared by the CLI and the
@@ -152,7 +160,14 @@ public struct VaultSession: Sendable {
         guard let config = try VaultConfig.load(from: fs)?.config else { return nil }
         let directory = environment.stateDirectory.appending(path: config.vaultID.uuidString.lowercased())
         guard FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)) else {
-            return StoredStatus(lastExport: nil, records: 0, pendingReview: 0, pendingAsOf: nil)
+            // Configured by another device, never synced here: the lease and
+            // devices still say who leads (the app's "this Mac will follow").
+            var status = StoredStatus(lastExport: nil, records: 0, pendingReview: 0, pendingAsOf: nil)
+            status.appleWritesEnabled = config.appleWrites
+            status.stampContacts = config.stampContacts
+            status.deviceCount = max(DeviceRecord.deviceIDs(fs: fs).count, 1)
+            fillShared(&status, fs: fs)
+            return status
         }
         let state = try environment.makeStateStore(directory)
         let records = try state.load()
@@ -177,11 +192,16 @@ public struct VaultSession: Sendable {
             default: break
             }
         }
+        fillShared(&status, fs: fs)
+        return status
+    }
+
+    /// The lease as this device sees it and every device record.
+    private func fillShared(_ status: inout StoredStatus, fs: any VaultFS) {
         if let device = try? environment.device() {
             status.apply(LeaseManager(fs: fs, device: device, clock: environment.clock).status())
         }
         status.devices = DeviceRecord.all(fs: fs).sorted { $0.lastSync > $1.lastSync }
-        return status
     }
 
     /// Records what a dry run found: pending review queue, file cache, and
@@ -234,6 +254,10 @@ public struct VaultSession: Sendable {
             })
         try prepared.state.appendSession(
             session(prepared, command: command, startedAt: startedAt, result: result, stamped: outcome.stamped))
+        // Keep the lease `beginExport` took fresh after a long export (a no-op when it is not ours).
+        if let device = try? environment.device() {
+            _ = try? LeaseManager(fs: prepared.fs, device: device, clock: environment.clock).heartbeat()
+        }
         return outcome
     }
 

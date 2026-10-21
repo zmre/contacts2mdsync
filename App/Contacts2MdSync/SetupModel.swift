@@ -319,12 +319,22 @@ final class SetupModel {
         return PreviewSummary(prepared)
     }
 
-    /// Re-plans for writing and executes: vCard backup first, note backups,
-    /// notes. Stamping stays off (it is opt-in via the CLI only).
+    /// Re-plans for writing, takes the local lock and the vault lease, and
+    /// executes: vCard backup first, note backups, notes. Stamping stays off
+    /// (it is opt-in via the CLI only). While another device leads, nothing
+    /// is written and `ExportBlocked` explains why.
     @concurrent
     nonisolated private static func export(root: URL, defaultFolder: String) async throws -> OutcomeSummary {
         let session = VaultSession(root: root, environment: environment())
+        // Plan first (reads Contacts, writes nothing to the folder), then lock and lease.
         let prepared = try session.prepare(ExportRequest(defaultFolder: defaultFolder), forWriting: true)
+        let lock: LocalLock
+        switch try session.beginExport() {
+        case .localRunInProgress: throw ExportBlocked.localRunInProgress
+        case .leaseHeldElsewhere(let lease): throw ExportBlocked.leaderElsewhere(lease, now: Date())
+        case .ready(let acquired, _): lock = acquired
+        }
+        defer { lock.release() }
         let outcome = try session.execute(
             prepared, backupContacts: true, stamp: false, command: "export", startedAt: Date())
         return OutcomeSummary(outcome, plan: prepared.plan)

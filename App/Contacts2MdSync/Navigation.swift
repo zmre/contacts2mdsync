@@ -87,9 +87,11 @@ extension InspectorItem {
     }
 
     init(_ card: UIDuplicateCard, group: UIDuplicateGroup) {
+        var isContact = false
+        if case .contact = card.source { isContact = true }
         self.init(
             title: card.title, subtitle: card.heading, path: card.path, syncID: card.syncID,
-            accounts: card.path == nil ? card.heading : nil, cardIDs: card.cardIDs,
+            accounts: isContact ? card.heading : nil, cardIDs: card.cardIDs,
             details: [Detail(label: "Why", value: group.reasons.joined(separator: " · "))]
                 + card.lines.map { Detail(label: "", value: $0) })
     }

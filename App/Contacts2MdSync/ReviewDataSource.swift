@@ -1,5 +1,6 @@
 import Contacts2MdCLI
 import Foundation
+import SyncEngine
 
 // The seam between the review UI and the sync engine. Everything goes
 // through `UIVaultReader` (Contacts2MdCLI), the same `VaultSession` paths as
@@ -41,6 +42,8 @@ protocol ReviewDataSource: Sendable {
     func setDefaultFolder(_ folder: String, root: URL) async throws
     /// Writes `apple_writes` / `stamp_contacts`.
     func setVaultOptions(_ options: UIVaultOptions, root: URL) async throws
+    /// Gives this Mac's vault lease up (live sync not running); the lease afterwards.
+    func releaseLease(root: URL) async throws -> LeaseStatus
 }
 
 /// The live engine through `UIVaultReader`.
@@ -73,4 +76,7 @@ struct LiveReviewDataSource: ReviewDataSource {
 
     @concurrent
     func setVaultOptions(_ options: UIVaultOptions, root: URL) async throws { try reader(root).setOptions(options) }
+
+    @concurrent
+    func releaseLease(root: URL) async throws -> LeaseStatus { try reader(root).releaseLease() }
 }

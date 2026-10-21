@@ -303,8 +303,7 @@ private struct AdvancedSettings: View {
                 }
             }
             .help("The Contacts notes field needs an Apple entitlement; without it, note bodies stay markdown-only.")
-            LabeledContent("Sync lease", value: leaseText)
-                .help("Several devices sharing one folder take turns; Take Over appears on the main window banner.")
+            LeaseSection(model: model)
             LabeledContent("Backups") {
                 HStack {
                     Text("10 kept").foregroundStyle(.secondary)
@@ -325,12 +324,6 @@ private struct AdvancedSettings: View {
             .help("Not available yet")
         }
         .formStyle(.grouped)
-    }
-
-    private var leaseText: String {
-        guard let lease = model.data?.status.lease, lease.expiresAt > Date() else { return "Held by: none" }
-        let holder = lease.deviceID == model.data?.device.id ? "this Mac" : lease.deviceName
-        return "Held by: \(holder) until \(UIFormat.relativeDay(lease.expiresAt))"
     }
 
     private var notesText: String {

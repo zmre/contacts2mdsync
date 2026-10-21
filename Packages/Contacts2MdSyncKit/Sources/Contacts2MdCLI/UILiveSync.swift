@@ -49,6 +49,9 @@ public struct UILiveState: Hashable, Sendable {
     public private(set) var problem: Problem?
     /// The last run that finished (written or not).
     public private(set) var lastSummary: SyncRunSummary?
+    /// While another device leads: what this Mac's last read-only check
+    /// found (what the leader still has to apply), or why it failed.
+    public private(set) var followerCheck: FollowerCheck?
 
     /// Creates an idle state.
     public init() {}
@@ -73,11 +76,14 @@ public struct UILiveState: Hashable, Sendable {
             activity = .idle
             lastSummary = summary
             problem = nil
+            followerCheck = nil
             return .refresh
-        case .following(let holder):
-            // M6: another device leads; this run was a read-only dry run.
+        case .following(let holder, let check):
+            // M6: another device leads; a run was a read-only dry run (a
+            // heartbeat that noticed the leader carries no check).
             activity = .idle
             problem = .waitingForDevice(name: holder.deviceName, until: holder.expiresAt)
+            if let check { followerCheck = check }
             return .refresh
         case .blocked(let reason):
             activity = .idle
@@ -121,10 +127,13 @@ public struct UILiveState: Hashable, Sendable {
         }
         switch problem {
         case .waitingForDevice(let name, let until)?:
-            return UILiveDisplay(
-                text: "Waiting for \(name)",
-                detail: "\(name) is syncing this folder; its turn ends by \(UIFormat.relativeDay(until, now: now)).",
-                tone: .paused)
+            let detail = "\(name) is syncing this folder; its turn ends by \(UIFormat.relativeDay(until, now: now))."
+            if let error = followerCheck?.error {
+                return UILiveDisplay(
+                    text: "Following \(name): check failed",
+                    detail: detail + " This Mac could not check what is left to sync: \(error)", tone: .error)
+            }
+            return UILiveDisplay(text: "Waiting for \(name)", detail: detail, tone: .paused)
         case .breaker(let message)?:
             return UILiveDisplay(text: "Paused: safety breaker", detail: message, tone: .error)
         case .localRunInProgress?:

@@ -99,7 +99,7 @@ struct UILiveSyncTests {
         let lease = VaultLease(
             deviceID: "mac-b", deviceName: "Mac B", acquiredAt: Self.now, heartbeatAt: Self.now,
             expiresAt: Self.now.addingTimeInterval(1200))
-        #expect(state.apply(.following(device: LeaseHolder(lease, now: Self.now))) == .refresh)
+        #expect(state.apply(.following(device: LeaseHolder(lease, now: Self.now), check: nil)) == .refresh)
         state.apply(.idle)
         #expect(state.display(now: Self.now)?.text == "Waiting for Mac B")
     }

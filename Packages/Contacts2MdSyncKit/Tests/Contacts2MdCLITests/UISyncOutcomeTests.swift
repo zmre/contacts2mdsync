@@ -106,7 +106,7 @@ extension UISyncTests {
         let reader = reader(harness)
         let other = LeaseManager(
             fs: harness.vault, device: DeviceIdentity(id: "device-b", name: "Mac B"), clock: harness.clock, settle: 0)
-        _ = try other.acquire(otherDevicesKnown: false)
+        _ = try other.takeOver()  // the export made this Mac the leader
         let outcome = try reader.sync()
         guard case .leaseHeldElsewhere(let lease) = outcome else {
             Issue.record("expected the lease outcome, got \(outcome)")

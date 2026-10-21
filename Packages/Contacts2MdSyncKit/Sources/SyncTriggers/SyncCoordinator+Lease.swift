@@ -29,7 +29,7 @@ extension SyncCoordinator {
         switch status.role {
         case .follower:
             if let holder = status.holder, previous?.role != .follower, current == nil {
-                emit(.following(device: holder))
+                emit(.following(device: holder, check: nil))
             }
         case .vacant where previous?.role == .follower:
             let name = previous?.holder?.deviceName ?? "the other device"

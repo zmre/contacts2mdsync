@@ -141,7 +141,7 @@ struct SyncCommandTests {
         let harness = CLIHarness.exported()
         let other = LeaseManager(
             fs: harness.vault, device: DeviceIdentity(id: "device-b", name: "Mac B"), clock: harness.clock, settle: 0)
-        _ = try other.acquire(otherDevicesKnown: false)
+        _ = try other.takeOver()  // the export made this Mac the leader
         harness.store.editCard("bob:icloud") { $0.jobTitle = "Chef" }
         let run = harness.sync()
         #expect(run.code == 0)

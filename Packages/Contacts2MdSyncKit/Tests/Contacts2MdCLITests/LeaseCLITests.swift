@@ -36,7 +36,7 @@ struct LeaseCLITests {
     @Test("lease take-over and release")
     func takeOverAndRelease() throws {
         let harness = CLIHarness.exported()
-        _ = try other(harness).acquire(otherDevicesKnown: true)
+        _ = try other(harness).takeOver()  // the export made this Mac the leader
         let shown = harness.run(["lease", "--root", "/vault"])
         #expect(shown.code == 0 && shown.out.contains("role=follower"))
         let taken = harness.run(["lease", "take-over", "--root", "/vault"])
@@ -58,7 +58,7 @@ struct LeaseCLITests {
     @Test("sync as a follower: exit 0, an info line, a dry run recorded for review, nothing written")
     func followerSync() throws {
         let harness = CLIHarness.exported()
-        _ = try other(harness).acquire(otherDevicesKnown: true)
+        _ = try other(harness).takeOver()
         harness.store.editCard("bob:icloud") { $0.jobTitle = "Chef" }
         harness.vault.resetWrites()
         let run = harness.sync()

@@ -63,13 +63,45 @@ struct CoordinatorLeaseTests {
         var summary = SyncRunSummary(
             kind: .manual, startedAt: clock.now, finishedAt: clock.now, appleFull: true, appleRead: "full")
         summary.markdownUpdated = 2
-        runner.script([.following(holder, summary)])
+        let check = FollowerCheck.checked(summary)
+        runner.script([.following(holder, check)])
         await coordinator.syncNow()
         await coordinator.waitUntilIdle()
-        #expect(await eventually { log.contains { $0 == .following(device: holder) } })
+        #expect(await eventually { log.contains { $0 == .following(device: holder, check: check) } })
         #expect(await coordinator.lastFollowerSummary == summary)
         #expect(await coordinator.lastSummary == nil)
         #expect(runner.requests.count == 1)  // no retry: the next trigger checks again
+        await coordinator.shutdown()
+    }
+
+    @Test("a follower dry run that fails (no Contacts access) is reported, not swallowed")
+    func followingFailed() async {
+        let clock = ManualTriggerClock()
+        let runner = FakeRunner(clock: clock)
+        let coordinator = SyncCoordinator(runner: runner, clock: clock)
+        let log = await StatusLog(coordinator)
+        let lease = VaultLease(
+            deviceID: "b", deviceName: "Mac B", acquiredAt: clock.now, heartbeatAt: clock.now,
+            expiresAt: clock.now.addingTimeInterval(1200))
+        let holder = LeaseHolder(lease, now: clock.now)
+        let summary = SyncRunSummary(
+            kind: .manual, startedAt: clock.now, finishedAt: clock.now, appleFull: true, appleRead: "full")
+        runner.script([.following(holder, .checked(summary)), .following(holder, .failed("no Contacts access"))])
+        await coordinator.syncNow()
+        await coordinator.waitUntilIdle()
+        #expect(await coordinator.lastFollowerSummary == summary)
+        await coordinator.syncNow()
+        await coordinator.waitUntilIdle()
+        #expect(
+            await eventually { log.contains { $0 == .following(device: holder, check: .failed("no Contacts access")) } }
+        )
+        #expect(await coordinator.lastFollowerError == "no Contacts access")
+        #expect(await coordinator.lastFollowerSummary == nil)  // not current any more
+        // A run of this device's own clears the follower state.
+        runner.script([.finished(summary)])
+        await coordinator.syncNow()
+        await coordinator.waitUntilIdle()
+        #expect(await coordinator.lastFollowerError == nil)
         await coordinator.shutdown()
     }
 
@@ -88,7 +120,7 @@ struct CoordinatorLeaseTests {
         #expect(await eventually { await coordinator.leaseStatus?.role == .follower })
         #expect(
             await eventually {
-                log.contains { if case .following(let holder) = $0 { holder.deviceName == "Mac B" } else { false } }
+                log.contains { if case .following(let holder, _) = $0 { holder.deviceName == "Mac B" } else { false } }
             })
         #expect(runner.requests.isEmpty)
         _ = try leaseB.release()

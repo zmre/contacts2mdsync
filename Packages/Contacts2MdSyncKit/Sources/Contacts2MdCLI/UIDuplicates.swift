@@ -19,6 +19,11 @@ public enum UIDuplicateAction: Hashable, Sendable {
     /// stays synced with the linked contact; the others are detached and
     /// their sync ids removed from the contact's cards (`merge-keep`).
     case pickSurvivingFile(index: Int, path: String)
+    /// iCloud versions: keep the file's current contents (`keep-current`).
+    case keepCurrentVersion
+    /// iCloud versions: make version `index` (0-based) the current
+    /// contents (`keep-other:N`).
+    case keepOtherVersion(index: Int)
 
     /// The decision-log answer, or `nil` for actions the log cannot record.
     public func decision(itemID: String) -> UIReviewDecision? {
@@ -27,6 +32,8 @@ public enum UIDuplicateAction: Hashable, Sendable {
         case .syncOnly(let member): .choice(itemID: itemID, choice: "only:\(member + 1)")
         case .keepSyncID(let path): .choice(itemID: itemID, choice: "keep:\(path + 1)")
         case .pickSurvivingFile(let index, _): .choice(itemID: itemID, choice: "keep:\(index + 1)")
+        case .keepCurrentVersion: .choice(itemID: itemID, choice: "keep-current")
+        case .keepOtherVersion(let index): .choice(itemID: itemID, choice: "keep-other:\(index + 1)")
         case .ignoreForNow: nil
         }
     }
@@ -39,6 +46,8 @@ public struct UIDuplicateCard: Identifiable, Hashable, Sendable {
         case contact(member: Int?)
         /// A markdown note.
         case note
+        /// One version of a file iCloud kept several of (`nil`: the current contents).
+        case fileVersion(index: Int?)
     }
 
     public var id: String
@@ -58,12 +67,15 @@ public struct UIDuplicateCard: Identifiable, Hashable, Sendable {
 }
 
 /// A possible duplicate: unlinked contacts (cluster), copied notes (same sync
-/// id), or one linked contact carrying several stamps (merge records).
+/// id), one linked contact carrying several stamps (merge records), or a
+/// file iCloud kept several differing versions of (M6).
 public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
     public enum Kind: Hashable, Sendable {
         case contacts
         case sameSyncID
         case mergeRecords
+        /// iCloud conflict versions of one file: keep the current contents or one version.
+        case fileVersions
     }
 
     /// The review item id.
@@ -87,6 +99,8 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
             self = Self.sameSyncID(syncID, paths: paths, context)
         } else if case .mergeRecords(let contact, let ids, let paths) = entry.item {
             self = Self.mergeRecords(contact, ids: ids, paths: paths, context)
+        } else if case .fileVersionConflict(let conflict) = entry.item {
+            self = Self.fileVersions(conflict, context)
         } else {
             return nil
         }
@@ -185,11 +199,70 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
         return group
     }
 
+    /// iCloud kept other versions of a file (`version-…` items): the
+    /// current contents first, then one card per version with the device
+    /// that saved it, when, and what differs.
+    private static func fileVersions(_ conflict: FileVersionConflict, _ context: Context) -> Self {
+        let count = conflict.versions.count
+        var group = Self(
+            id: context.id, kind: .fileVersions, title: conflict.title,
+            counts: count == 1 ? "1 other version" : "\(count) other versions",
+            sources: "iCloud versions · \(conflict.path)",
+            reasons: [
+                "iCloud kept \(count) conflicting \(count == 1 ? "version" : "versions") of \(conflict.path)",
+                conflict.recordID != nil
+                    ? "the note is not synced until you keep one" : "nothing is lost until you keep one",
+            ])
+        let current = context.notes[conflict.path]
+        var currentLines = [conflict.path, "on this Mac now"]
+        if let current {
+            currentLines += current.emails + current.phones
+        }
+        group.cards = [
+            UIDuplicateCard(
+                id: "\(context.id)-current", source: .fileVersion(index: nil), heading: "Current",
+                title: current?.title ?? conflict.title, lines: currentLines, cardIDs: [], path: conflict.path,
+                syncID: current?.syncID, action: .keepCurrentVersion)
+        ]
+        group.cards += conflict.versions.enumerated().map { offset, version in
+            var lines = ["From \(version.deviceName ?? "another device")"]
+            if let modified = version.modifiedAt { lines.append("Modified \(UIFormat.relativeDay(modified))") }
+            lines.append(
+                version.differences.isEmpty
+                    ? "Differs in formatting only"
+                    : "Differs: " + version.differences.joined(separator: ", "))
+            return UIDuplicateCard(
+                id: "\(context.id)-v\(offset)", source: .fileVersion(index: offset),
+                heading: "Version \(offset + 1)" + (version.deviceName.map { " · \($0)" } ?? ""),
+                title: conflict.title, lines: lines, cardIDs: [],
+                path: nil, syncID: nil, action: .keepOtherVersion(index: offset))
+        }
+        return group
+    }
+
     /// Group-level actions, in display order.
     public var actions: [UIDuplicateAction] {
         switch kind {
         case .contacts: [.notDuplicates, .ignoreForNow]
-        case .sameSyncID, .mergeRecords: [.ignoreForNow]
+        case .sameSyncID, .mergeRecords, .fileVersions: [.ignoreForNow]
+        }
+    }
+
+    /// The confirmation for Keep Current / Keep This Version (iCloud
+    /// versions): what happens to the file and to the other versions.
+    public func keepVersionMessage(_ action: UIDuplicateAction) -> String {
+        let path = cards.first?.path ?? title
+        switch action {
+        case .keepCurrentVersion:
+            return "\(path) stays as it is on this Mac. The other "
+                + "\(cards.count - 1 == 1 ? "version is" : "versions are") discarded on the next sync."
+        case .keepOtherVersion(let index):
+            let card = cards.first { $0.source == .fileVersion(index: index) }
+            let from = card?.heading ?? "Version \(index + 1)"
+            return "\(path) is replaced with \(from) on the next sync; the current contents and any other "
+                + "versions are discarded. The next sync after that treats the result as an edit of the note."
+        default:
+            return ""
         }
     }
 

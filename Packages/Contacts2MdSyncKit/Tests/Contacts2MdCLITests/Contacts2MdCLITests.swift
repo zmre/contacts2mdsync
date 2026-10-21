@@ -145,7 +145,7 @@ struct CLITests {
         let second = harness.run(["export", "--root", "/vault", "--yes"])
         #expect(second.out.contains("md c/u/d 0/0/0  adopted 0  unchanged 59"))
         #expect(!second.out.contains("created "))
-        #expect(harness.vault.writes.isEmpty)
+        #expect(harness.vault.writes.filter { $0 != LeaseManager.path }.isEmpty)  // only the lease renewal
     }
 
     @Test("--stamp requires --yes")

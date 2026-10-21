@@ -12,9 +12,10 @@ public enum SyncCoordinatorStatus: Hashable, Sendable {
     /// A run finished (written or not; see the summary).
     case finished(SyncRunSummary)
     /// Another device leads this vault: the run was a read-only dry run
-    /// (`followerSummary`); review decisions made here are executed by the
-    /// leader. Also emitted when a heartbeat check finds another leader.
-    case following(device: LeaseHolder)
+    /// (`check`: what the leader still has to do, or why this device could
+    /// not look); review decisions made here are executed by the leader.
+    /// Also emitted, with `check == nil`, when a heartbeat finds another leader.
+    case following(device: LeaseHolder, check: FollowerCheck?)
     /// A run could not happen or stopped before writing.
     case blocked(SyncBlockReason)
     /// A run failed unexpectedly.
@@ -50,7 +51,7 @@ public protocol SettingsAwareTriggerSource: SyncTriggerSource {
 ///   vault lease every `heartbeatInterval` while it is alive (also during a
 ///   long run), so another device sees this one lead even between runs. A
 ///   run while another device leads is a read-only dry run reported as
-///   `following(device:)`. When the other leader's lease lapses (expired or
+///   `following(device:check:)`. When the other leader's lease lapses (expired or
 ///   released), a catch-up run takes it. `shutdown()` releases the lease;
 ///   `takeOver()` takes it explicitly and syncs.
 public actor SyncCoordinator {
@@ -87,8 +88,12 @@ public actor SyncCoordinator {
     public private(set) var lastSummary: SyncRunSummary?
     /// Runs started so far.
     public private(set) var runCount = 0
-    /// The last dry run made while another device led.
+    /// The last dry run made while another device led (cleared when it
+    /// failed, or when this device ran a sync of its own).
     public private(set) var lastFollowerSummary: SyncRunSummary?
+    /// Why the last dry run made while another device led failed (`nil`
+    /// when it worked).
+    public private(set) var lastFollowerError: String?
     /// Keeps this device's vault lease alive (`nil`: the runner's own lease handling only).
     public let leaseKeeper: LeaseKeeper?
     /// The lease as last seen by the keeper (`nil` without a keeper or before the first check).
@@ -284,10 +289,13 @@ public actor SyncCoordinator {
         switch outcome {
         case .finished(let summary):
             lastSummary = summary
+            lastFollowerSummary = nil
+            lastFollowerError = nil
             emit(.finished(summary))
-        case .following(let holder, let summary):
-            if let summary { lastFollowerSummary = summary }
-            emit(.following(device: holder))
+        case .following(let holder, let check):
+            lastFollowerSummary = check.summary
+            lastFollowerError = check.error
+            emit(.following(device: holder, check: check))
         case .blocked(.localRunInProgress) where request.attempt < configuration.maxLockRetries && !stopped:
             emit(.blocked(.localRunInProgress))
             var retry = request

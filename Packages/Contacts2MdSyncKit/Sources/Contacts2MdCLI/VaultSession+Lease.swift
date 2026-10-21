@@ -55,6 +55,36 @@ extension VaultSession {
             otherDevicesKnown: { DeviceRecord.deviceIDs(fs: fs).contains { $0 != device.id } })
     }
 
+    /// Takes the local run lock and the vault lease before an export writes
+    /// (`contacts2md export --yes`, the app's first export and onboarding),
+    /// exactly like `beginSync`: when another device leads and its lease is
+    /// not free, nothing may be written. A vault with no lease (or a free
+    /// one) gets this device's lease, which stays until it expires, as after
+    /// a sync. A vault that was never configured has no state folder yet;
+    /// its lock lives in the state root (`first-export.lock`).
+    public func beginExport(takeOver: Bool = false) throws -> ExportGate {
+        let fs = environment.makeVault(root)
+        let directory =
+            try VaultConfig.load(from: fs).map {
+                environment.stateDirectory.appending(path: $0.config.vaultID.uuidString.lowercased())
+            }
+        let lockURL =
+            directory?.appending(path: "sync.lock") ?? environment.stateDirectory.appending(path: "first-export.lock")
+        guard let lock = try LocalLock.acquire(at: lockURL, wait: environment.lockWait, sleep: environment.sleep)
+        else { return .localRunInProgress }
+        do {
+            switch try leaseManager().acquire(takeOver: takeOver, otherDevicesKnown: try otherDevicesKnown()) {
+            case .acquired(let lease): return .ready(lock, lease)
+            case .heldElsewhere(let lease):
+                lock.release()
+                return .leaseHeldElsewhere(lease)
+            }
+        } catch {
+            lock.release()
+            throw error
+        }
+    }
+
     /// Follower mode: scans, reads Contacts and plans exactly like a sync,
     /// then records the observations in this device's state (review queue,
     /// file cache, Contacts mirror, an Activity row `follow`), and writes
@@ -66,6 +96,33 @@ extension VaultSession {
         let prepared = try prepareSync(request, progress: progress)
         try recordSyncPlan(prepared, command: "follow", startedAt: startedAt)
         return prepared
+    }
+}
+
+/// Why an export may not write (`VaultSession.beginExport`).
+public enum ExportGate: Sendable {
+    /// Lock and lease are ours; call `release()` on the lock when done.
+    case ready(LocalLock, VaultLease)
+    /// Another run on this Mac holds the local lock (waited `lockWait`).
+    case localRunInProgress
+    /// Another device leads this vault: nothing may be written here.
+    case leaseHeldElsewhere(VaultLease)
+}
+
+/// An export that could not write: another run on this Mac, or another
+/// device leading the vault. The description is the user-facing message.
+public struct ExportBlocked: Error, CustomStringConvertible {
+    public let description: String
+
+    /// Another run on this Mac holds the local lock.
+    public static let localRunInProgress = ExportBlocked(
+        description: "Another sync is running on this Mac (the command line or a scheduled run). Try again shortly.")
+
+    /// Another device leads the vault (`lease`), as seen at `now`.
+    public static func leaderElsewhere(_ lease: VaultLease, now: Date) -> ExportBlocked {
+        ExportBlocked(
+            description: UIBanner.leaderElsewhereMessage(
+                name: lease.deviceName, expires: lease.expiresAt, stale: lease.isStale(at: now), now: now))
     }
 }
 

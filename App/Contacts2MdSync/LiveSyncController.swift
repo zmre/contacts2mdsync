@@ -1,6 +1,7 @@
 import Contacts2MdCLI
 import Foundation
 import Observation
+import SyncEngine
 import SyncTriggers
 
 /// Hosts the `SyncCoordinator` for the open notes folder (architecture §10
@@ -24,6 +25,9 @@ final class LiveSyncController {
     private(set) var hostedRoot: URL?
     /// Saving `triggers.json` failed.
     private(set) var settingsError: String?
+    /// The vault lease as the coordinator's keeper last saw it (`nil`
+    /// before the first check or while not hosting).
+    private(set) var leaseStatus: LeaseStatus?
 
     /// Called on the main actor after a run finished or was blocked:
     /// re-read stored data and run a dry run.
@@ -93,10 +97,12 @@ final class LiveSyncController {
         hostedRoot = root
         self.scope = scope
         state = UILiveState()
-        // 2–3. Own writes, runner, coordinator with this Mac's settings.
+        // 2–3. Own writes, runner, coordinator with this Mac's settings and
+        // the lease keeper (M6: heartbeats, Take Over, release on shutdown).
         let ownWrites = OwnWriteRegistry()
         let runner = VaultSyncRunner(root: root, environment: environment, ownWrites: ownWrites)
-        let coordinator = SyncCoordinator(runner: runner, settings: effectiveSettings)
+        let coordinator = SyncCoordinator(
+            runner: runner, settings: effectiveSettings, leaseKeeper: try? runner.makeLeaseKeeper())
         self.coordinator = coordinator
         // 5. Status on the main actor (subscribed first, so the launch run is seen).
         let updates = await coordinator.statusUpdates()
@@ -131,11 +137,21 @@ final class LiveSyncController {
         scope?.close()
         scope = nil
         state = UILiveState()
+        leaseStatus = nil
     }
 
     private func receive(_ status: SyncCoordinatorStatus) {
-        guard state.apply(status) == .refresh, let onRunEnded else { return }
+        let effect = state.apply(status)
+        if effect == .refresh || status == .idle { Task { await refreshLeaseStatus() } }
+        guard effect == .refresh, let onRunEnded else { return }
         Task { await onRunEnded() }
+    }
+
+    /// Copies the keeper's last view of the lease (after runs and heartbeats).
+    private func refreshLeaseStatus() async {
+        guard let coordinator else { return }
+        let status = await coordinator.leaseStatus
+        if self.coordinator === coordinator { leaseStatus = status }
     }
 
     // MARK: - Requests
@@ -143,6 +159,25 @@ final class LiveSyncController {
     /// 6. Sync Now: a full run, never debounced.
     func syncNow() async {
         await coordinator?.syncNow()
+    }
+
+    /// Take Over through the coordinator: write the lease, wait for the
+    /// settle delay, re-read, then sync at once. Returns the lease as seen
+    /// afterwards (`nil` when not hosting: use `UIVaultReader` instead).
+    func takeOver() async throws -> LeaseStatus? {
+        guard let coordinator else { return nil }
+        let status = try await coordinator.takeOver()
+        leaseStatus = status
+        return status
+    }
+
+    /// Gives this Mac's lease up (the next run takes it again unless
+    /// another device does first). `nil` when not hosting.
+    func releaseLease() async -> LeaseStatus? {
+        guard let coordinator else { return nil }
+        let status = await coordinator.releaseLease()
+        leaseStatus = status
+        return status
     }
 
     /// A full catch-up run (after live sync is turned on or a pause ends),

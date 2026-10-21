@@ -1,6 +1,6 @@
 internal import ContactModel
 public import Foundation
-internal import SyncEngine
+public import SyncEngine
 internal import VaultIndex
 
 /// The app's entry point into a vault: reads stored state, plans, exports,
@@ -75,11 +75,19 @@ public struct UIVaultReader: Sendable {
     /// Sync Now: local lock and vault lease, plan, then the vCard backup (only
     /// when Contacts is written), Apple and markdown writes, exactly like
     /// `contacts2md sync`. Before the first sync on this Mac it runs the
-    /// first export instead (a two-way sync needs a merge base).
+    /// first export instead (a two-way sync needs a merge base), behind the
+    /// same lock and lease: while another device leads, nothing is written
+    /// and the outcome is `.leaseHeldElsewhere`.
     public func sync(_ request: UISyncRequest = UISyncRequest()) throws -> UISyncOutcome {
         let startedAt = environment.clock.now
         let session = VaultSession(root: root, environment: environment)
-        guard try hasSynced(session) else { return .synced(UISyncSummary(export: try export())) }
+        guard try hasSynced(session) else {
+            switch try gatedExport(takeOver: request.takeOver) {
+            case .exported(let summary): return .synced(UISyncSummary(export: summary))
+            case .localRunInProgress: return .localRunInProgress
+            case .leaseHeldElsewhere(let lease): return .leaseHeldElsewhere(lease)
+            }
+        }
         let lock: LocalLock
         switch try session.beginSync(takeOver: request.takeOver) {
         case .localRunInProgress: return .localRunInProgress
@@ -100,6 +108,21 @@ public struct UIVaultReader: Sendable {
         return .synced(UISyncSummary(result, plan: prepared.plan))
     }
 
+    /// Release Lease (Settings ▸ Advanced) while live sync is not running:
+    /// gives this Mac's lease up so another device can lead at once. Returns
+    /// the lease as seen afterwards.
+    @discardableResult
+    public func releaseLease() throws -> LeaseStatus {
+        let session = VaultSession(root: root, environment: environment)
+        try session.releaseLease()
+        return try session.leaseStatus()
+    }
+
+    /// The lease as this Mac sees it now (reads one file).
+    public func leaseStatus() throws -> LeaseStatus {
+        try VaultSession(root: root, environment: environment).leaseStatus()
+    }
+
     /// Changes `apple_writes` / `stamp_contacts` in `.c2mdsync/config.yaml`
     /// (every other key stays byte-for-byte); returns what is now in effect.
     @discardableResult
@@ -115,20 +138,48 @@ public struct UIVaultReader: Sendable {
         try session.storedStatus()?.lastExport != nil
     }
 
-    /// Exports (vCard backup first, never stamps), like the app's first export.
-    public func export() throws -> UIExportSummary {
+    /// Exports (vCard backup first, never stamps), like the app's first
+    /// export, behind the local lock and the vault lease. Throws
+    /// `ExportBlocked` (nothing written) while another device leads or
+    /// another run on this Mac holds the lock.
+    public func export(takeOver: Bool = false) throws -> UIExportSummary {
+        switch try gatedExport(takeOver: takeOver) {
+        case .exported(let summary): return summary
+        case .leaseHeldElsewhere(let lease): throw ExportBlocked.leaderElsewhere(lease, now: environment.clock.now)
+        case .localRunInProgress: throw ExportBlocked.localRunInProgress
+        }
+    }
+
+    /// Plans (reads Contacts, writes nothing to the vault), then takes the
+    /// local lock and the vault lease, then writes. A run that cannot read
+    /// Contacts leaves no lease behind.
+    private enum GatedExport {
+        case exported(UIExportSummary)
+        case localRunInProgress
+        case leaseHeldElsewhere(VaultLease)
+    }
+
+    private func gatedExport(takeOver: Bool) throws -> GatedExport {
         let startedAt = environment.clock.now
         let session = VaultSession(root: root, environment: environment)
         let prepared = try session.prepare(ExportRequest(), forWriting: true)
+        let lock: LocalLock
+        switch try session.beginExport(takeOver: takeOver) {
+        case .localRunInProgress: return .localRunInProgress
+        case .leaseHeldElsewhere(let lease): return .leaseHeldElsewhere(lease)
+        case .ready(let acquired, _): lock = acquired
+        }
+        defer { lock.release() }
         let outcome = try session.execute(
             prepared, backupContacts: true, stamp: false, command: "export", startedAt: startedAt)
         let adopted = outcome.result.updated.filter { $0.kind == .adopt }.count
-        return UIExportSummary(
+        let export = UIExportSummary(
             created: outcome.result.created.count, adopted: adopted, updated: outcome.result.updated.count - adopted,
             contactsBackup: outcome.backup?.url.path(percentEncoded: false),
             notesBackup: outcome.result.noteBackup?.path(percentEncoded: false),
             failures: outcome.result.failures.map { "\($0.path): \($0.message)" },
             pendingReview: prepared.plan.reviews.count)
+        return .exported(export)
     }
 
     /// Appends the decisions to this device's log. They take effect on the

@@ -102,7 +102,8 @@ public struct VaultSyncRunner: SyncRunner {
     }
 
     /// Another device leads: a read-only dry run (nothing written to the
-    /// vault or Contacts), reported as `.following`.
+    /// vault or Contacts), reported as `.following`, with the failure when
+    /// the dry run could not be made (no Contacts access, …).
     private func follow(
         _ lease: VaultLease, request: SyncRunRequest, session: VaultSession, startedAt: Date,
         progress: @Sendable (SyncPhase) -> Void
@@ -110,13 +111,27 @@ public struct VaultSyncRunner: SyncRunner {
         let holder = LeaseHolder(lease, now: environment.clock.now)
         var syncRequest = options
         syncRequest.appleMode = request.appleMode
-        guard let prepared = try? session.followerDryRun(syncRequest, startedAt: startedAt, progress: progress) else {
-            return .following(holder, nil)
+        do {
+            let prepared = try session.followerDryRun(syncRequest, startedAt: startedAt, progress: progress)
+            return .following(
+                holder,
+                .checked(
+                    Self.plannedSummary(
+                        request.kind, prepared: prepared, startedAt: startedAt, finishedAt: environment.clock.now)))
+        } catch {
+            return .following(holder, .failed(Self.describe(error)))
         }
-        return .following(
-            holder,
-            Self.plannedSummary(
-                request.kind, prepared: prepared, startedAt: startedAt, finishedAt: environment.clock.now))
+    }
+
+    /// The message for a failed follower dry run (the same wording a
+    /// blocked run of this device would use).
+    static func describe(_ error: any Error) -> String {
+        switch error {
+        case let error as VaultNotReady: error.description
+        case let error as RootAccessError: error.message
+        case ContactStoreError.accessDenied: ContactStoreError.accessDenied.description
+        default: String(describing: error)
+        }
     }
 
     /// What the leader still has to do, as seen by a follower.

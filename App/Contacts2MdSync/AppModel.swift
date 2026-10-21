@@ -2,6 +2,7 @@ import AppKit
 import Contacts2MdCLI
 import Foundation
 import Observation
+import SyncEngine
 import SyncTriggers
 
 /// The main window's state: stored data, the latest dry run, review queues
@@ -238,6 +239,33 @@ final class AppModel {
             phase = .idle
             errorMessage = Self.describe(error)
         }
+    }
+
+    // MARK: - Lease
+
+    /// Take Over (confirmed in the UI). With live sync hosted, the
+    /// coordinator takes the lease (write, ~60 s settle, re-read) and syncs
+    /// at once; otherwise Sync Now runs with `takeOver` (the first export
+    /// too), which takes the lease the same way.
+    func takeOver() async {
+        guard rootURL != nil, setup.isAuthorized, phase == .idle else { return }
+        guard live.isHosting else {
+            await syncNow(UISyncRequest(takeOver: true))
+            return
+        }
+        phase = .syncing
+        lastOutcome = nil
+        do {
+            if let status = try await live.takeOver(), status.role != .leader {
+                errorMessage =
+                    "\(status.holder?.deviceName ?? "Another device") took the lease at the same moment and kept it. "
+                    + "This Mac keeps following."
+            }
+        } catch {
+            errorMessage = Self.describe(error)
+        }
+        phase = .idle
+        await reload()
     }
 
     // MARK: - Decisions

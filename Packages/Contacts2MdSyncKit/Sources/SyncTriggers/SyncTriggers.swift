@@ -200,14 +200,36 @@ public enum SyncBlockReason: Hashable, Sendable {
 /// The result of one runner call.
 public enum SyncRunOutcome: Hashable, Sendable {
     case finished(SyncRunSummary)
-    /// Another device leads: this device computed dry-run status only
-    /// (nothing written to the vault or Contacts; `nil` when it could not,
-    /// e.g. before its first sync). Counts in the summary are what the
-    /// leader still has to do, as seen from here.
-    case following(LeaseHolder, SyncRunSummary?)
+    /// Another device leads: this device ran a read-only dry run (nothing
+    /// written to the vault or Contacts). `check` says what it found, or
+    /// why it could not look (no Contacts access, …).
+    case following(LeaseHolder, FollowerCheck)
     case blocked(SyncBlockReason)
     /// An unexpected error (the message).
     case failed(String)
+}
+
+/// What a follower's read-only dry run found.
+public enum FollowerCheck: Hashable, Sendable {
+    /// The dry run worked. Counts are what the leader still has to do, as
+    /// seen from here.
+    case checked(SyncRunSummary)
+    /// The dry run failed (no Contacts access, first sync not done on this
+    /// Mac, folder unreadable): the message. The review queue and status
+    /// here are not current.
+    case failed(String)
+
+    /// The summary of a successful check.
+    public var summary: SyncRunSummary? {
+        if case .checked(let summary) = self { return summary }
+        return nil
+    }
+
+    /// The message of a failed check.
+    public var error: String? {
+        if case .failed(let message) = self { return message }
+        return nil
+    }
 }
 
 /// Executes one sync run (the coordinator never runs two at once).
