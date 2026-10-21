@@ -1,4 +1,4 @@
-public import Foundation
+internal import Foundation
 internal import SyncEngine
 internal import VaultIndex
 
@@ -38,26 +38,17 @@ public struct UIReviewCounts: Hashable, Sendable {
     public var total: Int { conflicts + markdownOnly + deletions + duplicates }
 }
 
-// MARK: - Deletions (docs/ui.md §6)
-
-/// A note that was exported and is now gone (Deleted in Markdown).
-public struct UIMissingNote: Identifiable, Hashable, Sendable {
-    /// The review item id.
-    public var id: String
-    public var title: String
-    public var recordID: UUID
-    public var lastPath: String?
-    public var noticed: Date
-}
-
 // MARK: - All queues
 
 /// Every review queue the stored state (plus an optional plan) can fill.
 public struct UIReviewQueues: Sendable {
+    /// Records with field conflicts (one field per open conflict).
+    public var conflicts: [UIConflictRecord]
     public var duplicates: [UIDuplicateGroup]
     /// All markdown-only rows, ignored ones included.
     public var markdownOnly: [UIMarkdownOnlyRow]
-    public var missingNotes: [UIMissingNote]
+    /// Both deletion queues (and notes a one-way export found missing).
+    public var deletions: [UIDeletionRow]
     public var invalidNotes: [UIProblemNote]
     /// Pending items about undownloaded iCloud files.
     public var undownloadedNotes: Int
@@ -72,10 +63,8 @@ public struct UIReviewQueues: Sendable {
         duplicates = allGroups.filter { !snoozed.contains($0.id) }
         snoozedCount = allGroups.count - duplicates.count
         markdownOnly = Self.markdownOnlyRows(data: data, open: open, notes: notes, plan: plan)
-        missingNotes = open.compactMap { entry in
-            guard case .missingFile(let title, let id, let lastPath) = entry.item else { return nil }
-            return UIMissingNote(id: entry.id, title: title, recordID: id, lastPath: lastPath, noticed: entry.firstSeen)
-        }
+        conflicts = UIConflictRecord.records(open, records: data.records)
+        deletions = UIDeletionRow.rows(open, records: data.records)
         invalidNotes = data.invalidContactNotes
         undownloadedNotes = open.reduce(0) { total, entry in
             if case .undownloaded(let paths) = entry.item { return total + paths.count }
@@ -83,12 +72,12 @@ public struct UIReviewQueues: Sendable {
         }
     }
 
-    /// Badge counts from the stored state (conflicts and Apple-side deletions
-    /// are added by the caller once two-way sync provides them).
+    /// Badge counts: conflicting records, open markdown-only notes,
+    /// deletions, duplicate groups.
     public var counts: UIReviewCounts {
         UIReviewCounts(
-            markdownOnly: markdownOnly.filter(\.needsReview).count, deletions: missingNotes.count,
-            duplicates: duplicates.count)
+            conflicts: conflicts.count, markdownOnly: markdownOnly.filter(\.needsReview).count,
+            deletions: deletions.count, duplicates: duplicates.count)
     }
 
     private static func markdownOnlyRows(
@@ -122,9 +111,11 @@ public struct UIReviewQueues: Sendable {
             let ignored = note.map(data.isIgnored) ?? decisions.isIgnored(path: path, syncID: nil)
             var decidedNote: String?
             if decisions.adoption(ofNoteAt: path) != nil {
-                decidedNote = "Will be linked on the next export"
+                decidedNote = "Will be linked on the next sync"
+            } else if decisions.wantsContact(forNoteAt: path) {
+                decidedNote = "Will be added to Contacts on the next sync"
             } else if decidedPaths.contains(path) && matchesByPath[path] == nil {
-                decidedNote = "Decided; applies on the next export"
+                decidedNote = "Decided; applies on the next sync"
             }
             return UIMarkdownOnlyRow(
                 path: path, title: note?.title ?? VaultPath.stem(of: path), kind: note?.kind, note: note,

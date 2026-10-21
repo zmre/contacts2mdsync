@@ -39,14 +39,15 @@ public enum UIMarkdownOnlyAction: Hashable, Sendable {
     case notThisPerson(itemID: String)
     /// Never match this note again (remembered).
     case ignore
-    /// Create an Apple contact from the note (needs two-way sync).
+    /// Create an Apple contact from the note (`create-contact`; made by the
+    /// next sync once Apple writes are on).
     case addToContacts
 
-    /// Decision-log answers for this action on `row` (empty for `leave` and
-    /// for actions the log cannot record yet).
+    /// Decision-log answers for this action on `row` (empty for `leave`).
     public func decisions(for row: UIMarkdownOnlyRow) -> [UIReviewDecision] {
         switch self {
-        case .leave, .addToContacts: []
+        case .leave: []
+        case .addToContacts: [.addContact(path: row.path)]
         case .link(let itemID): [.choice(itemID: itemID, choice: "adopt")]
         case .notThisPerson(let itemID): [.choice(itemID: itemID, choice: "distinct")]
         case .ignore:
@@ -95,10 +96,12 @@ public struct UIMarkdownOnlyRow: Identifiable, Hashable, Sendable {
 
     public var bestMatch: UIMatchCandidate? { matches.first }
 
-    /// Link when a match ≥ 0.5 exists ("Add" is never the default then), else leave.
+    /// Link when a match ≥ 0.5 exists ("Add" is never the default then);
+    /// Add when there is no match at all; else leave. Rows are never ticked
+    /// by default, so nothing is applied without the user choosing it.
     public var defaultAction: UIMarkdownOnlyAction {
         if let best = bestMatch, best.confidence >= 0.5 { return .link(itemID: best.id) }
-        return .leave
+        return matches.isEmpty && !isOrphaned ? .addToContacts : .leave
     }
 
     /// Counts toward the badge: not ignored and not already decided.

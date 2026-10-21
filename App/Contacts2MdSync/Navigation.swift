@@ -114,17 +114,21 @@ extension InspectorItem {
             syncID: row.note?.syncID, accounts: nil, cardIDs: row.bestMatch?.contact.cardIDs ?? [], details: details)
     }
 
-    init(_ row: DeletionRow) {
+    init(_ row: UIDeletionRow) {
+        var details = row.path.map { [Detail(label: row.side == .contacts ? "File" : "Was at", value: $0)] } ?? []
+        if let noticed = row.noticed {
+            details.append(Detail(label: "Noticed", value: UIFormat.relativeDay(noticed)))
+        }
         self.init(
-            title: row.title, subtitle: row.side.title, path: row.side == .contacts ? row.path : nil, syncID: nil,
-            accounts: nil, cardIDs: row.side == .markdown ? row.cardIDs : [],
-            details: row.path.map { [Detail(label: row.side == .contacts ? "File" : "Was at", value: $0)] } ?? [])
+            title: row.title, subtitle: row.side.title, path: row.side == .contacts ? row.path : nil,
+            syncID: row.recordID, accounts: row.accountsText, cardIDs: row.side == .markdown ? row.cardIDs : [],
+            details: details)
     }
 
-    init(_ record: ConflictRecord) {
+    init(_ record: UIConflictRecord) {
         self.init(
-            title: record.title, subtitle: "Changed on both sides", path: record.path, syncID: nil, accounts: nil,
-            cardIDs: record.cardIDs,
+            title: record.title, subtitle: "Changed on both sides", path: record.path, syncID: record.recordID,
+            accounts: nil, cardIDs: record.cardIDs,
             details: record.fields.map { Detail(label: $0.name, value: "\($0.contacts) ↔ \($0.markdown)") })
     }
 }

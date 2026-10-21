@@ -29,24 +29,13 @@ struct OverviewView: View {
                 Text(lastSyncedLine(overview)).foregroundStyle(.secondary).monospacedDigit()
             }
             .padding(.vertical, 2)
-            if overview.multiDeviceWithoutStamps {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label(
-                        "Several devices share this folder, but your contacts don't carry sync IDs.",
-                        systemImage: "exclamationmark.triangle"
-                    )
-                    .foregroundStyle(.orange)
-                    Text(
-                        "Without them, each device matches contacts to files on its own. "
-                            + "Turn on “Add sync IDs to contacts” in Settings ▸ Accounts."
-                    )
-                    .foregroundStyle(.secondary)
-                    SettingsLink { Text("Open Settings…") }
-                }
-            }
-            if let export = model.lastExport, !export.failures.isEmpty {
-                Label("\(export.failures.count) files could not be written", systemImage: "xmark.octagon")
-                    .foregroundStyle(.red)
+            if let summary = model.lastSync, !summary.failures.isEmpty {
+                let count = summary.failures.count
+                Label(
+                    "\(count) \(count == 1 ? "change" : "changes") could not be written", systemImage: "xmark.octagon"
+                )
+                .foregroundStyle(.red)
+                .help(summary.failures.joined(separator: "\n"))
             }
         }
     }
@@ -58,7 +47,7 @@ struct OverviewView: View {
                 .foregroundStyle(.green)
         case .changesWaiting(let count):
             Label(
-                "\(count.formatted()) \(count == 1 ? "note" : "notes") to update on the next export",
+                "\(count.formatted()) \(count == 1 ? "change" : "changes") on the next sync",
                 systemImage: "arrow.triangle.2.circlepath")
         case .needsReview(let count):
             Label {
@@ -73,7 +62,7 @@ struct OverviewView: View {
 
     private func lastSyncedLine(_ overview: UIOverview) -> String {
         guard let date = overview.lastExport else { return "Choose \(model.syncTitle) to write your notes." }
-        var line = "Last exported \(UIFormat.relativeDay(date)) on \(overview.deviceName)"
+        var line = "Last synced \(UIFormat.relativeDay(date)) on \(overview.deviceName)"
         if let duration = overview.lastDuration { line += " · \(UIFormat.duration(duration))" }
         return line
     }
@@ -108,6 +97,9 @@ struct OverviewView: View {
                 CountRow("Changed in Contacts", changed)
                 if overview.toAdopt > 0 { CountRow("Existing notes to link", overview.toAdopt) }
                 if overview.movedNotes > 0 { CountRow("Notes moved in the folder", overview.movedNotes) }
+                if overview.toTrash > 0 {
+                    CountRow("Notes to move to the Trash", overview.toTrash, note: "deleted in Contacts")
+                }
             } else {
                 LabeledContent("Changed in Contacts") {
                     if model.phase == .checking {
@@ -117,8 +109,14 @@ struct OverviewView: View {
                     }
                 }
             }
-            LabeledContent("Changed in Markdown") {
-                Text(model.capabilities.twoWaySync ? "—" : "Tracked with two-way sync").foregroundStyle(.secondary)
+            if let changed = overview.changedInMarkdown {
+                CountRow(
+                    "Changed in Markdown", changed,
+                    note: overview.appleHeld > 0 && changed > 0 ? heldNote(overview) : nil)
+            } else {
+                LabeledContent("Changed in Markdown") {
+                    Text(overview.lastExport == nil ? "After the first sync" : "—").foregroundStyle(.secondary)
+                }
             }
         } header: {
             Text("Since Last Sync")
@@ -133,6 +131,10 @@ struct OverviewView: View {
             }
             .foregroundStyle(.secondary)
         }
+    }
+
+    private func heldNote(_ overview: UIOverview) -> String {
+        overview.appleWritesEnabled ? "waiting for approval" : "held: writing to Contacts is off"
     }
 
     // MARK: - This Session
@@ -153,6 +155,9 @@ struct OverviewView: View {
             }
             if session.adopted > 0 {
                 CountRow("Existing notes linked", session.adopted)
+            }
+            if session.held > 0 {
+                CountRow("Apple changes held", session.held)
             }
         }
     }

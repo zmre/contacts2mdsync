@@ -129,6 +129,15 @@ public struct UIVaultData: Sendable {
     /// This vault's per-device state folder.
     public var stateDirectory: URL
     public var readAt: Date
+    /// Apple / markdown split of syncs started from the app (see `UISessionDetail`).
+    public var sessionDetails: [UISessionDetail] = []
+
+    /// `apple_writes` / `stamp_contacts`.
+    public var options: UIVaultOptions { UIVaultOptions(config) }
+
+    /// Synced or exported on this Mac before (Sync Now runs two-way; before
+    /// that it runs the first export).
+    public var hasSynced: Bool { records.lastExport != nil }
 
     /// Where vCard and note backups are kept.
     public var backupsDirectory: URL { stateDirectory.appending(path: "backups") }
@@ -174,18 +183,49 @@ public struct UIPlanSummary: Sendable {
     public var excludedByDecision: Int
     public var skipped: Int
     public var warnings: [String]
+    /// Whether the Contacts notes field was readable (`false` when this run
+    /// took no snapshot, as a two-way dry run without review details).
     public var notesAvailable: Bool
     public var reviews: [ReviewItem]
     /// Contacts named by review items, by underlying card id.
     public var contacts: [String: UIContactSummary]
+    /// The two-way part (`nil` when this was the one-way export plan).
+    public var sync: UISyncPlanSummary?
 
-    /// Creates a summary of `prepared`.
+    /// Creates a summary of a one-way export plan.
     public init(_ prepared: PreparedExport, computedAt: Date) {
-        let plan = prepared.plan
+        self.init(
+            prepared.plan, computedAt: computedAt, cards: prepared.snapshot.contacts.flatMap(\.cards),
+            contacts: prepared.snapshot.contacts, notesAvailable: prepared.snapshot.notesAvailable)
+    }
+
+    /// Creates a summary of a two-way plan. `snapshot` supplies account
+    /// counts and contact details for review items; without it, accounts are
+    /// counted from the synced records.
+    public init(_ prepared: PreparedSync, snapshot: AppleSnapshot?, computedAt: Date) {
+        let records = (try? prepared.state.load())?.records.values.flatMap(\.cards) ?? []
+        let cards = snapshot?.contacts.flatMap(\.cards).map(\.accountKind) ?? records.map(\.accountKind)
+        self.init(
+            prepared.plan.markdown, computedAt: computedAt, accountKinds: cards, contacts: snapshot?.contacts ?? [],
+            notesAvailable: snapshot?.notesAvailable ?? false)
+        sync = UISyncPlanSummary(prepared.plan)
+    }
+
+    private init(
+        _ plan: ExportPlan, computedAt: Date, cards: [AppleCard], contacts: [AppleContact], notesAvailable: Bool
+    ) {
+        self.init(
+            plan, computedAt: computedAt, accountKinds: cards.map(\.accountKind), contacts: contacts,
+            notesAvailable: notesAvailable)
+    }
+
+    private init(
+        _ plan: ExportPlan, computedAt: Date, accountKinds: [AccountKind], contacts all: [AppleContact],
+        notesAvailable: Bool
+    ) {
         self.computedAt = computedAt
         contactsRead = plan.appleContactCount
-        let kinds = prepared.snapshot.contacts.flatMap(\.cards).map(\.accountKind)
-        accounts = Dictionary(grouping: kinds, by: { $0 }).map {
+        accounts = Dictionary(grouping: accountKinds, by: { $0 }).map {
             UIAccountCount(account: $0.key, count: $0.value.count)
         }
         .sorted { ($1.count, $0.account.displayName) < ($0.count, $1.account.displayName) }
@@ -201,15 +241,19 @@ public struct UIPlanSummary: Sendable {
         excludedByDecision = plan.excludedByDecision
         skipped = plan.skipped.count
         warnings = plan.warnings
-        notesAvailable = prepared.snapshot.notesAvailable
+        self.notesAvailable = notesAvailable
         reviews = plan.reviews
-        let wanted = Set(plan.reviews.flatMap(\.referencedCardIDs))
-        var contacts: [String: UIContactSummary] = [:]
-        for contact in prepared.snapshot.contacts where contact.cardIDs.contains(where: wanted.contains) {
+        contacts = Self.contactDetails(all, wanted: Set(plan.reviews.flatMap(\.referencedCardIDs)))
+    }
+
+    /// Summaries of the contacts that have any of `wanted`, by card id.
+    static func contactDetails(_ contacts: [AppleContact], wanted: Set<String>) -> [String: UIContactSummary] {
+        var details: [String: UIContactSummary] = [:]
+        for contact in contacts where contact.cardIDs.contains(where: wanted.contains) {
             let summary = UIContactSummary(contact)
-            for id in contact.cardIDs { contacts[id] = summary }
+            for id in contact.cardIDs { details[id] = summary }
         }
-        self.contacts = contacts
+        return details
     }
 
     /// The contact that still has any of `cardIDs`.
@@ -219,6 +263,9 @@ public struct UIPlanSummary: Sendable {
 
     /// Notes the next export would write (creates, updates, adoptions, fix-ups).
     public var pendingWrites: Int { toCreate + toUpdate + toAdopt + fixups }
+
+    /// Changes on either side the next Sync Now would make (held Apple changes excluded).
+    public var pendingChanges: Int { pendingWrites + (sync.map { $0.appleWrites + $0.trash } ?? 0) }
 }
 
 extension ReviewItem {
@@ -248,6 +295,9 @@ public enum UIReviewDecision: Hashable, Sendable {
     case choice(itemID: String, choice: String)
     /// Never match the markdown-only note at `path` (no review item needed).
     case ignoreNote(path: String)
+    /// Create an Apple contact from the markdown-only note at `path`
+    /// (`create-contact`; applied by the next sync with Apple writes on).
+    case addContact(path: String)
 }
 
 /// Errors from the app adapters.
@@ -260,135 +310,5 @@ public enum UIReviewError: Error, Hashable, Sendable, CustomStringConvertible {
         case .notConfigured: "This folder has not been exported to yet."
         case .itemNotFound(let id): "The review item \(id) is no longer pending. Refresh and try again."
         }
-    }
-}
-
-/// The app's entry point into a vault: reads stored state, plans, exports,
-/// and records review decisions — the same code paths as the CLI.
-public struct UIVaultReader: Sendable {
-    public let root: URL
-    public let environment: CLIEnvironment
-
-    /// Creates a reader for `root` (already opened through the bookmark).
-    public init(root: URL, environment: CLIEnvironment) {
-        self.root = root
-        self.environment = environment
-    }
-
-    /// Stored state, the decision log and a scan of the folder; `nil` when the
-    /// folder was never exported to. Creates nothing on disk.
-    public func read() throws -> UIVaultData? {
-        let fs = environment.makeVault(root)
-        guard let config = try VaultConfig.load(from: fs)?.config else { return nil }
-        let directory = stateDirectory(config)
-        let device = try environment.device()
-        let (decisions, decisionProblems) = try DecisionLog.readAll(fs)
-        var records = RecordMap()
-        var pending = PendingReviews()
-        var sessions: [SessionRecord] = []
-        var cache: [String: FileCacheEntry] = [:]
-        if FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)) {
-            let state = try environment.makeStateStore(directory)
-            records = try state.load()
-            pending = try state.loadPending()
-            sessions = try state.recentSessions(limit: 200)
-            cache = try state.loadFileCache()
-        }
-        let index = try VaultIndex.scan(
-            fs, excludedFolders: [config.imagesFolder], excludeGlobs: config.excludePaths, cache: cache)
-        let devices = ((try? fs.list(DecisionLog.devicesFolder)) ?? []).filter { !$0.hasPrefix(".") }
-        return UIVaultData(
-            rootPath: root.path(percentEncoded: false), config: config,
-            status: StoredStatus(
-                lastExport: records.lastExport, records: records.records.count, pendingReview: pending.items.count,
-                pendingAsOf: pending.computedAt),
-            pending: pending, decisions: decisions, decisionProblems: decisionProblems, records: records,
-            sessions: sessions,
-            notes: index.entries.filter(\.isContactNote).map(UINoteSummary.init).sorted { $0.path < $1.path },
-            invalidContactNotes: index.problems.filter(\.problemIsContactRelated).map {
-                UIProblemNote(path: $0.path, problem: $0.problem ?? "unreadable")
-            },
-            undownloaded: index.undownloaded.count, device: device, vaultDevices: devices.sorted(),
-            stateDirectory: directory, readAt: environment.clock.now)
-    }
-
-    /// A dry run (reads Contacts): refreshes the pending review queue and
-    /// records a `plan` session, exactly like `contacts2md plan`.
-    public func plan() throws -> UIPlanSummary {
-        let startedAt = environment.clock.now
-        let session = VaultSession(root: root, environment: environment)
-        let prepared = try session.prepare(ExportRequest(), forWriting: false)
-        try session.recordPlan(prepared, command: "plan", startedAt: startedAt)
-        return UIPlanSummary(prepared, computedAt: environment.clock.now)
-    }
-
-    /// Exports (vCard backup first, never stamps), like the app's first export.
-    public func export() throws -> UIExportSummary {
-        let startedAt = environment.clock.now
-        let session = VaultSession(root: root, environment: environment)
-        let prepared = try session.prepare(ExportRequest(), forWriting: true)
-        let outcome = try session.execute(
-            prepared, backupContacts: true, stamp: false, command: "export", startedAt: startedAt)
-        let adopted = outcome.result.updated.filter { $0.kind == .adopt }.count
-        return UIExportSummary(
-            created: outcome.result.created.count, adopted: adopted, updated: outcome.result.updated.count - adopted,
-            contactsBackup: outcome.backup?.url.path(percentEncoded: false),
-            notesBackup: outcome.result.noteBackup?.path(percentEncoded: false),
-            failures: outcome.result.failures.map { "\($0.path): \($0.message)" },
-            pendingReview: prepared.plan.reviews.count)
-    }
-
-    /// Appends the decisions to this device's log. They take effect on the
-    /// next plan or export. Returns the number of log entries written.
-    @discardableResult
-    public func record(_ answers: [UIReviewDecision]) throws -> Int {
-        guard !answers.isEmpty else { return 0 }
-        let fs = environment.makeVault(root)
-        guard let config = try VaultConfig.load(from: fs)?.config else { throw UIReviewError.notConfigured }
-        let directory = stateDirectory(config)
-        let hasState = FileManager.default.fileExists(atPath: directory.path(percentEncoded: false))
-        let state = hasState ? try environment.makeStateStore(directory) : nil
-        let pending = try state?.loadPending().items ?? []
-        let device = try environment.device()
-        let now = environment.clock.now
-        var decisions: [Decision] = []
-        for answer in answers {
-            switch answer {
-            case .choice(let itemID, let choice):
-                guard let entry = pending.first(where: { $0.id == itemID }) else {
-                    throw UIReviewError.itemNotFound(itemID)
-                }
-                decisions += try entry.item.decisions(for: choice, device: device, at: now)
-            case .ignoreNote(let path):
-                decisions.append(Decision(kind: .ignoreCandidate, createdAt: now, device: device, path: path))
-            }
-        }
-        try DecisionLog.append(decisions, deviceID: device.id, fs: fs)
-        try state?.saveDecisionMirror(try DecisionLog.readAll(fs).decisions)
-        return decisions.count
-    }
-
-    /// Changes the folder for new notes in `.c2mdsync/config.yaml`
-    /// (compare-and-swap: a concurrent edit is never overwritten).
-    public func setDefaultFolder(_ folder: String) throws {
-        let folder = folder.trimmingCharacters(in: .whitespaces)
-        try VaultPath.validate(folder)
-        let fs = environment.makeVault(root)
-        guard fs.exists(VaultConfig.path) else { throw UIReviewError.notConfigured }
-        let (_, stamp) = try fs.read(VaultConfig.path)
-        guard let loaded = try VaultConfig.load(from: fs) else { throw UIReviewError.notConfigured }
-        var config = loaded.config
-        guard config.defaultFolder != folder else { return }
-        config.defaultFolder = folder
-        _ = try fs.write(
-            Data(config.render(patching: loaded.text).utf8), to: VaultConfig.path, expecting: .unchanged(stamp))
-        let bookmark = RootBookmark(directory: environment.stateDirectory)
-        var settings = bookmark.loadSettings()
-        settings.defaultFolder = folder
-        try? bookmark.saveSettings(settings)
-    }
-
-    private func stateDirectory(_ config: VaultConfig) -> URL {
-        environment.stateDirectory.appending(path: config.vaultID.uuidString.lowercased())
     }
 }

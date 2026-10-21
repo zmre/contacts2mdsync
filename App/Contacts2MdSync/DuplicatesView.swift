@@ -35,7 +35,7 @@ struct DuplicatesView: View {
     private var emptyDescription: String {
         let snoozed = model.queues?.snoozedCount ?? 0
         return snoozed > 0
-            ? "\(snoozed) ignored for now. They return after the next export."
+            ? "\(snoozed) ignored for now. They return after the next sync."
             : "No contacts or files look like the same person."
     }
 
@@ -139,7 +139,7 @@ private struct DuplicateDetail: View {
                 Button("Open in Contacts") { model.openInContacts(cardIDs: group.allCardIDs) }
             }
             Button("Ignore for Now") { model.snooze(group.id) }
-                .help("Hide until the next export")
+                .help("Hide until the next sync")
             if isWorking { ProgressView().controlSize(.small) }
         }
     }
@@ -178,7 +178,7 @@ private struct DuplicateDetail: View {
     private func confirmMessage(_ action: UIDuplicateAction) -> String {
         switch action {
         case .notDuplicates:
-            return "They won't be flagged again. Each gets its own note on the next export."
+            return "They won't be flagged again. Each gets its own note on the next sync."
         case .syncOnly(let member):
             let others = group.cards.filter { $0.source != .note && $0.action != action }.map(\.heading)
             return "\(memberCard(member)?.title ?? "This contact") stays synced. "
@@ -261,7 +261,7 @@ private struct DuplicateCardView: View {
                 case .pickSurvivingFile:
                     Button("Keep This File") { choose(action) }
                         .disabled(!model.capabilities.pickSurvivingFile)
-                        .help(model.capabilities.pickSurvivingFile ? "" : ReviewCapabilities.twoWayHelp)
+                        .help(model.capabilities.pickSurvivingFile ? "" : ReviewCapabilities.unsupportedHelp)
                 case .syncOnly, .notDuplicates, .ignoreForNow:
                     EmptyView()
                 }

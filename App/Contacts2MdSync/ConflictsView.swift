@@ -2,15 +2,16 @@ import Contacts2MdCLI
 import SwiftUI
 
 /// Conflicts (docs/ui.md §4): records changed on both sides, one field per
-/// row with Previous / Contacts / Markdown and a Keep choice. Filled by the
-/// engine once two-way sync lands; until then the list is empty.
+/// row with Previous / Contacts / Markdown and a Keep choice. Choices are
+/// recorded as decisions; the next sync applies them while both sides still
+/// hold the values they were made against (else the conflict comes back).
 struct ConflictsView: View {
     let model: AppModel
     @State private var selection: Set<String> = []
-    @State private var choices: [String: [String: ConflictResolution]] = [:]
-    @State private var batch: ConflictResolution?
+    @State private var choices: [String: [String: UIConflictResolution]] = [:]
+    @State private var batch: UIConflictResolution?
 
-    private var records: [ConflictRecord] { model.conflicts }
+    private var records: [UIConflictRecord] { model.conflicts }
 
     var body: some View {
         Group {
@@ -19,9 +20,7 @@ struct ConflictsView: View {
                     Label("No Conflicts", systemImage: "checkmark.circle")
                 } description: {
                     Text(
-                        model.capabilities.conflicts
-                            ? "Nothing changed on both sides."
-                            : "Contacts changed on both sides will wait here once two-way sync is on.")
+                        "Nothing changed on both sides. Resolved conflicts are applied by the next sync.")
                 }
             } else {
                 HStack(spacing: 0) {
@@ -45,14 +44,14 @@ struct ConflictsView: View {
         .toolbar {
             ToolbarItem {
                 Menu("Resolve Selected") {
-                    ForEach(ConflictResolution.allCases) { resolution in
+                    ForEach(UIConflictResolution.allCases) { resolution in
                         Button(resolution.preferenceTitle) { batch = resolution }
                     }
                 }
                 .disabled(selection.isEmpty || !model.capabilities.conflicts)
                 .help(
                     model.capabilities.conflicts
-                        ? "Resolve every selected contact the same way" : ReviewCapabilities.twoWayHelp)
+                        ? "Resolve every selected contact the same way" : ReviewCapabilities.unsupportedHelp)
             }
         }
         .confirmationDialog(batchTitle, isPresented: isBatchConfirming, titleVisibility: .visible) {
@@ -64,7 +63,7 @@ struct ConflictsView: View {
         }
     }
 
-    private var current: ConflictRecord? {
+    private var current: UIConflictRecord? {
         records.first { selection.contains($0.id) } ?? records.first
     }
 
@@ -72,69 +71,67 @@ struct ConflictsView: View {
         List(records, selection: $selection) { record in
             VStack(alignment: .leading, spacing: 2) {
                 Text(record.title).lineLimit(1)
-                Text(
-                    "\(record.fields.count) \(record.fields.count == 1 ? "field" : "fields") · "
-                        + (record.path.split(separator: "/").dropLast().joined(separator: "/") + "/")
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+                Text("\(record.fields.count) \(record.fields.count == 1 ? "field" : "fields") · \(record.folderText)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
             }
             .tag(record.id)
         }
     }
 
-    private func binding(for record: ConflictRecord) -> Binding<[String: ConflictResolution]> {
+    private func binding(for record: UIConflictRecord) -> Binding<[String: UIConflictResolution]> {
         Binding(get: { choices[record.id] ?? [:] }, set: { choices[record.id] = $0 })
     }
 
-    private func advance(from record: ConflictRecord) {
+    private func advance(from record: UIConflictRecord) {
         guard let index = records.firstIndex(of: record), index + 1 < records.count else { return }
         selection = [records[index + 1].id]
     }
 
-    private func apply(_ records: [ConflictRecord]) async {
+    private func apply(_ records: [UIConflictRecord]) async {
         let resolved = records.flatMap { record in
             record.fields.compactMap { field in
                 choices[record.id]?[field.id].map {
-                    ConflictChoice(recordID: record.id, fieldID: field.id, resolution: $0)
+                    UIConflictChoice(recordID: record.id, fieldID: field.id, resolution: $0)
                 }
             }
         }
         guard !resolved.isEmpty else { return }
-        await model.resolve(resolved)
+        if await model.resolve(resolved) {
+            for record in records { choices[record.id] = nil }
+        }
     }
 
     // MARK: - Batch
 
-    private var selectedRecords: [ConflictRecord] { records.filter { selection.contains($0.id) } }
+    private var selectedRecords: [UIConflictRecord] { records.filter { selection.contains($0.id) } }
 
     private var isBatchConfirming: Binding<Bool> {
         Binding(get: { batch != nil }, set: { if !$0 { batch = nil } })
     }
 
     private var batchTitle: String {
-        let fields = selectedRecords.reduce(0) { $0 + $1.fields.count }
-        return "Apply “\(batch?.preferenceTitle ?? "")” to \(selectedRecords.count) contacts (\(fields) fields)?"
+        guard let batch else { return "" }
+        let fields = selectedRecords.reduce(0) { $0 + $1.choices(preferring: batch).count }
+        let contacts = selectedRecords.count
+        return "Apply “\(batch.preferenceTitle)” to \(contacts) \(contacts == 1 ? "contact" : "contacts") "
+            + "(\(fields) \(fields == 1 ? "field" : "fields"))?"
     }
 
+    /// Fields that do not offer the preference (Keep Both on scalars) stay undecided.
     private func applyBatch() async {
         guard let batch else { return }
-        for record in selectedRecords {
-            var picked: [String: ConflictResolution] = [:]
-            for field in record.fields {
-                picked[field.id] = field.options.contains(batch) ? batch : field.options.first
-            }
-            choices[record.id] = picked
-        }
-        await apply(selectedRecords)
+        let picked = selectedRecords.flatMap { $0.choices(preferring: batch) }
+        guard !picked.isEmpty else { return }
+        await model.resolve(picked)
     }
 }
 
 /// One record's fields with Keep choices.
 private struct ConflictDetail: View {
-    let record: ConflictRecord
-    @Binding var choices: [String: ConflictResolution]
+    let record: UIConflictRecord
+    @Binding var choices: [String: UIConflictResolution]
     let canApply: Bool
     let apply: () async -> Void
     let skip: () -> Void
@@ -167,7 +164,7 @@ private struct ConflictDetail: View {
                         Divider().gridCellColumns(4)
                         GridRow {
                             VStack(alignment: .leading) {
-                                Text(field.name)
+                                Text(field.name).help(field.fieldPath)
                                 if let label = field.label { Text(label).font(.caption).foregroundStyle(.secondary) }
                             }
                             Text(field.previous ?? "—").foregroundStyle(.secondary)
@@ -185,10 +182,16 @@ private struct ConflictDetail: View {
                         }
                     }
                 }
-                Text("Unchanged fields hidden.").font(.caption).foregroundStyle(.secondary)
+                Text(
+                    "Unchanged fields hidden. Your choice is applied on the next sync; "
+                        + "changes to Contacts need “Write changes back to Apple Contacts” in Settings."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 HStack {
                     Menu("Choose for All Fields") {
-                        ForEach(Array(ConflictResolution.allCases.enumerated()), id: \.element) { index, resolution in
+                        ForEach(Array(UIConflictResolution.allCases.enumerated()), id: \.element) { index, resolution in
                             Button(resolution.title) { chooseAll(resolution) }
                                 .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
                         }
@@ -200,18 +203,18 @@ private struct ConflictDetail: View {
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.return, modifiers: .command)
                         .disabled(!canApply || choices.count < record.fields.count)
-                        .help(canApply ? "" : ReviewCapabilities.twoWayHelp)
+                        .help(canApply ? "" : ReviewCapabilities.unsupportedHelp)
                 }
             }
             .padding(20)
         }
     }
 
-    private func choice(for field: ConflictField) -> Binding<ConflictResolution?> {
+    private func choice(for field: UIConflictField) -> Binding<UIConflictResolution?> {
         Binding(get: { choices[field.id] }, set: { choices[field.id] = $0 })
     }
 
-    private func chooseAll(_ resolution: ConflictResolution) {
+    private func chooseAll(_ resolution: UIConflictResolution) {
         for field in record.fields where field.options.contains(resolution) {
             choices[field.id] = resolution
         }

@@ -4,7 +4,7 @@ public import SyncEngine
 internal import VaultIndex
 
 /// Created / updated / deleted counts for one side.
-public struct UIChangeCounts: Hashable, Sendable {
+public struct UIChangeCounts: Codable, Hashable, Sendable {
     public var created: Int
     public var updated: Int
     public var deleted: Int
@@ -20,6 +20,8 @@ public struct UIChangeCounts: Hashable, Sendable {
         Self(created: lhs.created + rhs.created, updated: lhs.updated + rhs.updated, deleted: lhs.deleted + rhs.deleted)
     }
 
+    public static func += (lhs: inout Self, rhs: Self) { lhs = lhs + rhs }
+
     /// `0/2/0`.
     public var text: String { "\(created)/\(updated)/\(deleted)" }
 
@@ -34,7 +36,7 @@ public struct UIOverview: Sendable {
     public enum Health: Hashable, Sendable {
         /// Nothing to write, nothing to review.
         case inSync
-        /// The next export would write notes.
+        /// The next sync (or export) would change this many notes or contacts.
         case changesWaiting(Int)
         /// Items wait in Review.
         case needsReview(Int)
@@ -53,64 +55,77 @@ public struct UIOverview: Sendable {
 
     /// The "This Session" table.
     public struct SessionTable: Hashable, Sendable {
-        /// `This Session` or `Last Export`.
+        /// `This Session` or `Last Sync`.
         public var heading: String
         public var contacts: UIChangeCounts
         public var markdown: UIChangeCounts
         public var adopted: Int
+        /// Apple changes held (writes off or over the limit).
+        public var held: Int
     }
 
     public var health: Health
+    /// Last sync or export on this Mac.
     public var lastExport: Date?
     public var lastDuration: TimeInterval?
     public var deviceName: String
     /// Only non-zero queues, in sidebar order.
     public var needsReview: [ReviewRow]
-    /// From the latest dry run (`nil` until one finished).
+    /// From the latest dry run (`nil` until one finished): notes the next run writes.
     public var changedInContacts: Int?
+    /// From the latest two-way dry run: Apple changes from markdown edits
+    /// (`nil` until one finished, or before the first sync on this Mac).
+    public var changedInMarkdown: Int?
+    /// Of those, how many are held (Apple writes off or over the limit).
+    public var appleHeld: Int
     public var toAdopt: Int
     public var movedNotes: Int
+    /// Notes the next sync moves to the Trash (confirmed deletions).
+    public var toTrash: Int
     public var planComputedAt: Date?
     public var session: SessionTable?
     public var syncedContacts: Int
     public var rootPath: String
     /// Several devices share this folder but contacts carry no sync ids.
     public var multiDeviceWithoutStamps: Bool
+    /// `apple_writes` is on.
+    public var appleWritesEnabled: Bool
 
-    /// Builds the overview. `sessionStart` is when the app launched;
-    /// `stampContacts` is the vault's opt-in (off when unknown).
-    public init(
-        data: UIVaultData, plan: UIPlanSummary?, counts: UIReviewCounts, sessionStart: Date,
-        stampContacts: Bool = false
-    ) {
-        let exports = data.sessions.filter { $0.command != "plan" }
+    /// Builds the overview. `sessionStart` is when the app launched.
+    public init(data: UIVaultData, plan: UIPlanSummary?, counts: UIReviewCounts, sessionStart: Date) {
+        let runs = data.sessions.filter { $0.command != "plan" }
         lastExport = data.records.lastExport
-        lastDuration = exports.first.map { $0.finishedAt.timeIntervalSince($0.startedAt) }
+        lastDuration = runs.first.map { $0.finishedAt.timeIntervalSince($0.startedAt) }
         deviceName = data.device.name
         needsReview = UIReviewQueue.allCases.compactMap { queue in
             counts[queue] > 0 ? ReviewRow(queue: queue, title: Self.title(queue), count: counts[queue]) : nil
         }
         changedInContacts = plan.map { $0.toCreate + $0.toUpdate }
+        changedInMarkdown = plan?.sync?.changedInMarkdown
+        appleHeld = plan?.sync?.held ?? 0
         toAdopt = plan?.toAdopt ?? 0
         movedNotes = plan?.moves ?? 0
+        toTrash = plan?.sync?.trash ?? 0
         planComputedAt = plan?.computedAt
         syncedContacts = data.records.records.count
         rootPath = data.rootPath
-        multiDeviceWithoutStamps = data.deviceCount > 1 && !stampContacts
+        appleWritesEnabled = data.config.appleWrites
+        multiDeviceWithoutStamps = data.deviceCount > 1 && !data.config.stampContacts
         if data.records.lastExport == nil {
             health = .neverExported
         } else if counts.total > 0 {
             health = .needsReview(counts.total)
-        } else if let plan, plan.pendingWrites > 0 {
-            health = .changesWaiting(plan.pendingWrites)
+        } else if let plan, plan.pendingChanges > 0 {
+            health = .changesWaiting(plan.pendingChanges)
         } else {
             health = .inSync
         }
-        let thisSession = exports.filter { $0.startedAt >= sessionStart }
+        let thisSession = runs.filter { $0.startedAt >= sessionStart }
         if !thisSession.isEmpty {
-            session = Self.table("This Session", thisSession)
-        } else if let last = exports.first {
-            session = Self.table("Last Export", [last])
+            session = Self.table("This Session", thisSession, details: data.sessionDetails)
+        } else if let last = runs.first {
+            session = Self.table(
+                last.command == "sync" ? "Last Sync" : "Last Export", [last], details: data.sessionDetails)
         }
     }
 
@@ -124,14 +139,49 @@ public struct UIOverview: Sendable {
         }
     }
 
-    private static func table(_ heading: String, _ sessions: [SessionRecord]) -> SessionTable {
-        SessionTable(
-            heading: heading,
-            contacts: sessions.reduce(UIChangeCounts()) { $0 + UIChangeCounts(updated: $1.stamped) },
-            markdown: sessions.reduce(UIChangeCounts()) {
-                $0 + UIChangeCounts(created: $1.created, updated: $1.updated)
-            },
-            adopted: sessions.reduce(0) { $0 + $1.adopted })
+    private static func table(
+        _ heading: String, _ sessions: [SessionRecord], details: [UISessionDetail]
+    )
+        -> SessionTable
+    {
+        var table = SessionTable(
+            heading: heading, contacts: UIChangeCounts(), markdown: UIChangeCounts(), adopted: 0, held: 0)
+        for session in sessions {
+            let split = UISessionSplit(session, details: details)
+            table.contacts += split.contacts ?? UIChangeCounts()
+            table.markdown += split.markdown ?? UIChangeCounts()
+            table.adopted += session.adopted
+            table.held += split.held
+        }
+        return table
+    }
+}
+
+/// Apple / markdown counts of one session: exact for exports and for syncs
+/// started from the app; for other syncs (CLI, launchd) the stored record
+/// combines both sides, so only the totals are known.
+struct UISessionSplit {
+    var contacts: UIChangeCounts?
+    var markdown: UIChangeCounts?
+    /// Created / updated over both sides, when the split is unknown.
+    var combined: UIChangeCounts?
+    var held: Int
+    var holdReason: String?
+
+    init(_ session: SessionRecord, details: [UISessionDetail]) {
+        held = 0
+        if session.command == "plan" { return }
+        if let detail = details.first(where: { $0.matches(session) }) {
+            contacts = detail.apple
+            markdown = detail.markdown
+            held = detail.held
+            holdReason = detail.holdReason
+        } else if session.command == "sync" {
+            combined = UIChangeCounts(created: session.created, updated: session.updated + session.stamped)
+        } else {
+            contacts = UIChangeCounts(updated: session.stamped)
+            markdown = UIChangeCounts(created: session.created, updated: session.updated)
+        }
     }
 }
 
@@ -151,21 +201,30 @@ public struct UIActivityRow: Identifiable, Hashable, Sendable {
     public var deviceName: String
     /// `GUI` is shown as Manual (docs/ui.md wording).
     public var trigger: String
+    /// `export`, `sync` or `plan`.
     public var command: String
-    /// A dry run (preview), not an export.
+    /// A dry run (preview), not an export or sync.
     public var isPreview: Bool
-    /// `nil` for previews (nothing was written).
+    /// `nil` for previews (nothing was written) and for syncs whose split is unknown.
     public var contacts: UIChangeCounts?
     public var markdown: UIChangeCounts?
+    /// Both sides together, for syncs recorded without the split (CLI, launchd).
+    public var combined: UIChangeCounts?
     public var adopted: Int
+    /// Apple changes held (writes off or over the limit), with the reason.
+    public var held: Int
+    public var holdReason: String?
     public var review: Int
     public var skipped: Int
     public var result: Result
 
     /// Rows for `sessions` (newest first); sessions from other devices show their id.
-    public static func rows(_ sessions: [SessionRecord], device: DeviceIdentity) -> [UIActivityRow] {
+    public static func rows(
+        _ sessions: [SessionRecord], device: DeviceIdentity, details: [UISessionDetail] = []
+    ) -> [UIActivityRow] {
         sessions.enumerated().map { offset, session in
             let preview = session.command == "plan"
+            let split = UISessionSplit(session, details: details)
             let result: Result =
                 session.failures > 0
                 ? .failed(session.failures) : session.skipped > 0 ? .warnings(session.skipped) : .success
@@ -174,11 +233,16 @@ public struct UIActivityRow: Identifiable, Hashable, Sendable {
                 startedAt: session.startedAt, duration: session.finishedAt.timeIntervalSince(session.startedAt),
                 deviceName: session.deviceID == device.id || session.deviceID.isEmpty
                     ? device.name : String(session.deviceID.prefix(8)),
-                trigger: session.trigger == "GUI" ? "Manual" : session.trigger, command: session.command,
-                isPreview: preview, contacts: preview ? nil : UIChangeCounts(updated: session.stamped),
-                markdown: preview ? nil : UIChangeCounts(created: session.created, updated: session.updated),
-                adopted: session.adopted, review: session.pendingReview, skipped: session.skipped, result: result)
+                trigger: Self.trigger(session.trigger), command: session.command, isPreview: preview,
+                contacts: split.contacts, markdown: split.markdown, combined: split.combined,
+                adopted: session.adopted, held: split.held, holdReason: split.holdReason,
+                review: session.pendingReview, skipped: session.skipped, result: result)
         }
+    }
+
+    /// docs/ui.md §8 wording: `GUI` → Manual; others (`CLI`, `Live`, `Launch`, …) as recorded.
+    static func trigger(_ recorded: String) -> String {
+        recorded == "GUI" ? "Manual" : recorded
     }
 }
 

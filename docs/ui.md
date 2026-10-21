@@ -1,6 +1,6 @@
 # Contacts2MdSync — UI Design
 
-Status: M4 review UI built against the M2 engine (see §14 for what is live, what waits on two-way sync, and deviations). ASCII mockups; final visuals follow macOS HIG with native SwiftUI components.
+Status: M4 review UI wired to the M3 two-way sync engine (see §14 for what is live, what is still pending, and deviations). ASCII mockups; final visuals follow macOS HIG with native SwiftUI components.
 
 ## Principles
 
@@ -326,40 +326,61 @@ Advanced  Contact notes      ◦ Not available — notes stay markdown-only
 - **Avoid in main UI:** local/remote, source/target, orphan, tombstone, lease (Advanced only).
 - Counts: number + plain noun ("12 files"). Relative dates ("Today 10:42 AM").
 
-## 14. As built (M4, on the M2 engine)
+## 14. As built (M4 UI on the M3 engine)
 
-**Structure.** `ContentView` shows onboarding (`SetupView`, steps 1–3 and 5) until the folder is configured, a "Can't open the notes folder [Locate…]" pane when the saved bookmark no longer resolves, and otherwise `MainView`: the §1 sidebar with badges, toolbar (status dot + text, disabled `Live` toggle, `Export Now`, inspector toggle), and `.inspector`. Menu commands: Contacts ▸ Export Now (⌘R), Check for Changes (⇧⌘R); View ▸ Show/Hide Inspector (⌥⌘I).
+**Structure.** `ContentView` shows onboarding (`SetupView`, steps 1–3 and 5) until the folder is configured, a "Can't open the notes folder [Locate…]" pane when the saved bookmark no longer resolves, and otherwise `MainView`: the §1 sidebar with badges, toolbar (status dot + text, disabled `Live` toggle, **Sync Now**, inspector toggle), banners above every screen, and `.inspector`. Menu commands: Contacts ▸ Sync Now (⌘R), Check for Changes (⇧⌘R); View ▸ Show/Hide Inspector (⌥⌘I).
 
 **Layers.**
 
-- `Contacts2MdCLI/UI*.swift`: view-model adapters over the public engine APIs, tested in `UIReviewTests`. `UIVaultReader` reads stored state, scans the folder (no Contacts access), runs dry runs and exports (the same `VaultSession` path as the CLI), appends decisions, and edits `default_folder`. `UIReviewQueues`, `UIDuplicateGroup`, `UIMarkdownOnlyRow`, `UIOverview`, `UIActivityRow` and `UILibraryRow` turn that into screen data.
-- `App/…/ReviewDataSource.swift`: the protocol the UI is built against, plus app-side types for conflicts, deletions and vault write options. `LiveReviewDataSource` implements it over `UIVaultReader`; M3 operations throw `ReviewUnavailable`, and `ReviewCapabilities` flags turn their controls off.
-- `AppModel` (`@MainActor @Observable`): loads stored data, then a dry run (off the main actor); queues, badges, snoozes, decisions, Finder and Contacts links.
+- `Contacts2MdCLI/UI*.swift`: view-model adapters over the public engine APIs, tested in `UIReviewTests`, `UISyncTests` and `UISyncOutcomeTests`. `UIVaultReader` (`UIVaultReader.swift`) reads stored state and scans the folder (no Contacts access), runs dry runs and Sync Now through the same `VaultSession` calls as `contacts2md plan` / `sync`, appends decisions, and edits `default_folder`, `apple_writes` and `stamp_contacts`. `UIReviewQueues` turns stored state into screen data: `UIConflictRecord` (`UIConflicts.swift`), `UIDeletionRow` (`UIDeletions.swift`), `UIDuplicateGroup`, `UIMarkdownOnlyRow`. `UISync.swift` has the Sync Now request/outcome/summary, the two-way part of a dry run (`UISyncPlanSummary`) and `UIBanner`. `UIOverview`, `UIActivityRow` and `UILibraryRow` build the remaining screens.
+- `App/…/ReviewDataSource.swift`: the protocol the UI is built against (load, plan, sync, record, folder, options) and `ReviewCapabilities`. `LiveReviewDataSource` runs each call off the main actor (`@concurrent`).
+- `AppModel` (`@MainActor @Observable`): loads stored data, then a dry run; queues, badges, banners, snoozes, decisions, Finder and Contacts links.
 
-**Live today.**
+**Dry runs and Sync Now.** Once this Mac has exported or synced the vault, Check for Changes is the two-way plan (`prepareSync` + `recordSyncPlan`, recorded as a `plan` session) and Sync Now is `beginSync` → `prepareSync` → `executeSync` with `DecisionPolicy.gui`, trigger `GUI`. Before that, both fall back to the one-way export plan and the first export, as the CLI does. Onboarding's step 5 stays **Run First Export**: `prepareSync` needs a merge base that only the first export creates (`VaultNotReady` otherwise), and the first import's auto-adoption only exists on the export path. The vCard backup is taken only when the sync writes to Contacts.
+
+**Live.**
 
 | Screen        | Data                                                                                                     | Actions                                                                                                  |
 |---------------|----------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
-| Overview      | stored status, sessions, latest dry run                                                                  | Check Again, Reveal root, review rows link to their screens                                              |
-| Duplicates    | `duplicate cluster`, `copied note` (same sync id), `merge records` items; contact details from the dry run | Open in Contacts to Link (one `addressbook://` per card, rescan on return), Sync Only *card*, Not Duplicates (confirmed), Ignore for Now (until the next export), Keep This One |
-| Markdown Only | contact notes without a sync id, plus notes named by `possible match` items                             | per row: Link to "X" (adopt), Not "X" (distinct), Ignore; tick rows, Apply N Changes (⌘↩); Show Ignored |
-| Deletions     | `missing` items (Deleted in Markdown), read-only                                                         | —                                                                                                        |
+| Overview      | stored status, sessions, latest dry run: Changed in Contacts (notes to write), Changed in Markdown (Apple changes from note edits, with "held" when writes are off or over the limit), notes to Trash, This Session / Last Sync with Apple and markdown C/U/D and held | Check Again, Reveal root, review rows link to their screens |
+| Conflicts     | open `conflict` items grouped per record (one row per field: Previous / Contacts / Markdown, options from the engine; label conflicts offer only Keep Contacts / Keep Markdown) | Keep choice per field, ⌘1–3 for all fields, Apply (⌘↩), Resolve Selected with confirmation (Keep Both Where Possible leaves fields without it undecided) |
+| Duplicates    | `duplicate cluster`, `copied note`, `merge records` items; contact details from the dry run              | Open in Contacts to Link, Sync Only *card*, Not Duplicates (confirmed), Ignore for Now (until the next sync), Keep This One |
+| Markdown Only | contact notes without a sync id, plus notes named by `possible match` items                             | per row: Add to Contacts (default when nothing matches), Link to "X" (default at ≥ 0.5), Not "X", Ignore; toolbar Add to Contacts for the selection; tick rows, Apply N Changes (⌘↩); Show Ignored |
+| Deletions     | Deleted in Contacts (`appleDeleted`), Deleted in Markdown (`markdownDeleted`); notes a one-way export found missing are listed read-only until the next sync | Keep File, Unlink (default) · Delete File · Restore Contact; Restore File (default) · Unlink, Keep Contact · Delete Apple Contact…; Apply N Changes; destructive alert naming each file and contact (with its accounts) |
 | All Contacts  | record map + note titles; search by name, file, account                                                  | Open in Contacts, Reveal in Finder                                                                       |
-| Activity      | `sessions` (exports; previews behind Show Previews); unreadable contact notes listed with Reveal        | —                                                                                                        |
-| Settings      | device name, folders, accounts from the dry run, notes availability                                     | Choose root (bookmark), change the folder for new notes (`config.yaml`, compare-and-swap), Show backups  |
+| Activity      | sessions with trigger (Manual, CLI, …), Contacts C/U/D, Markdown C/U/D, Held; previews behind Show Previews; unreadable contact notes with Reveal | —                                                                                                        |
+| Settings      | device name, folders, accounts from the dry run, notes availability, lease holder                       | Choose root, folder for new notes, "Write changes back to Apple Contacts" (`apple_writes`) and "Add sync IDs to contacts" (`stamp_contacts`), Show backups |
 
-Decisions are appended to `.c2mdsync/devices/<device>/decisions.jsonl` with the same choices as `contacts2md review decide`; they apply on the next export, and the affected rows say so.
+Every review answer is a decision appended to `.c2mdsync/devices/<device>/decisions.jsonl`, with the same choices as `contacts2md review decide` (conflicts `apple | markdown | both`, Deleted in Contacts `keep | trash | restore`, Deleted in Markdown `restore | unlink | delete-contact`, Add to Contacts `create-contact`). The next sync applies them; answered items leave the queue at once, and the affected Markdown Only rows say "Will be … on the next sync". A conflict answer applies only while both sides still hold the values it was made against; otherwise the conflict comes back.
 
-**Waiting on M3** (built against the protocol, disabled with "Arrives with two-way sync"): Conflicts (list, Previous/Contacts/Markdown grid, Keep choice per field, Resolve Selected with confirmation, ⌘1–3 for all fields, ⌘↩ apply), Deletions actions (non-destructive defaults, destructive alert), Add to Contacts, Keep This File (merge records), Changed in Markdown, Rescan / Reset. Settings ▸ Accounts has the two vault write options: "Write changes back to Apple Contacts" (`apple_writes`) and "Add sync IDs to contacts (needed when several devices share this folder)" (`stamp_contacts`). Overview warns when more than one device has written to `.c2mdsync/devices/` and stamping is off.
+**Settings switches.** Turning either switch on opens a confirmation sheet; turning it off saves at once. Writing to Contacts explains the vCard backup before every sync that changes Contacts (10 kept), the approval limit (`limits.max_apple_changes_without_approval`), that deletions still wait in Review, and how many changes are waiting now. Sync IDs explain the `x-c2mdsync:` URL, how many contacts and cards get one, that it is only needed with several devices (and how many use the folder), and that stamps need Apple writes on. Both go through `VaultSession.updateSettings`, so every other key in `config.yaml` stays byte-for-byte; a check runs afterwards so held counts update.
 
-**Waiting on M5/M6:** Live toggle, background sync, safety check, menu bar, launch at login, lease and "Waiting for *device*".
+**Banners** (`UIBanner.banners`, from the latest dry run, the stored status and the last Sync Now):
+
+| Banner | When | Action |
+|---|---|---|
+| Sync paused (red) | mass-vanish breaker in the dry run or the last Sync Now | Check Again · Resume Anyway… (confirmed; `allowMassVanish`, deletions are still only queued) |
+| N changes wait for your approval (orange) | blast radius | Apply Anyway… (confirmed; approves exactly N for this sync, more are held again) |
+| N changes held for Apple Contacts (gray) | `apple_writes` off and note edits waiting (stamps alone don't count) | Open Settings… |
+| Waiting for *device* (gray) | another device's unexpired lease (stored, or returned by Sync Now) | Take Over… (confirmed; waits ~60 s, then syncs) |
+| Another sync is running on this Mac (gray) | the local lock was busy | — |
+| Several devices … no sync IDs (orange) | identity warning | Open Settings… |
+
+**Activity details.** `SessionRecord` stores Apple and markdown changes combined and has no held count. For syncs started from the app, `UIVaultReader.sync` keeps the split (and held count and reason) in the device state's metadata (`ui_sync_sessions`, last 200, matched by start time and trigger). Syncs from the CLI or a schedule show "—" in both C/U/D columns with the combined total in the tooltip.
+
+**Still pending.**
+
+- Keep This File (merge records): the M3 decision log has no kind for it and `mergeRecords` items have no choices, so the button stays disabled ("Not supported by the sync engine yet").
+- Rescan Everything / Reset Sync State, the per-change Activity inspector, Export Log.
+- M5/M6: Live toggle, background sync, safety check, menu bar, launch at login.
 
 **Deviations.**
 
-- Onboarding is shown in the main window rather than a separate 640×520 window. Step 4 (review duplicates during onboarding) is not embedded yet: duplicates found by the first preview wait in Review after the first export.
-- The primary action reads **Export Now** until two-way sync exists (`ReviewCapabilities.twoWaySync`).
-- Duplicates: "Sync Only" is a menu next to the group actions, and each card has Open / Reveal buttons. Give the Other a New ID and Delete Other File… are not offered, because the M2 decision log has no kind for them. Keep This One is the only copied-note action.
-- Markdown Only: no rows are ticked by default (Add, the default for rows without a match, is disabled), and Link to Other… (a contact picker) is not built. Rows with a match ≥ 0.5 default to Link, as designed.
-- Activity shows this Mac's sessions only (sessions live in the per-device database). Dry runs are recorded as previews and hidden by default. There is no per-change inspector and no Export Log.
+- Onboarding is shown in the main window rather than a separate 640×520 window. Step 4 (review duplicates during onboarding) is not embedded: duplicates found by the first preview wait in Review after the first export.
+- Duplicates: "Sync Only" is a menu next to the group actions, and each card has Open / Reveal buttons. Give the Other a New ID and Delete Other File… are not offered (no decision kind). Keep This One is the only copied-note action.
+- Markdown Only: no rows are ticked by default, even where Add or Link is the default action, so nothing is applied without a tick. Link to Other… (a contact picker) is not built.
+- Conflicts: Keep Both is offered only where the engine offers it (list elements edited on both sides, the body), never for label conflicts.
+- Deletions: Delete Apple Contact deletes every card of the contact that this Mac can write to (the engine's `delete-contact`), not only the iCloud card; the alert says so and lists the contact's accounts.
+- Activity shows this Mac's sessions only (sessions live in the per-device database). Dry runs are recorded as previews and hidden by default.
 - Device name is read-only: it follows the computer name.
-
+- A two-way dry run takes a second Contacts snapshot only when review items name contacts (duplicates, possible matches), for their card details; `PreparedSync` does not expose its snapshot. Account counts in Settings come from the synced records otherwise.

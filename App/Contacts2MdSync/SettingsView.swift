@@ -97,6 +97,8 @@ private struct FolderSettings: View {
 
 private struct AccountSettings: View {
     let model: AppModel
+    @State private var confirming: OptionChange?
+    @State private var isSaving = false
 
     var body: some View {
         Form {
@@ -124,6 +126,12 @@ private struct AccountSettings: View {
             Section {
                 Toggle("Write changes back to Apple Contacts", isOn: optionBinding(\.appleWrites))
                     .disabled(!optionsEnabled)
+                if let held = model.syncPlan?.held, held > 0, !(model.vaultOptions?.appleWrites ?? true) {
+                    Text("\(held) \(held == 1 ? "change is" : "changes are") waiting for Apple Contacts.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
                 Toggle(
                     "Add sync IDs to contacts (needed when several devices share this folder)",
                     isOn: optionBinding(\.stampContacts)
@@ -137,23 +145,165 @@ private struct AccountSettings: View {
                 .foregroundStyle(.secondary)
             } footer: {
                 if !optionsEnabled {
-                    Text("Both are off. They become available with two-way sync.").foregroundStyle(.secondary)
+                    Text("Available once the notes folder has been read.").foregroundStyle(.secondary)
+                } else if isSaving {
+                    ProgressView().controlSize(.small)
                 }
             }
         }
         .formStyle(.grouped)
+        .sheet(item: $confirming) { change in
+            OptionConfirmation(change: change) {
+                confirming = nil
+                Task { await save(change.options) }
+            } cancel: {
+                confirming = nil
+            }
+        }
     }
 
-    private var optionsEnabled: Bool { model.capabilities.vaultOptions && model.vaultOptions != nil }
+    private var optionsEnabled: Bool { model.capabilities.vaultOptions && model.vaultOptions != nil && !isSaving }
 
-    private func optionBinding(_ keyPath: WritableKeyPath<VaultOptions, Bool>) -> Binding<Bool> {
+    /// Turning a switch off saves at once; turning one on asks first.
+    private func optionBinding(_ keyPath: WritableKeyPath<UIVaultOptions, Bool>) -> Binding<Bool> {
         Binding(
             get: { model.vaultOptions?[keyPath: keyPath] ?? false },
             set: { value in
                 guard var options = model.vaultOptions else { return }
                 options[keyPath: keyPath] = value
-                Task { await model.setVaultOptions(options) }
+                if value {
+                    confirming = keyPath == \.appleWrites ? .appleWrites(options, facts) : .stamping(options, facts)
+                } else {
+                    Task { await save(options) }
+                }
             })
+    }
+
+    private var facts: OptionChange.Facts {
+        let records = model.data?.records.records.values
+        return OptionChange.Facts(
+            heldChanges: model.syncPlan.map { $0.hold == nil ? 0 : $0.changedInMarkdown },
+            limit: model.data?.config.limits.maxAppleChanges ?? 25,
+            contacts: records?.count ?? 0, cards: records?.reduce(0) { $0 + $1.cardIDs.count } ?? 0,
+            devices: model.data?.deviceCount ?? 1, appleWrites: model.vaultOptions?.appleWrites ?? false)
+    }
+
+    private func save(_ options: UIVaultOptions) async {
+        isSaving = true
+        defer { isSaving = false }
+        await model.setVaultOptions(options)
+    }
+}
+
+/// Turning on a vault write switch, with what it means.
+private enum OptionChange: Identifiable {
+    /// Counts the confirmation shows.
+    struct Facts {
+        /// Apple changes the latest check holds (`nil`: no check yet).
+        var heldChanges: Int?
+        var limit: Int
+        var contacts: Int
+        var cards: Int
+        var devices: Int
+        var appleWrites: Bool
+    }
+
+    case appleWrites(UIVaultOptions, Facts)
+    case stamping(UIVaultOptions, Facts)
+
+    var id: String {
+        switch self {
+        case .appleWrites: "apple-writes"
+        case .stamping: "stamping"
+        }
+    }
+
+    var options: UIVaultOptions {
+        switch self {
+        case .appleWrites(let options, _), .stamping(let options, _): options
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .appleWrites: "Write changes back to Apple Contacts?"
+        case .stamping: "Add sync IDs to your contacts?"
+        }
+    }
+
+    var confirmTitle: String {
+        switch self {
+        case .appleWrites: "Turn On"
+        case .stamping: "Add Sync IDs"
+        }
+    }
+
+    var points: [String] {
+        switch self {
+        case .appleWrites(_, let facts):
+            var points = [
+                "Edits you make in your notes are written to the matching contacts on each sync.",
+                "Before any sync that changes Contacts, a vCard backup of all your contacts is saved "
+                    + "(the last 10 are kept; Settings ▸ Advanced ▸ Backups).",
+                "More than \(facts.limit) contacts changed in one sync wait for your approval.",
+                "Nothing is deleted on its own: deletions wait in Deletions for your decision.",
+            ]
+            switch facts.heldChanges {
+            case .some(let count) where count > 0:
+                points.append(
+                    "\(count) \(count == 1 ? "change is" : "changes are") waiting now and will be written "
+                        + "on the next sync.")
+            case .some: points.append("No changes are waiting right now.")
+            case .none: points.append("Check for Changes (⇧⌘R) shows how many changes are waiting.")
+            }
+            return points
+        case .stamping(_, let facts):
+            var points = [
+                "Each synced contact gets a small link (an x-c2mdsync: URL) on its card, so every device "
+                    + "that shares this folder matches it to the same file.",
+                "The next sync writes it onto \(facts.contacts) \(facts.contacts == 1 ? "contact" : "contacts") "
+                    + "(\(facts.cards) \(facts.cards == 1 ? "card" : "cards")), after a vCard backup.",
+                "It is only needed when several devices sync this folder. "
+                    + (facts.devices > 1
+                        ? "\(facts.devices) devices use this folder."
+                        : "Only this Mac uses this folder so far, so you can leave it off."),
+            ]
+            if !facts.appleWrites {
+                points.append("Sync IDs are written only while “Write changes back to Apple Contacts” is on.")
+            }
+            return points
+        }
+    }
+}
+
+/// The sheet confirming an `OptionChange`.
+private struct OptionConfirmation: View {
+    let change: OptionChange
+    let confirm: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(change.title).font(.title3.weight(.semibold))
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(change.points, id: \.self) { point in
+                    Label {
+                        Text(point).fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "circle.fill").font(.system(size: 5)).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel, action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button(change.confirmTitle, action: confirm)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
     }
 }
 
@@ -189,8 +339,8 @@ private struct AdvancedSettings: View {
                 }
             }
             .help("The Contacts notes field needs an Apple entitlement; without it, note bodies stay markdown-only.")
-            LabeledContent("Sync lease", value: "Held by: none")
-                .help("Several Macs sharing one folder take turns. Arrives in M6.")
+            LabeledContent("Sync lease", value: leaseText)
+                .help("Several devices sharing one folder take turns; Take Over appears on the main window banner.")
             LabeledContent("Backups") {
                 HStack {
                     Text("10 kept").foregroundStyle(.secondary)
@@ -208,9 +358,15 @@ private struct AdvancedSettings: View {
                     .disabled(true)
                 Spacer()
             }
-            .help("Arrives with two-way sync")
+            .help("Not available yet")
         }
         .formStyle(.grouped)
+    }
+
+    private var leaseText: String {
+        guard let lease = model.data?.status.lease, lease.expiresAt > Date() else { return "Held by: none" }
+        let holder = lease.deviceID == model.data?.device.id ? "this Mac" : lease.deviceName
+        return "Held by: \(holder) until \(UIFormat.relativeDay(lease.expiresAt))"
     }
 
     private var notesText: String {

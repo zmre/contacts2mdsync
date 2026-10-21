@@ -2,8 +2,9 @@ import Contacts2MdCLI
 import SwiftUI
 
 /// Markdown Only (docs/ui.md §5): contact notes with no Apple contact, with
-/// possible matches (M2 adoption proposals). Choose an action per row, tick
-/// the rows, then Apply.
+/// possible matches. Choose an action per row (Add to Contacts, Link, Not
+/// This Person, Ignore), tick the rows, then Apply. Decisions are applied by
+/// the next sync; Add needs Apple writes on.
 struct MarkdownOnlyView: View {
     let model: AppModel
     @State private var showIgnored = false
@@ -34,9 +35,9 @@ struct MarkdownOnlyView: View {
                 Toggle("Show Ignored", isOn: $showIgnored)
                     .toggleStyle(.checkbox)
                     .help("Show notes you chose to ignore")
-                Button("Add to Contacts") {}
-                    .disabled(true)
-                    .help(ReviewCapabilities.twoWayHelp)
+                Button("Add to Contacts") { stageAdd(for: selection) }
+                    .disabled(!model.capabilities.addToContacts || addable(selection).isEmpty)
+                    .help("Choose Add for the selected rows (then Apply)")
                 Button(applyTitle) { Task { await apply() } }
                     .disabled(applicable.isEmpty || isApplying)
                     .keyboardShortcut(.return, modifiers: .command)
@@ -56,7 +57,10 @@ struct MarkdownOnlyView: View {
 
     private var subtitle: String {
         let open = allRows.filter(\.needsReview).count
-        return "\(open.formatted()) \(open == 1 ? "file has" : "files have") no Apple contact"
+        let text = "\(open.formatted()) \(open == 1 ? "file has" : "files have") no Apple contact"
+        let adding = applicable.contains { action(for: $0) == .addToContacts }
+        return adding && !(model.vaultOptions?.appleWrites ?? false)
+            ? text + " · Add waits until writing to Apple Contacts is on" : text
     }
 
     // MARK: - Table
@@ -110,9 +114,8 @@ struct MarkdownOnlyView: View {
         } else {
             Menu(title(of: action(for: row))) {
                 Button("No Action") { set(.leave, for: row) }
-                Button("Add to Contacts") {}
-                    .disabled(!model.capabilities.addToContacts)
-                    .help(ReviewCapabilities.twoWayHelp)
+                Button("Add to Contacts") { set(.addToContacts, for: row) }
+                    .disabled(!model.capabilities.addToContacts || row.isOrphaned)
                 if !row.matches.isEmpty { Divider() }
                 ForEach(row.matches) { match in
                     Button("Link to “\(match.title)”") { set(.link(itemID: match.id), for: row) }
@@ -143,6 +146,15 @@ struct MarkdownOnlyView: View {
         } else {
             checked.insert(row.id)
         }
+    }
+
+    /// Open rows among `ids` that can be added.
+    private func addable(_ ids: Set<String>) -> [UIMarkdownOnlyRow] {
+        rows.filter { ids.contains($0.id) && $0.needsReview && !$0.isOrphaned }
+    }
+
+    private func stageAdd(for ids: Set<String>) {
+        for row in addable(ids) { set(.addToContacts, for: row) }
     }
 
     private func checkedBinding(_ row: UIMarkdownOnlyRow) -> Binding<Bool> {

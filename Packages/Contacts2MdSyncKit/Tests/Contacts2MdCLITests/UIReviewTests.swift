@@ -164,7 +164,7 @@ struct UIReviewTests {
         try reader.record(UIMarkdownOnlyAction.link(itemID: match.id).decisions(for: row))
         data = try #require(try reader.read())
         row = try #require(UIReviewQueues(data: data).markdownOnly.first)
-        #expect(row.decidedNote == "Will be linked on the next export")
+        #expect(row.decidedNote == "Will be linked on the next sync")
         #expect(!row.needsReview)
         _ = harness.run(["export", "--root", "/vault", "--yes"])
         data = try #require(try reader.read())
@@ -179,7 +179,9 @@ struct UIReviewTests {
         let row = try #require(UIReviewQueues(data: data).markdownOnly.first)
         #expect(row.matches.isEmpty)
         #expect(UIMarkdownOnlyAction.ignore.decisions(for: row) == [.ignoreNote(path: "Archive/Old Landlord.md")])
-        #expect(UIMarkdownOnlyAction.addToContacts.decisions(for: row).isEmpty)
+        #expect(row.defaultAction == .addToContacts)
+        #expect(
+            UIMarkdownOnlyAction.addToContacts.decisions(for: row) == [.addContact(path: "Archive/Old Landlord.md")])
         try reader.record(UIMarkdownOnlyAction.ignore.decisions(for: row))
         data = try #require(try reader.read())
         let queues = UIReviewQueues(data: data)
@@ -229,9 +231,10 @@ struct UIReviewTests {
         #expect(shared.deviceCount == 2)
         #expect(
             UIOverview(data: shared, plan: nil, counts: counts, sessionStart: .distantPast).multiDeviceWithoutStamps)
+        try reader.setOptions(UIVaultOptions(appleWrites: false, stampContacts: true))
+        let stamped = try #require(try reader.read())
         #expect(
-            !UIOverview(data: shared, plan: nil, counts: counts, sessionStart: .distantPast, stampContacts: true)
-                .multiDeviceWithoutStamps)
+            !UIOverview(data: stamped, plan: nil, counts: counts, sessionStart: .distantPast).multiDeviceWithoutStamps)
     }
 }
 
@@ -271,9 +274,10 @@ extension UIReviewTests {
         _ = try reader.plan()
         let afterRemoval = try #require(try reader.read())
         let queues = UIReviewQueues(data: afterRemoval)
-        let missing = try #require(queues.missingNotes.first)
+        let missing = try #require(queues.deletions.first)
         #expect(missing.title == "Jane Doe")
-        #expect(missing.lastPath == "Inbox/Jane Doe.md")
+        #expect(missing.path == "Inbox/Jane Doe.md")
+        #expect(missing.side == .markdown)
         #expect(queues.counts.deletions == 1)
     }
 

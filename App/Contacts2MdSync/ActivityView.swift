@@ -1,8 +1,9 @@
 import Contacts2MdCLI
 import SwiftUI
 
-/// Activity (docs/ui.md §8): runs from this Mac's state (exports, and
-/// previews on request), plus contact notes that could not be read.
+/// Activity (docs/ui.md §8): runs from this Mac's state (syncs and exports
+/// from the app, the command line and schedules; previews on request), plus
+/// contact notes that could not be read.
 struct ActivityView: View {
     let model: AppModel
     @State private var showPreviews = false
@@ -19,7 +20,7 @@ struct ActivityView: View {
             if rows.isEmpty {
                 ContentUnavailableView(
                     "No Activity Yet", systemImage: "clock.arrow.circlepath",
-                    description: Text("Exports from this Mac, the app and the command line, appear here."))
+                    description: Text("Syncs from this Mac, the app and the command line, appear here."))
             } else {
                 table
             }
@@ -45,10 +46,17 @@ struct ActivityView: View {
             TableColumn("Trigger") { row in
                 Text(row.isPreview ? "\(row.trigger) · Preview" : row.trigger).foregroundStyle(.secondary)
             }
-            TableColumn("Contacts C/U/D") { row in counts(row.contacts) }
+            TableColumn("Contacts C/U/D") { row in counts(row.contacts, combined: row.combined) }
                 .width(min: 90, ideal: 100)
-            TableColumn("Markdown C/U/D") { row in counts(row.markdown) }
+            TableColumn("Markdown C/U/D") { row in counts(row.markdown, combined: row.combined) }
                 .width(min: 90, ideal: 110)
+            TableColumn("Held") { row in
+                Text(row.held > 0 ? row.held.formatted() : "—")
+                    .monospacedDigit()
+                    .foregroundStyle(row.held > 0 ? .orange : .secondary)
+                    .help(row.holdReason.map { "Apple changes not made: \($0)" } ?? "")
+            }
+            .width(min: 40, ideal: 50)
             TableColumn("Review") { row in
                 Text(row.review > 0 ? row.review.formatted() : "—").monospacedDigit()
             }
@@ -58,8 +66,13 @@ struct ActivityView: View {
         }
     }
 
-    private func counts(_ counts: UIChangeCounts?) -> some View {
-        Text(counts?.text ?? "—").monospacedDigit().foregroundStyle(counts?.isZero == false ? .primary : .secondary)
+    /// Runs recorded without the Apple / markdown split (command line,
+    /// schedules) show "—" with both sides' total in the tooltip.
+    private func counts(_ counts: UIChangeCounts?, combined: UIChangeCounts?) -> some View {
+        Text(counts?.text ?? "—")
+            .monospacedDigit()
+            .foregroundStyle(counts?.isZero == false ? .primary : .secondary)
+            .help(combined.map { "Both sides together: \($0.created) created, \($0.updated) updated" } ?? "")
     }
 
     @ViewBuilder private func result(_ row: UIActivityRow) -> some View {
@@ -74,7 +87,7 @@ struct ActivityView: View {
         case .failed(let count):
             Label("\(count)", systemImage: "xmark.octagon")
                 .foregroundStyle(.red)
-                .help("\(count) files could not be written")
+                .help("\(count) changes could not be written")
         }
     }
 

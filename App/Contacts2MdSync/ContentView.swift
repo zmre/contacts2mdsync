@@ -1,5 +1,7 @@
 import AppKit
+import Contacts2MdCLI
 import SwiftUI
+import SyncEngine
 
 /// Onboarding until the folder is configured, then the main window.
 struct ContentView: View {
@@ -34,6 +36,7 @@ struct ContentView: View {
 /// The main window (docs/ui.md §1): sidebar, detail, toolbar, inspector.
 struct MainView: View {
     @Bindable var model: AppModel
+    @State private var confirming: SyncOverride?
 
     var body: some View {
         NavigationSplitView {
@@ -58,6 +61,20 @@ struct MainView: View {
             }
         }
         .onChange(of: model.selection) { model.inspect(nil) }
+        .confirmationDialog(
+            confirming?.title ?? "", isPresented: isConfirming, titleVisibility: .visible, presenting: confirming
+        ) { override in
+            Button(override.button, role: override.isRisky ? .destructive : nil) {
+                Task { await model.syncNow(override.request) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { override in
+            Text(override.message)
+        }
+    }
+
+    private var isConfirming: Binding<Bool> {
+        Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })
     }
 
     @ViewBuilder private var detail: some View {
@@ -94,6 +111,33 @@ struct MainView: View {
             if let problems = model.data?.decisionProblems, !problems.isEmpty {
                 Banner(.warning, "\(problems.count) saved decisions could not be read: \(problems[0])")
             }
+            ForEach(model.banners) { banner in
+                Banner(.init(banner.severity), banner.message) {
+                    bannerActions(banner)
+                }
+            }
+        }
+    }
+
+    /// Every override is confirmed first (docs/ui.md §3, §12).
+    @ViewBuilder private func bannerActions(_ banner: UIBanner) -> some View {
+        let busy = model.phase != .idle || !model.setup.isAuthorized
+        switch banner {
+        case .breaker(let trip):
+            Button("Check Again") { Task { await model.check() } }
+                .disabled(busy)
+            Button("Resume Anyway…") { confirming = .resumeAnyway(trip) }
+                .disabled(busy)
+        case .blastRadius(let count, let limit):
+            Button("Apply Anyway…") { confirming = .applyAnyway(count: count, limit: limit) }
+                .disabled(busy)
+        case .appleWritesDisabled, .identity:
+            SettingsLink { Text("Open Settings…") }
+        case .waitingForDevice(let name, _, let expires):
+            Button("Take Over…") { confirming = .takeOver(device: name, expires: expires) }
+                .disabled(busy)
+        case .localRunInProgress:
+            EmptyView()
         }
     }
 
@@ -153,7 +197,7 @@ private struct Sidebar: View {
     }
 }
 
-/// Toolbar status: idle / checking / exporting, orange when review waits.
+/// Toolbar status: idle / checking / syncing, orange when review waits.
 private struct StatusIndicator: View {
     let model: AppModel
 
@@ -165,7 +209,7 @@ private struct StatusIndicator: View {
                 Text(model.phase == .loading ? "Reading…" : "Checking…")
             case .syncing:
                 ProgressView().controlSize(.small)
-                Text(model.capabilities.twoWaySync ? "Syncing…" : "Exporting…")
+                Text(model.data?.hasSynced == false ? "Exporting…" : "Syncing…")
             case .idle:
                 MeaningDot(color: color)
                 Text(text)
@@ -220,6 +264,77 @@ private struct NoAccessView: View {
                 Button("Open System Settings") { setup.openPrivacySettings() }
                     .buttonStyle(.borderedProminent)
             }
+        }
+    }
+}
+
+/// A Sync Now override offered by a banner, with its confirmation.
+private enum SyncOverride: Identifiable {
+    case applyAnyway(count: Int, limit: Int)
+    case resumeAnyway(BreakerTrip)
+    case takeOver(device: String, expires: Date)
+
+    var id: String {
+        switch self {
+        case .applyAnyway: "apply"
+        case .resumeAnyway: "resume"
+        case .takeOver: "take-over"
+        }
+    }
+
+    var request: UISyncRequest {
+        switch self {
+        case .applyAnyway(let count, _): UISyncRequest(maxAppleChanges: count)
+        case .resumeAnyway: UISyncRequest(allowMassVanish: true)
+        case .takeOver: UISyncRequest(takeOver: true)
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .applyAnyway(let count, _): "Write \(count) changes to Apple Contacts?"
+        case .resumeAnyway: "Resume syncing anyway?"
+        case .takeOver(let device, _): "Take over syncing from \(device)?"
+        }
+    }
+
+    var button: String {
+        switch self {
+        case .applyAnyway(let count, _): "Apply \(count) Changes"
+        case .resumeAnyway: "Resume Anyway"
+        case .takeOver: "Take Over"
+        }
+    }
+
+    var isRisky: Bool {
+        if case .takeOver = self { return false }
+        return true
+    }
+
+    var message: String {
+        switch self {
+        case .applyAnyway(let count, let limit):
+            "This sync changes \(count) contacts, more than the \(limit) allowed without approval. "
+                + "A vCard backup of all contacts is saved first. Only this sync is approved, and only up "
+                + "to \(count) changes; if more turn up, they are held again."
+        case .resumeAnyway(let trip):
+            "\(trip.vanished) of \(trip.total) synced \(trip.side == "apple" ? "contacts" : "notes") are missing. "
+                + "If an account was turned off or the folder is unavailable, fix that instead. "
+                + "Resuming does not delete anything: each missing one waits in Deletions for your decision."
+        case .takeOver(let device, let expires):
+            "Only take over if \(device) is off or stuck; its turn ends by itself at "
+                + "\(UIFormat.relativeDay(expires)). This Mac waits about a minute so other devices see "
+                + "the change, then syncs."
+        }
+    }
+}
+
+extension Banner.Style {
+    init(_ severity: UIBanner.Severity) {
+        switch severity {
+        case .info: self = .info
+        case .warning: self = .warning
+        case .error: self = .error
         }
     }
 }

@@ -15,7 +15,7 @@ final class AppModel {
         case loading
         /// A dry run (reads Contacts).
         case checking
-        /// Export Now / Sync Now.
+        /// Sync Now (or the first export on this Mac).
         case syncing
     }
 
@@ -27,12 +27,12 @@ final class AppModel {
     private(set) var data: UIVaultData?
     private(set) var plan: UIPlanSummary?
     private(set) var queues: UIReviewQueues?
-    private(set) var conflicts: [ConflictRecord] = []
-    private(set) var engineDeletions: [DeletionRow] = []
-    private(set) var vaultOptions: VaultOptions?
     private(set) var libraryRows: [UILibraryRow] = []
     private(set) var phase = Phase.idle
-    private(set) var lastExport: UIExportSummary?
+    /// What the last finished Sync Now did.
+    private(set) var lastSync: UISyncSummary?
+    /// How the last Sync Now ended (lease, lock and breaker banners).
+    private(set) var lastOutcome: UISyncOutcome?
     private(set) var snoozed: Set<String> = []
     var errorMessage: String?
     var selection: SidebarItem? = .overview
@@ -54,35 +54,33 @@ final class AppModel {
     /// `Sync Now` once two-way sync exists, `Export Now` before.
     var syncTitle: String { capabilities.twoWaySync ? "Sync Now" : "Export Now" }
 
-    var counts: UIReviewCounts {
-        var counts = queues?.counts ?? UIReviewCounts()
-        counts.conflicts += conflicts.count
-        counts.deletions += engineDeletions.count
-        return counts
-    }
+    var counts: UIReviewCounts { queues?.counts ?? UIReviewCounts() }
 
     var overview: UIOverview? {
-        data.map {
-            UIOverview(
-                data: $0, plan: plan, counts: counts, sessionStart: sessionStart,
-                stampContacts: vaultOptions?.stampContacts ?? false)
-        }
+        data.map { UIOverview(data: $0, plan: plan, counts: counts, sessionStart: sessionStart) }
     }
 
-    /// Engine queues plus notes found missing since the last export (Deleted in Markdown).
-    var deletions: [DeletionRow] {
-        let missing = (queues?.missingNotes ?? []).map { note in
-            DeletionRow(
-                id: note.id, side: .markdown, title: note.title, path: note.lastPath, noticed: note.noticed,
-                cardIDs: data?.records[note.recordID]?.cardIDs ?? [], isActionable: capabilities.deletionActions)
-        }
-        let known = Set(engineDeletions.map(\.id))
-        return engineDeletions + missing.filter { !known.contains($0.id) }
+    var conflicts: [UIConflictRecord] { queues?.conflicts ?? [] }
+
+    /// Both deletion queues.
+    var deletions: [UIDeletionRow] { queues?.deletions ?? [] }
+
+    /// `apple_writes` / `stamp_contacts` (`nil` until the folder is read).
+    var vaultOptions: UIVaultOptions? { capabilities.vaultOptions ? data?.options : nil }
+
+    /// The two-way part of the latest dry run.
+    var syncPlan: UISyncPlanSummary? { plan?.sync }
+
+    /// Breaker, blast radius, held changes, lease and identity banners.
+    var banners: [UIBanner] {
+        guard let data else { return [] }
+        return UIBanner.banners(
+            status: data.status, plan: syncPlan, outcome: lastOutcome, deviceID: data.device.id, now: Date())
     }
 
     var activityRows: [UIActivityRow] {
         guard let data else { return [] }
-        return UIActivityRow.rows(data.sessions, device: data.device)
+        return UIActivityRow.rows(data.sessions, device: data.device, details: data.sessionDetails)
     }
 
     // MARK: - Loading
@@ -95,6 +93,8 @@ final class AppModel {
             data = nil
             plan = nil
             queues = nil
+            lastSync = nil
+            lastOutcome = nil
             libraryRows = []
             snoozed = []
             inspected = nil
@@ -110,9 +110,6 @@ final class AppModel {
         defer { if phase == .loading { phase = .idle } }
         do {
             let loaded = try await source.load(root: root)
-            conflicts = (try? await source.conflicts(root: root)) ?? []
-            engineDeletions = (try? await source.deletions(root: root)) ?? []
-            vaultOptions = try? await source.vaultOptions(root: root)
             guard root == rootURL else { return }
             data = loaded
             libraryRows = loaded.map(UILibraryRow.rows) ?? []
@@ -122,7 +119,7 @@ final class AppModel {
         }
     }
 
-    /// Dry run: what the next export would do; refreshes the review queue.
+    /// Dry run: what the next sync would do; refreshes the review queue.
     func check() async {
         guard let root = rootURL, setup.isAuthorized, phase == .idle else { return }
         phase = .checking
@@ -138,16 +135,24 @@ final class AppModel {
         }
     }
 
-    /// Export Now (⌘R): vCard backup, note backups, then notes.
-    func syncNow() async {
+    /// Sync Now (⌘R): local lock and lease, plan, vCard backup before any
+    /// Apple write, then Contacts and notes. `request` carries the overrides
+    /// the banners offer (Apply Anyway, Resume Anyway, Take Over), each
+    /// confirmed by the user first.
+    func syncNow(_ request: UISyncRequest = UISyncRequest()) async {
         guard let root = rootURL, setup.isAuthorized, phase == .idle else { return }
         phase = .syncing
         snoozed = []
         do {
-            lastExport = try await source.sync(root: root)
+            let outcome = try await source.sync(request, root: root)
             phase = .idle
-            if let failures = lastExport?.failures, !failures.isEmpty {
-                errorMessage = "Some files could not be written:\n" + failures.joined(separator: "\n")
+            guard root == rootURL else { return }
+            lastOutcome = outcome
+            if let summary = outcome.summary {
+                lastSync = summary
+                if !summary.failures.isEmpty {
+                    errorMessage = "Some changes could not be written:\n" + summary.failures.joined(separator: "\n")
+                }
             }
             await reload()
             await check()
@@ -174,30 +179,39 @@ final class AppModel {
         }
     }
 
-    /// Ignore for Now: hidden until the next export or relaunch.
+    /// Ignore for Now: hidden until the next sync or relaunch.
     func snooze(_ itemID: String) {
         snoozed.insert(itemID)
         rebuildQueues()
     }
 
-    func resolve(_ choices: [ConflictChoice]) async {
-        await perform { try await self.source.resolve(choices, root: $0) }
+    /// Records conflict resolutions; the next sync applies each one while
+    /// both sides still hold the values it was made against.
+    @discardableResult
+    func resolve(_ choices: [UIConflictChoice]) async -> Bool {
+        await decide(choices.map(\.decision))
     }
 
-    func applyDeletions(_ choices: [DeletionChoice]) async {
-        await perform { try await self.source.applyDeletions(choices, root: $0) }
+    /// Records deletion decisions; the next sync carries them out.
+    @discardableResult
+    func applyDeletions(_ choices: [UIDeletionChoice]) async -> Bool {
+        await decide(choices.map(\.decision))
+    }
+
+    /// Records "create a contact from this note" for each path.
+    @discardableResult
+    func addToContacts(paths: [String]) async -> Bool {
+        await decide(paths.map { .addContact(path: $0) })
     }
 
     func pickSurvivingFile(itemID: String, path: String) async {
         await perform { try await self.source.pickSurvivingFile(itemID: itemID, path: path, root: $0) }
     }
 
-    func addToContacts(paths: [String]) async {
-        await perform { try await self.source.addToContacts(paths: paths, root: $0) }
-    }
-
-    func setVaultOptions(_ options: VaultOptions) async {
+    /// Writes the vault's sync switches, then re-checks (held counts change).
+    func setVaultOptions(_ options: UIVaultOptions) async {
         await perform { try await self.source.setVaultOptions(options, root: $0) }
+        await check()
     }
 
     /// Changes the folder for new notes; `nil` on success, else the message.
