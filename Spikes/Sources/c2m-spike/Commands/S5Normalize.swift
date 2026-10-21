@@ -198,16 +198,32 @@ struct S5Normalize: ParsableCommand {
                 var markdown = "# S5 normalization catalog\n\ncreated \(before.createdAt), checked \(Stamp.iso())\n"
                 for (kind, card) in before.cards.sorted(by: { $0.key < $1.key }) {
                     markdown += "\n## \(kind)\n\n"
-                    let now: CNContact?
+                    var now: CNContact?
+                    var shownID = card.identifier
                     do {
                         // Read-only fetch; tolerate a stripped marker (that is itself a result).
                         now = try fetchUnderlying(store, id: card.identifier, keys: Snapshot.keys)
-                        if now == nil {
-                            markdown += "card \(card.identifier) NOT FOUND (deleted or identifier changed)\n"
-                        }
                     } catch {
-                        markdown += "card \(card.identifier) not fetchable: \(describe(error))\n"
+                        markdown += "card \(card.identifier) not fetchable by id: \(describe(error))\n"
                         now = nil
+                    }
+                    if now == nil {
+                        // Google replaces a locally created card after its first sync, so the id
+                        // recorded at create time can vanish. Fall back to the marker URL.
+                        do {
+                            now = try Harness.locate(store, marker: card.marker, keys: Snapshot.keys)
+                        } catch {
+                            markdown += "marker lookup failed: \(describe(error))\n"
+                            now = nil
+                        }
+                        if let found = now {
+                            shownID = found.identifier
+                            markdown +=
+                                "card identifier CHANGED: \(card.identifier) -> \(found.identifier) (found by marker)\n"
+                        } else {
+                            markdown +=
+                                "card \(card.identifier) NOT FOUND by id or marker (deleted, or marker URL stripped)\n"
+                        }
                     }
                     let nowRows = now.map(Snapshot.rows(of:)) ?? []
                     let localByKey = Dictionary(
@@ -229,7 +245,7 @@ struct S5Normalize: ParsableCommand {
                         ])
                     }
                     markdown +=
-                        "card \(card.identifier): \(changedCount) of \(card.written.count) written values differ now\n\n"
+                        "card \(shownID): \(changedCount) of \(card.written.count) written values differ now\n\n"
                     markdown += table.render() + "\n"
                 }
                 print(markdown)

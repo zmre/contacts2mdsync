@@ -21,19 +21,21 @@ Source: zmre/mbr-markdown-browser @ `4636f9e`; docs at <https://zmre.github.io/m
 
 Verified against Contacts headers in the macOS 26.5 and 27.0 SDKs (identical public API) unless marked.
 
-- `CNContact.identifier`: "unique among contacts on the device"; persists across launches. Not cross-device. Changes on account re-add, iCloud toggle, restores, re-syncs **[unverified]**. Unified contact id is one of its linked card ids and can change with linking **[unverified]**.
+- `CNContact.identifier`: "unique among contacts on the device"; persists across launches. Not cross-device. Changes on account re-add, iCloud toggle, restores, re-syncs **[unverified]**. **Spikes (2026-10-21):** iCloud card ids stayed stable through linking and through enabling a Google account. A card created locally in a Google container got a new id shortly afterwards (Google sync replaces it); updating an existing Google card did not change its id. A linked contact's unified id is **not** one of its card ids: it is a synthesized id without the `:ABPerson` suffix (a single card's unified id is the card id). Whether it changes on unlink and relink is untested.
+- Contacts links same-name iCloud and Google cards automatically (spike: 1255 of 1353 Google cards linked within about 15 minutes of enabling the account). There is still no public link/unlink API.
 - `unifyResults` defaults to YES. Underlying cards via `unifyResults = false`; map with `unifiedContactWithIdentifier:` / `isUnifiedWithContactWithIdentifier:`. There is **no** public linked-contacts predicate and **no** public API to link/unlink.
 - Private TBD symbols exist (`CNContactExternalUUIDKey`, `CNContactModificationDateKey`, …) — not used (private API).
 - No public modification date or etag. `CNContactDatesKey` is user dates, not metadata.
-- `CNChangeHistoryFetchRequest` (10.15/13): `startingToken`, `additionalContactKeyDescriptors`, `shouldUnifyResults`, `includeGroupChanges`, `excludedTransactionAuthors`. Enumerator methods are `NS_SWIFT_UNAVAILABLE` in 27.0 → ObjC shim with `@try` (enumeration can raise). nil token → `DropEverything` + full snapshot. Errors 603 (expired), 604 (invalid anchor). No link/unlink events; deletes carry only ids; changes coalesced.
+- `CNChangeHistoryFetchRequest` (10.15/13): `startingToken`, `additionalContactKeyDescriptors`, `shouldUnifyResults`, `includeGroupChanges`, `excludedTransactionAuthors`. Enumerator methods are `NS_SWIFT_UNAVAILABLE` in 27.0 → ObjC shim with `@try` (enumeration can raise). nil token → `DropEverything` + full snapshot. Errors 603 (expired), 604 (invalid anchor). No link/unlink events; deletes carry only ids; changes coalesced. **Spike S3:** a garbage token raised no error and no exception; it returned `DropEverything` plus the full snapshot, like a nil token. 604 was never observed and 603 is untested. Group add events arrived even with `includeGroupChanges = false`. `excludedTransactionAuthors` hides authored saves.
 - `CNSaveRequest.transactionAuthor` (12/15), `shouldRefetchContacts` (12.3/15.4). "Last saved change wins."
 - Reading an unfetched key raises `CNContactPropertyNotFetchedException` (ObjC exception → crash in Swift). Guard with `areKeysAvailable:`.
-- Groups: `CNGroup {identifier, name}`; each in one container; Google CardDAV labels not exposed as groups; Exchange rejects groups **[unverified]**. Members must be in the group's container. Subgroups macOS-only.
+- Groups: `CNGroup {identifier, name}`; each in one container; Google CardDAV labels not exposed as groups (confirmed: the Gmail container reports 0 groups); Exchange rejects groups **[unverified]**. Members must be in the group's container. Subgroups macOS-only.
 - `defaultContainerIdentifier` follows the user's Default Account; non-optional in Swift but may be empty without access.
-- `CNContactNoteKey` needs `com.apple.developer.contacts.notes` (request form: developer.apple.com/contact/request/contact-note-field); without it, fetch fails with error 102 **[unverified on macOS Developer ID]**.
+- `CNContactNoteKey` needs `com.apple.developer.contacts.notes` (request form: developer.apple.com/contact/request/contact-note-field); without it, fetch fails with error 102 **[unverified on macOS Developer ID]**. **Spike S2 (un-entitled CLI, macOS 27):** no error 102; the fetch succeeds and `isKeyAvailable(CNContactNoteKey)` is false. Feature-detect with `isKeyAvailable`.
 - `CNContactRelation` = name + label only (no contact reference).
 - Images: `imageData` (original), `thumbnailImageData` (derived, read-only), `imageDataAvailable` (cheap check).
 - Permissions: `NSContactsUsageDescription`; sandbox entitlement `com.apple.security.personal-information.addressbook`. iOS 18 adds `.limited` access + `ContactAccessButton` / `contactAccessPicker` (iOS only).
+- Saving a mutable copy of a *unified* contact writes the change to every linked card (spike S4). Save underlying cards only.
 - `CNContactStoreDidChangeNotification`: fires on changes from other stores, often multiple times; userInfo private → treat as a debounced signal.
 
 ## File access

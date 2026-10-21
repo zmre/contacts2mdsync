@@ -8,7 +8,7 @@ Each spike is a throwaway target under `Spikes/` with a written result here. Run
 | S2 | Notes entitlement: can `com.apple.developer.contacts.notes` be included in a Developer ID provisioning profile; does the notarized app read/write notes; does an un-entitled build get error 102 rather than crash? | Body ↔ notes mapping.                             | Document the exact behavior both ways; confirm runtime feature-detect works.            | **blocked** on Apple approval. Un-entitled CLI: no error 102; the key is silently unavailable |
 | S3 | Change-history shim: enumerate via ObjC, persist token, verify `excludedTransactionAuthors`, force 603/604, measure drop-everything size. | M5 live watch efficiency.                         | Shim compiles (done in M0 skeleton); behavior documented.                                | **done** (iCloud only, before Google was enabled). 603 not provoked; a bogus token gives no 604 |
 | S4 | Unified-contact write semantics: saving to the iCloud card when a linked Google card has a different value — what does the unified view show? Does saving a mutable copy of a unified contact route values predictably? Are `CNLabeledValue.identifier`s stable across saves and iCloud round trips? | Anti ping-pong, write targeting.                  | Rules in architecture §6 confirmed or revised.                                           | **done** for local save semantics. **Partial** on round-trip id stability (longest gap was about 4 min) |
-| S5 | Server normalization catalog: how iCloud and Google rewrite phones, addresses, URLs, labels, birthdays without year, images. | Comparison keys + fake-store fixtures.            | Table of before/after values committed as fixtures.                                     | **partial**: iCloud checked about 70 s after create. Google not captured (card id changed; the check looks up by id) |
+| S5 | Server normalization catalog: how iCloud and Google rewrite phones, addresses, URLs, labels, birthdays without year, images. | Comparison keys + fake-store fixtures.            | Table of before/after values committed as fixtures.                                     | **partial**: iCloud checked about 70 s after create. Google not captured (card id changed; the check looked up by id, now fixed) |
 | S6 | iCloud Drive: does `.c2mdsync/` sync? How do dataless files appear in enumeration and FSEvents? Do two devices writing identical bytes create conflict copies? Is `NSFileVersion` populated? | Vault state + multi-device.                       | If dot-dirs don't sync, switch to visible `_c2mdsync/` (mbr would then show it — check mbr ignore config). | todo |
 | S7 | Yams emitter byte-stability and round-trip of comments/key order.                         | Minimal diffs, preserving user edits.             | Decide: Yams for parse only + own emitter for managed keys (expected).                   | done (M1): Yams parses only; own emitter + span patching; see markdown-schema §4 |
 | S8 | Build/TCC: does ad-hoc signed Nix build re-prompt for Contacts after each rebuild? Does Xcode Debug signed with the team keep the grant? | Dev ergonomics, install path.                      | Expected: ad-hoc re-prompts; use team-signed Debug for daily dev; Developer ID release for nix-darwin. | todo (no evidence yet; S11 never granted the binary itself) |
@@ -96,7 +96,7 @@ Setup: iCloud card with `S4 baseline icloud`, phone …0141. Google card with `S
   - dates and birthdays: `-----02-29` → `-----02-29 cal=gregorian`, and the same for the anniversary and the yearless date. The **local refetch** shows this too, so the framework adds the calendar at save time; the server doesn't.
   - social profiles: Twitter `url=` → `url=http://twitter.com/zzspike`, also in the local refetch. Both social profiles' **lv ids changed** after the save; their values didn't.
   - image: `imageDataAvailable yes → no` and `image png 256x256 6013B → ∅`, with a new `thumbnail png 256x256 6025B sha=2000e26e…`. The full-size image disappeared, at least for now. A thumbnail re-encoded from it is all that's left.
-- **Google: no data.** The check looked the card up by its creation-time id, which had changed, so all 42 rows read `∅`. That's a harness limitation, not something Google did. Before re-running, the check needs a fallback that finds the card by marker.
+- **Google: no data.** The check looked the card up by its creation-time id, which had changed, so all 42 rows read `∅`. That's a harness limitation, not something Google did. The check now falls back to the marker (see Follow-up runs).
 - Confidence: medium for "iCloud keeps text values verbatim", given the short wait. Low for the image behavior.
 
 ### S9: identifier stability
@@ -117,23 +117,106 @@ Setup: iCloud card with `S4 baseline icloud`, phone …0141. Google card with `S
 - A grant held by the terminal doesn't carry over to launchd or cron. In those contexts the binary is its own responsible process, and it has no TCC record yet. That's why nothing appears under System Settings ▸ Privacy & Security ▸ Contacts: a TCC entry only appears after something calls `requestAccess`, and the harness only does that with `--request`.
 - Still open: does `--request` under launchd show a prompt, and does a grant to the bare binary persist? An ad-hoc rebuild would invalidate it (S8). Does the real app bundle's grant apply when its executable is exec'd directly by launchd? The security-scoped bookmark was not tested (the harness has none).
 
-### Proposed design implications (not yet applied to architecture.md)
+### Design changes applied
 
-1. Automatic linking turns most iCloud+Google duplicates into one unified contact. "One file ↔ one unified contact" still holds, and union-find clustering stays as a safety net for the remaining ~98 Google-only and ~1172 iCloud-only cards. "Two stamps on one unified contact" becomes a likely path: Contacts can link two already-stamped contacts on its own, for example when a Google account is enabled later.
-2. Read single-valued fields per underlying card using a deterministic precedence: stamped or iCloud card first. Don't read them from the unified view, which can flip when Google re-saves its card.
-3. When an edit or delete targets a value that exists on several linked cards, apply it to every card holding that value (matched by comparison key). Otherwise the copy on the other card comes back.
-4. Never save a unified mutable copy. It writes to every linked card.
-5. Don't trust a Google card's id until a later snapshot finds it again by its stamp. An id that disappears is not a delete.
-6. Key on underlying card ids. Treat the unified id as a volatile cache.
-7. Comparison keys:
-   - dates: ignore the calendar;
-   - social profiles: key on (service, username), and ignore a synthesized `urlString`;
-   - image: treat `imageDataAvailable=false` with a thumbnail present as unknown, never as deleted;
-   - never key anything on social-profile lv ids.
-8. History: an invalid token doesn't raise an error. A `DropEverything` event is the reset signal.
-9. Headless runs from launchd or cron don't inherit a terminal's grant. The question is still open for the real app identity.
+These findings are now folded into the design docs:
+
+- [architecture §3](architecture.md#3-canonical-model): comparison keys for dates (calendar ignored), social profiles and IM (service + username; synthesized `urlString` ignored), and images (unavailable data with a thumbnail counts as unknown, never as removed).
+- [architecture §6](architecture.md#6-identity-and-duplicate-prevention):
+  - automatic linking, the synthesized unified id, and the blended unified view;
+  - cached-id rules for Google cards;
+  - field values computed from the underlying cards with a fixed precedence;
+  - edits and deletes go to every card holding the value; single-valued fields are written to all linked cards that have them;
+  - never save a unified mutable copy;
+  - two stamps on one unified contact is a common path.
+- [architecture §5 / §9](architecture.md#9-safety-rails): re-fetch new Google cards by stamp; a vanished id whose stamp reappears on another card is churn, not a delete.
+- [architecture §8](architecture.md#8-relationships-groups-notes): notes detection via `isKeyAvailable`.
+- [architecture §10](architecture.md#10-change-detection-and-echo-suppression): `DropEverything` is the reset signal; group events are filtered by type.
+- [architecture §15](architecture.md#15-headless-cli-cron--launchd): the S11 partial result.
+- [markdown-schema §2–§3](markdown-schema.md), [plan.md](plan.md) and [research.md](research.md): updated to match.
 
 ### Cleanup status
 
 - `inventory` at 04:48Z reports `harness cards: 0  name-only (marker lost): 0  marker-only: 0`. The unified count dropped by exactly 5 (2531 → 2526), which matches removing the S1, S3, S5-iCloud and S5-Google cards and the S4 pair. All scratch cards are gone from this Mac. Nobody has checked iCloud.com or contacts.google.com for leftovers.
 - The LaunchAgent is no longer loaded (`launchctl print` can't find it), but `~/Library/LaunchAgents/com.zmre.c2m-spike.s11.plist` still exists. No cron line remains. The logs `/tmp/c2m-spike-s11-{launchd,cron}.log` are still there.
+
+## Follow-up runs
+
+The harness now uses the final marker names: scratch-card marker `c2mdsync-spike` / `x-c2mdsync-spike:…` and stamp `c2mdsync` / `x-c2mdsync:<uuid>`. It still recognizes the legacy `x-mdsync-spike:` and `mdsync` spellings on old cards. `s5-normalize check` now falls back to finding the card by marker when its recorded id is gone, and prints `card identifier CHANGED: <old> -> <new> (found by marker)`.
+
+Run the steps in this order. Steps 2–7 touch the real address book, but only scratch cards are written.
+
+1. **Rebuild.** The `.build` binary predates the rename. A rebuild also changes the ad-hoc signing identity. That doesn't matter for terminal runs (the grant belongs to the terminal), but it does for S11.
+
+   ```sh
+   cd /Users/pwalsh/src/sideprojects/mbr-apple-contact-sync
+   nix develop path:$PWD -c swift build --package-path Spikes
+   alias c2m-spike=$PWD/Spikes/.build/debug/c2m-spike
+   ```
+
+2. **S3: history across the Google enable.** Do this first. `Spikes/results/token.bin` is still the 04:03Z token from before Google was enabled, and both commands below overwrite it.
+
+   ```sh
+   cp Spikes/results/token.bin Spikes/results/token-pre-google-0403Z.bin
+   c2m-spike s3-history --since    # account enable + all spike churn + cleanup: AddContact x1353? DropEverything?
+   c2m-spike s3-history            # nil token: drop-everything size at ~3781 cards
+   ```
+
+3. **Create the scratch cards.** Move the old state files aside first; the new runs overwrite them.
+
+   ```sh
+   mv Spikes/results/s4-state.json  Spikes/results/s4-state-2026-10-21T0426.json
+   mv Spikes/results/s5-before.json Spikes/results/s5-before-2026-10-21T0429.json
+   c2m-spike s1-stamp create --container google --yes && c2m-spike s1-stamp check
+   c2m-spike s4-unified create --yes          # do NOT link the pair by hand
+   c2m-spike s5-normalize create --yes
+   ```
+
+4. **After at least 15 minutes,** with both cards opened once on contacts.google.com and iCloud.com:
+
+   ```sh
+   c2m-spike s1-stamp check            # Google: c2mdsync label + x-c2mdsync: value intact? id changed vs ledger?
+   c2m-spike s4-unified check          # "linked: YES" with no manual link = automatic linking confirmed
+   c2m-spike s4-unified check --yes    # one iCloud-card write; saves s4-state.json
+   c2m-spike s5-normalize check --all  # Google catalog (via marker fallback) + iCloud after a real wait
+   ```
+
+   Then, on contacts.google.com: confirm the S1 card shows the `x-c2mdsync:` URL and note the label it shows. Edit that card's job title, wait for the sync, and run `c2m-spike s1-stamp check` again. Optionally, look at the card on the iPhone.
+
+5. **After at least 30 more minutes:** run `c2m-spike s4-unified check` (no `--yes`). It answers two questions: are the labeled-value ids kept after a real round trip, and did the unified job title flip back to the Google value? Optional: edit the S4 contact's job title in the Contacts.app UI, then run `check` again to see which card or cards the UI wrote to.
+
+6. **S9: one experiment per record/compare pair.**
+
+   ```sh
+   c2m-spike s9-ids record
+   #   Contacts.app: select "ZZ Spike S4 Linked …" → unlink the cards
+   c2m-spike s9-ids compare            # also: did Contacts re-link them by itself?
+   c2m-spike s9-ids record
+   #   select both cards → Card ▸ Link Selected Cards
+   c2m-spike s9-ids compare
+   c2m-spike s9-ids record
+   #   System Settings ▸ Internet Accounts ▸ Google: Contacts off, wait for the count to drop, on, wait 15–30 min
+   c2m-spike s9-ids compare            # Google card id churn; do pairs re-form with new unified ids?
+   ```
+
+   iCloud sign-out and sign-in is optional; it's the riskiest of these experiments.
+
+7. **S11 with a prompt, and S8 evidence.**
+
+   ```sh
+   rm -f /tmp/c2m-spike-s11-launchd.log
+   /usr/libexec/PlistBuddy -c "Add :ProgramArguments:2 string --request" ~/Library/LaunchAgents/com.zmre.c2m-spike.s11.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zmre.c2m-spike.s11.plist
+   launchctl kickstart -k gui/$(id -u)/com.zmre.c2m-spike.s11
+   #   prompt? whose name does it show? approve it, then:
+   launchctl kickstart -k gui/$(id -u)/com.zmre.c2m-spike.s11 && cat /tmp/c2m-spike-s11-launchd.log
+   #   S8: touch a Spikes source file, rebuild (step 1), kickstart again: is the grant gone?
+   launchctl bootout gui/$(id -u)/com.zmre.c2m-spike.s11 && rm ~/Library/LaunchAgents/com.zmre.c2m-spike.s11.plist
+   ```
+
+8. **Clean up.** Afterwards, check contacts.google.com and iCloud.com for leftover "ZZ Spike" cards.
+
+   ```sh
+   c2m-spike cleanup          # dry run
+   c2m-spike cleanup --yes
+   ```

@@ -79,7 +79,7 @@ protocol SyncClock, IDGenerator   // (not `Clock`: that name is taken by the std
 
 Paths in `VaultFS` are root-relative strings (`Inbox/Jane Doe.md`), never URLs: identity is never a path, and relative strings make fakes and goldens trivial.
 
-`FakeContactStore` has switchable misbehaviours that mirror real-world bugs: unified contacts across iCloud/Google/read-only containers, identifier churn, server-normalization echo (`4155550100` → `(415) 555-0100`), linked-card display precedence, missing notes entitlement (error 102), per-container groups. (M1 implements unified multi-account contacts, groups, images, relations, the notes switch, denied access, and stamping; churn, echo and display precedence arrive with the merge work in M3.)
+`FakeContactStore` has switchable misbehaviours that mirror real-world bugs: unified contacts across iCloud/Google/read-only containers, identifier churn, server-normalization echo (`4155550100` → `(415) 555-0100`), linked-card display precedence, missing notes entitlement (the key silently unavailable, as observed in spike S2, or error 102), per-container groups. (M1 implements unified multi-account contacts, groups, images, relations, the notes switch, denied access, and stamping; churn, echo and display precedence arrive with the merge work in M3.)
 
 The app target holds only SwiftUI, an `@Observable AppModel`, FSEvents + `CNContactStoreDidChange` watchers, security-scoped bookmarks, and a `SyncCoordinator` actor that serializes runs.
 
@@ -109,17 +109,25 @@ struct CanonicalContact {
 
 Every value carries a **display form** (exactly as written) and a **comparison key** (for equality, merge, hashing). Display values are never rewritten just because their key is unchanged.
 
-| Field         | Comparison key                                                                 |
-|---------------|--------------------------------------------------------------------------------|
-| email         | trimmed, lowercased                                                           |
-| phone         | E.164 using `default_region`; unparsable → digits and `+`, extension as `;ext=` |
-| url           | lowercase scheme/host, default port and trailing `/` dropped                   |
-| address       | per component: NFC, case-folded, whitespace collapsed; `country_code` uppercased |
-| name / title  | NFC, case-folded, diacritic-folded (matching only)                            |
-| date          | `YYYY-MM-DD` or `--MM-DD`                                                     |
-| body          | `\r\n`→`\n`, trailing whitespace trimmed                                      |
-| tag           | mbr normalization: trim, lowercase, spaces → `_`                              |
-| image         | sha256 of bytes                                                               |
+| Field        | Comparison key                                                                   |
+|--------------|----------------------------------------------------------------------------------|
+| email        | trimmed, lowercased                                                              |
+| phone        | E.164 using `default_region`; unparsable → digits and `+`, extension as `;ext=`  |
+| url          | lowercase scheme/host, default port and trailing `/` dropped                     |
+| address      | per component: NFC, case-folded, whitespace collapsed; `country_code` uppercased |
+| name / title | NFC, case-folded, diacritic-folded (matching only)                               |
+| date         | `YYYY-MM-DD` or `--MM-DD`; calendar ignored                                      |
+| social / im  | (service, username), both lowercased; a synthesized `urlString` is ignored       |
+| body         | `\r\n`→`\n`, trailing whitespace trimmed                                         |
+| tag          | mbr normalization: trim, lowercase, spaces → `_`                                 |
+| image        | sha256 of `imageData`; unavailable data with a thumbnail = *unknown*             |
+
+Observed rewrites behind these keys ([spike S5](spikes.md#s5-normalization-catalog), iCloud only so far; Google pending):
+
+- **Dates**: Contacts sets `calendar = gregorian` on save, including on yearless dates. The key ignores the calendar.
+- **Social profiles**: Contacts fills in `urlString` for known services on save (Twitter `zzspike` → `http://twitter.com/zzspike`), and iCloud gives social profiles new labeled-value ids after the save. Key on (service, username); never on their labeled-value ids.
+- **Images**: after the iCloud sync, a 256×256 PNG came back as `imageDataAvailable = false`, no `imageData`, and a re-encoded thumbnail. That state never counts as "image removed" and never deletes the markdown image; the image's comparison is skipped until `imageData` is available again.
+- **Verbatim on iCloud**: phone formats, labels (including custom and nil labels), email case, URLs without a scheme or in uppercase, addresses (lowercase state, ISO code and postcode), names, and `&` or `/` in organization fields.
 
 ## 4. State tiers
 
@@ -157,13 +165,19 @@ acquire lease ──► scan vault ──► snapshot Apple ──► match/bind
 5. **Plan** — a list of typed operations: `createFile`, `updateFile`, `updateCard`, `createCard`, `addToGroup`, `queueDelete`, `conflict`, `review`. The UI shows it; the CLI prints it.
 6. **Safety rails** — §9.
 7. **Execute** — Apple writes first (one `CNSaveRequest` per batch, `transactionAuthor = com.zmre.contacts2mdsync.<deviceID>`), then re-fetch the touched contacts, then markdown writes.
-8. **Refresh base** from the post-write re-fetch so that server normalization becomes the new base and never echoes back.
+8. **Refresh base** from the post-write re-fetch so that server normalization becomes the new base and never echoes back. A card we just created in a Google container is re-fetched by its stamp, not by identifier: Google sync replaces it with a new identifier shortly after the first save ([spike S9](spikes.md#s9-identifier-stability)).
 
 ## 6. Identity and duplicate prevention
 
 ### One file ↔ one unified contact
 
 A markdown file is bound to exactly one *unified* Apple contact. We never silently fold two unified contacts into one file.
+
+What the unified contact looks like in practice ([spikes S4 and S9](spikes.md#cross-cutting-finding-icloud-and-google-cards-were-linked-automatically)):
+
+- **Contacts links iCloud and Google cards automatically.** After the user's Google account was enabled, 1255 of its 1353 cards were linked to an iCloud card within about 15 minutes, with no user action. Each linked contact had exactly one iCloud card and one Google card. What stayed unlinked: 98 Google-only cards, 1172 iCloud-only cards, and 1 On My Mac card. Two cards with the same emails but different family names were not linked, so a name match is required; whether a name match alone is enough is untested.
+- **A linked contact's unified id is synthesized.** It is neither card's identifier, and it has no `:ABPerson` suffix. A single card's unified id is the card id. Treat the unified id as a volatile cache: device state keys records on the stamp and the underlying card ids, and re-derives the unified id on every snapshot.
+- **The unified view is a blend.** Multi-valued fields are the union of the cards, with values that are identical across cards shown once. Which card supplies a collapsed value, and therefore its labeled-value id, can change. Single-valued fields show one card's value; the observations fit "the most recently saved card wins", so a Google sync that re-saves its card can flip the display. The engine therefore never reads field values from the unified view (see *Stamping and write targets*).
 
 ### Matching cascade
 
@@ -175,6 +189,8 @@ A markdown file is bound to exactly one *unified* Apple contact. We never silent
 | 4    | email or phone equal, name differs              | 0.70       | propose                                      |
 | 5    | name + organization equal                       | 0.50       | propose                                      |
 | 6    | name only                                       | 0.30       | warning only                                 |
+
+**Cached ids (step 2).** iCloud card identifiers were stable in every spike run, including through linking and through enabling another account. A card we create in a Google container gets a new identifier once Google sync replaces it, so its id is not cached until a later snapshot finds the card again by its stamp. A cached id that disappears means "re-resolve by stamp and cascade", never "deleted" (see the Apple delete rail in §9).
 
 **Create gate.** Before creating anything on either side, the candidate runs through the cascade against the whole other side *and* against unstamped person notes in the vault. Any hit ≥ 0.5 blocks auto-creation and moves the item to Review.
 
@@ -188,17 +204,27 @@ Union-find over unified contacts on shared strong keys (email key, E.164 phone) 
 
 Until resolved, a cluster produces at most one file (the iCloud-backed member) so the first import never fans out duplicates.
 
+Because Contacts links same-name iCloud and Google cards by itself, most cross-account duplicates arrive already unified. Clustering is the safety net for the rest: cards whose names differ (nickname, maiden name, typo), Google-only and iCloud-only contacts, and same-name cards Contacts didn't link.
+
 ### Stamping and write targets
 
-- Stamp lives on the iCloud underlying card; if none, the first writable card.
-- **Additions** go to the iCloud card.
-- **Edits/deletes of existing values** go to whichever underlying card holds that value (matched by comparison key).
-- **Single-valued fields** go to the iCloud card; after save, re-fetch the unified contact. If the unified value didn't change (a linked card wins display), write to every writable card that has the field. If it still doesn't stick, mark the field `unapplyable` and stop retrying — the main Apple-side anti-ping-pong guard.
+The Apple-side value of a field is computed from the underlying cards, not read from the unified view:
+
+- **Multi-valued fields**: the union of every card's values, de-duplicated by comparison key.
+- **Single-valued fields**: the first non-empty value in precedence order: stamped card, then iCloud card, then other writable cards, then read-only cards, ties broken by card id. The order is deterministic, so a Google re-save that flips the unified display is not an Apple-side change.
+
+Write targets:
+
+- Stamp lives on the iCloud underlying card; if none, the first writable card. Google-only contacts get the stamp on the Google card (stamp survival on Google is still being verified, [spike S1](spikes.md#s1-stamp-survival)).
+- **Additions** go to the iCloud card (for Google-only contacts, the Google card).
+- **Edits/deletes of existing values** go to **every** writable underlying card that holds a value with that comparison key. A value often exists on both linked cards (the shared email case), and editing only one card would let the other copy come back through the union.
+- **Single-valued fields** are written to the iCloud card and to every other writable card that has a non-empty value for the field, all in one `CNSaveRequest`, so the cards agree whichever one wins the unified display. After save, each written card is re-fetched and checked. A card that doesn't keep the value (server rejection or rewrite outside its comparison key) gets the field marked `unapplyable` for that card and is not retried: the main Apple-side anti-ping-pong guard.
+- **Never save a mutable copy of a unified contact.** Spike S4 showed that it writes the change to every linked card (the same new email, with the same labeled-value id, appeared on both cards, and the Google card's own job title was overwritten). All saves target underlying cards fetched with `unifyResults = false`.
 - **New contacts** (opted in from markdown) are created in the iCloud container.
 
 ### Linking/unlinking after the fact
 
-- User links two cards in Contacts.app that we had stamped separately → two stamps on one unified contact → *merge-records proposal* in Duplicates: user picks the surviving file; on confirm, the other file is deleted (Trash) and its stamp removed.
+- Two stamped contacts become linked → two stamps on one unified contact → *merge-records proposal* in Duplicates: user picks the surviving file; on confirm, the other file is deleted (Trash) and its stamp removed. With automatic linking this is a common path, not an edge case: it happens when the user links cards by hand, when a Google account is enabled after the first export, or when a card is renamed so the names match. Headless runs report it as a `WARNING duplicate` line and leave both files alone.
 - User unlinks a stamped contact → the stamped card keeps identity; the other card looks new, matches ≥ 0.9 against the existing file, and appears as "possible duplicate", not a new file.
 
 ### Vault-side duplicates
@@ -214,7 +240,7 @@ Always a dry-run plan first: N files to create, M existing notes to adopt, K clu
 
 `ExportPlanner` → `ExportPlan` → `ExportExecutor` (SyncEngine). The plan holds final, validated bytes; executing it only writes.
 
-1. **Identity**: stamp on any card, else the per-device `RecordMap` (unified id, then any card id; ambiguous card overlap → unbound). Several different stamps on one unified contact → review, skipped. A stamp from another vault (no binding here) simply reuses that id for the new note.
+1. **Identity**: stamp on any card, else the per-device `RecordMap` (unified id, then any card id; ambiguous card overlap → unbound). From M2 the card ids come first and the unified id is only a hint, because a linked contact's unified id is synthesized and volatile (spike S4). Several different stamps on one unified contact → review, skipped. A stamp from another vault (no binding here) simply reuses that id for the new note.
 2. **Clusters**: union-find on email key, E.164 phone key (≥ 7 digits) and exact name+organization. Name+organization requires a non-empty organization; name-only never clusters (two distinct "John Smith"s would otherwise block each other with no way to resolve in M1). Until resolved, a cluster yields one note: if a member already has a note, no other member gets one; otherwise the primary does (iCloud-backed, then local, then lowest unified id). Every cluster is a review item.
 3. **Notes**: a bound record's note is found by `c2mdsync.id` anywhere under the root and patched in place (moves are free). A bound record whose note is gone is reported as `missing` and not re-created unless `--restore-missing`. A copied note (duplicate `c2mdsync.id`) pauses that record.
 4. **Create gate**: an unbound contact is not created when it matches a contact note nobody is bound to: by strong key (email, phone, name+organization) for any such note, and also by plain title for *orphaned* notes (they carry an `c2mdsync.id` no Apple contact is bound to — e.g. the device state was lost). This makes a lost record map fail safe: nothing is duplicated, everything is reported for review.
@@ -271,7 +297,7 @@ A conflict never blocks the record's other fields. Resolutions are applied on th
 
 **Groups** — see [markdown-schema.md §7](markdown-schema.md#7-tags-and-groups). Tracked by CN group id per device; shared config keyed by group name. Apple-side group rename updates the map and renames the tag in managed files. Groups in non-iCloud/Local containers are ignored.
 
-**Notes** — feature-detected at runtime (`capabilities.notesAvailable`, probe fetch with `CNContactNoteKey`, error 102 → unavailable). When unavailable, the body is markdown-only and the body field is excluded from merge. Ad-hoc/Nix-built binaries will never have it; the notarized Developer ID release will once Apple approves the request.
+**Notes** — feature-detected at runtime (`capabilities.notesAvailable`): probe-fetch one card with `CNContactNoteKey`, then check `isKeyAvailable(CNContactNoteKey)`. An un-entitled build gets no error: the fetch succeeds and the key is silently missing (spike S2, macOS 27). Error 102 is still treated as unavailable in case an entitled-but-revoked build reports it. Never read `.note` without the `isKeyAvailable` check: an unfetched key raises `CNContactPropertyNotFetchedException`. When unavailable, the body is markdown-only and the body field is excluded from merge. Ad-hoc/Nix-built binaries will never have it; the notarized Developer ID release will once Apple approves the request.
 
 ## 9. Safety rails
 
@@ -287,10 +313,12 @@ A conflict never blocks the record's other fields. Resolutions are applied on th
 | Invalid YAML             | never written; listed in Activity.                                                                   |
 | Unapplyable fields       | fields Apple refuses or that don't stick are recorded and not retried until they change.            |
 
+A card id that vanishes while its stamp shows up on another card is identifier churn, not a delete (Google replaces cards we create, spike S9): the record is rebound silently. Only a card that is gone by id, stamp and cascade counts toward the Apple delete rail.
+
 ## 10. Change detection and echo suppression
 
 - **Markdown**: canonical-model hash vs base (bytes never compared directly). FSEvents (file-level) triggers a debounced run. Own writes are remembered as (path, sha) for 30 s and ignored.
-- **Apple**: full snapshot diff through M4 (thousands of contacts ≈ 1 s). From M5 the ObjC-shimmed change-history enumerator narrows the set; history fetch excludes `com.zmre.contacts2mdsync.*` authors; errors 603/604, nil token, or `DropEverything` → full snapshot. `CNContactStoreDidChange` is only a debounced "go look" signal.
+- **Apple**: full snapshot diff through M4 (thousands of contacts ≈ 1 s). From M5 the ObjC-shimmed change-history enumerator narrows the set; history fetch excludes `com.zmre.contacts2mdsync.*` authors (spike S3: works); a `DropEverything` event, a nil token, or error 603/604 → full snapshot. `DropEverything` is the main reset signal: a garbage token raised no error and no exception, it just returned `DropEverything` plus the full snapshot (S3). Group events arrive even with `includeGroupChanges = false`, so events are filtered by type. Saves made by Google sync after our own writes (for example, replacing a card we created) are not authored by us and show up as changes; comparison keys and the stamp-based re-fetch absorb them. `CNContactStoreDidChange` is only a debounced "go look" signal.
 - **Server echo** (iCloud/Google reformatting our writes) is neutralized by comparison keys plus refreshing the base from a post-write re-fetch.
 - Combined debounce ≈ 3 s; `SyncCoordinator` actor guarantees one run at a time.
 
@@ -308,7 +336,7 @@ Live sync is event-driven, not polling. Events can be missed, though: the app ma
 
 - Catch-up and sweep runs use the same engine path, safety rails, and lease as every other run. A full compare costs ~1 s for a few thousand contacts plus a stat of every file (parse cache means only changed files are re-read).
 - Timers use `NSBackgroundActivityScheduler` so macOS can coalesce them for battery life.
-- If the Contacts history token is expired (603/604), the next run of any kind falls back to a full snapshot.
+- If the Contacts history token is expired or invalid (603/604, or a `DropEverything` event), the next run of any kind falls back to a full snapshot.
 - When the app isn't running at all, the launchd schedule (§15) is the only trigger.
 
 ## 11. Multi-device
@@ -353,7 +381,7 @@ macOS ties both Contacts permission (TCC) and the sandboxed security-scoped fold
 - The nix package (and a `just` recipe) installs a `bin/contacts2md` wrapper that `exec`s that binary.
 - It shares the app's sandbox container, so it reads the same bookmark, device state DB and config.
 - If Contacts access hasn't been granted, the CLI fails fast (exit 3) and tells you to open the app once. It never prompts.
-- **[spike S11]** Verify how TCC attributes access when the binary is started from Terminal, cron and launchd. The fallback is launching via `open -g -a Contacts2MdSync --args sync --wait`, which keeps the app as the responsible process.
+- **[spike S11, partial]** Started directly by launchd or cron, a binary is its own responsible process: the spike binary, authorized when run from the terminal, reported `notDetermined` under both and never prompted. So a terminal's grant does not carry over. Still to verify: whether the *app's* executable, exec'd directly by launchd, uses the app bundle's grant. Until then, keep the fallback: launch via `open -g -a Contacts2MdSync --args sync --wait`, which keeps the app as the responsible process.
 
 ### Commands
 
@@ -447,7 +475,7 @@ Code 1 is separate from 0 so a wrapper can notify only when review is needed.
   ```
 
   This creates `launchd.user.agents.contacts2mdsync-sync` that runs `contacts2md sync --quiet`.
-- **cron still works** (`0 * * * * /Applications/Nix\ Apps/Contacts2MdSync.app/Contents/MacOS/Contacts2MdSync sync`), subject to spike S11.
+- **cron may work** (`0 * * * * /Applications/Nix\ Apps/Contacts2MdSync.app/Contents/MacOS/Contacts2MdSync sync`), subject to spike S11. In the spike, cron behaved the same as launchd (`notDetermined` for an ungranted binary).
 - Settings ▸ General gets a "Sync every [1 hour ▾] in the background" toggle that installs the same LaunchAgent via `SMAppService` for non-nix installs.
 
 ### Shared engine guarantees

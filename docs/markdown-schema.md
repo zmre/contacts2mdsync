@@ -95,6 +95,12 @@ Everything below the frontmatter is the Apple Contacts "Notes" field
 | `c2mdsync.*`                              | `urlAddresses` stamp (`c2mdsync` / `x-c2mdsync:<uuid>`) | engine    | See §3.                                                                                                     |
 | any other key                             | —                                                       | md-only   | Preserved byte-for-byte, in place.                                                                          |
 
+Apple-side rewrites the mapping has to absorb ([spike S5](spikes.md#s5-normalization-catalog)):
+
+- **`social`**: Contacts fills in a `urlString` for known services on save (`twitter: zzspike` gains `http://twitter.com/zzspike`). A URL that equals the one Contacts synthesizes for that service and username is not exported, so a bare handle in markdown stays a bare handle.
+- **`image`**: after an iCloud sync, Apple can report `imageDataAvailable = false` and offer only a re-encoded thumbnail. In that state the existing `_images/` file and the `image:` key are kept unchanged; the thumbnail is never exported in place of the original. If no image file exists yet, nothing is exported until `imageData` is available.
+- **`dates`**: Contacts sets a Gregorian calendar on saved dates, including yearless ones. The calendar is not exported; `--MM-DD` stays `--MM-DD`.
+
 ### Label mapping (Apple → markdown)
 
 | Apple label constant          | Markdown label |
@@ -131,7 +137,7 @@ c2mdsync:
 ```
 
 - Contains nothing device-specific and no timestamps, so files stay git-diff-clean and identical across devices (no iCloud conflict copies from metadata churn).
-- `id` is also stamped on the Apple contact (iCloud underlying card) as a URL: label `c2mdsync`, value `x-c2mdsync:<uuid>`.
+- `id` is also stamped on the Apple contact as a URL: label `c2mdsync`, value `x-c2mdsync:<uuid>`. The stamp goes on the iCloud underlying card. A Google-only contact gets it on its Google card (survival on Google is still being verified, spike S1). The stamp survived iCloud.com and iPhone edits.
 - A note with `type: person|organization` and **no** `c2mdsync.id` is a *markdown-only candidate*. It is never pushed to Contacts unless the user opts it in from the UI.
 - Two files with the same `c2mdsync.id` (copied file) pause sync for that record until the user picks one.
 
