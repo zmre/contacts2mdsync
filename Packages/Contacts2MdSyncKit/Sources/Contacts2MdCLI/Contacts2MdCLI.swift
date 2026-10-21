@@ -23,7 +23,9 @@ public enum CLIExitCode: Int32, Sendable {
 /// (`contacts2md`) and the app binary (`Contacts2MdSync <subcommand>`) run it.
 public enum Contacts2MdCLI {
     /// First arguments that select the CLI in the app binary.
-    public static let subcommandNames: Set<String> = ["status", "plan", "sync", "export", "review", "config", "help"]
+    public static let subcommandNames: Set<String> = [
+        "status", "plan", "sync", "watch", "export", "review", "config", "help",
+    ]
 
     /// `true` when `arguments` (without the executable path) ask for the CLI.
     /// Unknown flags such as `-NSDocumentRevisionsDebugMode` (Xcode) do not.
@@ -76,8 +78,8 @@ struct RootCommand: ParsableCommand {
             5 error, 64 usage.
             """,
         subcommands: [
-            StatusCommand.self, PlanCommand.self, SyncCommand.self, ExportCommand.self, ReviewCommand.self,
-            ConfigCommand.self,
+            StatusCommand.self, PlanCommand.self, SyncCommand.self, WatchCommand.self, ExportCommand.self,
+            ReviewCommand.self, ConfigCommand.self,
         ]
     )
 }

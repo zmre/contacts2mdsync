@@ -26,6 +26,8 @@ extension Session {
             }
             let prepared = try session.prepareSync(request)
             let plan = prepared.plan
+            report.info("apple    \(prepared.apple.kind.summary)")
+            json?.setting("apple_read", prepared.apple.isComplete ? "full" : "incremental")
             json?.reviews(plan.markdown.reviews)
             json?.setting("apple_writes", plan.appleWritesEnabled ? "enabled" : "disabled")
             json?.setting("stamp_contacts", plan.stampContacts ? "true" : "false")

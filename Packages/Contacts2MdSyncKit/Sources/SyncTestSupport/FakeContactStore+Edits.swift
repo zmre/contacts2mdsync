@@ -18,8 +18,15 @@ extension FakeContactStore {
     /// Operations addressed to a unified id instead of a card (must stay 0).
     public var unifiedSaveCount: Int { state.withLock { $0.unifiedSaves } }
 
-    /// Replaces the contacts (simulate edits made in Contacts.app).
-    public func replaceContacts(_ contacts: [AppleContact]) { state.withLock { $0.contacts = contacts } }
+    /// Replaces the contacts (simulate edits made in Contacts.app). The
+    /// change history is reset too (older tokens get `DropEverything`).
+    public func replaceContacts(_ contacts: [AppleContact]) {
+        state.withLock {
+            $0.contacts = contacts
+            $0.historyEpoch += 1
+            $0.history = []
+        }
+    }
 
     /// Current contacts (including writes applied so far).
     public var contacts: [AppleContact] { state.withLock { $0.contacts } }
@@ -52,6 +59,7 @@ extension FakeContactStore {
             else { return }
             edit(&values)
             state.contacts[index].cards[cardIndex].values = values
+            state.history.append((nil, .changed(cardID)))
             state.saveSequence += 1
             state.lastSaved[cardID] = state.saveSequence
             FakeCardValues.recomputeUnified(&state.contacts[index], lastSaved: state.lastSaved)
@@ -64,16 +72,29 @@ extension FakeContactStore {
             guard let index = state.contacts.firstIndex(where: { $0.cards.contains { $0.id == cardID } }) else {
                 return
             }
+            let before = state.contacts[index]
             edit(&state.contacts[index])
+            for card in Set(before.cards.map(\.id) + state.contacts[index].cards.map(\.id)).sorted() {
+                state.history.append((nil, .changed(card)))
+            }
         }
     }
 
     /// Adds a contact (created in Contacts.app).
-    public func add(_ contact: AppleContact) { state.withLock { $0.contacts.append(contact) } }
+    public func add(_ contact: AppleContact) {
+        state.withLock { state in
+            state.contacts.append(contact)
+            for card in contact.cards { state.history.append((nil, .changed(card.id))) }
+        }
+    }
 
     /// Deletes the contact holding `cardID` (all its cards), as in Contacts.app.
     public func deleteContact(withCard cardID: String) {
-        state.withLock { state in state.contacts.removeAll { $0.cards.contains { $0.id == cardID } } }
+        state.withLock { state in
+            let removed = state.contacts.filter { $0.cards.contains { $0.id == cardID } }
+            state.contacts.removeAll { $0.cards.contains { $0.id == cardID } }
+            for card in removed.flatMap(\.cards) { state.history.append((nil, .deleted(card.id))) }
+        }
     }
 
     /// Links the contacts with these (stored) unified ids into one, as
@@ -92,6 +113,7 @@ extension FakeContactStore {
                     cards.append(card)
                 }
             }
+            for card in cards { state.history.append((nil, .changed(card.id))) }
             var unified = members.last?.contact ?? members[0].contact
             for member in members.dropLast() {
                 unified.emails += member.contact.emails.filter { !unified.emails.contains($0) }
@@ -117,6 +139,8 @@ extension FakeContactStore {
                     guard !state.churned.contains(old) else { continue }
                     let new = old + "~google-sync"
                     state.churned.insert(new)
+                    state.history.append((nil, .deleted(old)))
+                    state.history.append((nil, .changed(new)))
                     contact.cards[cardIndex].id = new
                     if contact.unifiedID == old { contact.unifiedID = new }
                 }
@@ -124,4 +148,35 @@ extension FakeContactStore {
             }
         }
     }
+}
+
+/// Change history controls (M5).
+extension FakeContactStore {
+    /// Invalidates every token handed out so far: the next history read from
+    /// an older token gets `DropEverything` (`.reset`), as after a Contacts
+    /// database rebuild or a garbage token (spike S3).
+    public func resetHistory() {
+        state.withLock {
+            $0.historyEpoch += 1
+            $0.history = []
+        }
+    }
+
+    /// `false`: `changes(since:)` returns `.unsupported` and there is no token.
+    public func setHistorySupported(_ supported: Bool) { state.withLock { $0.historySupported = supported } }
+
+    /// The next history read throws (error 603-style failure).
+    public func failNextHistory() { state.withLock { $0.failNextHistory = true } }
+
+    /// A group was added, renamed or deleted (a group-level history event).
+    public func recordGroupChange() { state.withLock { $0.history.append((nil, .group)) } }
+
+    /// Full snapshots taken so far.
+    public var snapshotCount: Int { state.withLock { $0.snapshots } }
+
+    /// History reads so far.
+    public var historyReadCount: Int { state.withLock { $0.historyReads } }
+
+    /// Card ids of each `refetch` call so far.
+    public var refetchedCardIDs: [[String]] { state.withLock { $0.refetches } }
 }

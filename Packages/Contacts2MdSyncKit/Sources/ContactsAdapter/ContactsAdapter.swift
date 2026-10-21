@@ -91,8 +91,31 @@ public struct CNContactStoreAdapter: ContactStore {
         return order.compactMap { byCard[$0] } + creates
     }
 
+    /// Change history since `token`, card-level (`shouldUnifyResults = NO`),
+    /// without the saves of `authors`. A `DropEverything` event, a `nil`
+    /// token, or error 603/604 → `.reset` (architecture §10).
     public func changes(since token: Data?, excluding authors: [String]) throws -> HistoryResult {
-        .unsupported  // M5: change-history acceleration via ContactsShim.
+        try Self.ensureAccess()
+        let store = CNContactStore()
+        do {
+            let batch = try ContactsAdapter.changeHistory(
+                in: store, keysToFetch: [CNContactIdentifierKey as NSString], since: token, unify: false,
+                excludingAuthors: authors)
+            return ContactsAdapter.summarize(
+                batch.events.compactMap(ContactsAdapter.classify), since: token, newToken: batch.currentToken)
+        } catch let error where ContactsAdapter.isTokenError(error) {
+            return .reset(token: store.currentHistoryToken)
+        }
+    }
+
+    public func currentHistoryToken() throws -> Data? {
+        try Self.ensureAccess()
+        return CNContactStore().currentHistoryToken
+    }
+
+    public func refetch(cardIDs: [String], siblingHints: [String]) throws -> AppleRefetch {
+        try Self.ensureAccess()
+        return try SnapshotReader(store: CNContactStore()).refetch(cardIDs: cardIDs, siblingHints: siblingHints)
     }
 
     public func exportVCards() throws -> Data {
@@ -173,7 +196,7 @@ public struct CNContactStoreAdapter: ContactStore {
 }
 
 /// Namespace for Contacts.framework helpers that are not part of the
-/// `ContactStore` seam (change history, used from M5).
+/// `ContactStore` seam (change-history plumbing).
 public enum ContactsAdapter {
     /// The `ContactModel` schema version this adapter maps to.
     public static let schemaVersion = ContactModel.schemaVersion

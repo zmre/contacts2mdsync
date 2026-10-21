@@ -46,6 +46,10 @@ public final class SyncHarness: Sendable {
     public let backupDirectory: URL
     /// The device this harness syncs as.
     public let device: DeviceIdentity
+    /// How runs read Apple Contacts: `.incremental` (default) uses the change
+    /// history and the cached snapshot like `VaultSession`; `nil` takes a
+    /// plain full snapshot without touching the cache.
+    public let appleMode: AppleReadMode?
 
     /// Creates a world whose vault is configured with `apple_writes` and
     /// `stamp_contacts` as given (the vault id and region are fixed).
@@ -53,8 +57,9 @@ public final class SyncHarness: Sendable {
         store: FakeContactStore, vault: InMemoryVault = InMemoryVault(), appleWrites: Bool = true,
         stampContacts: Bool = false, device: DeviceIdentity = SyncHarness.device,
         state: InMemorySyncStateStore = InMemorySyncStateStore(), clock: TestClock? = nil,
-        ids: SequentialIDGenerator = SequentialIDGenerator(start: 1)
+        ids: SequentialIDGenerator = SequentialIDGenerator(start: 1), appleMode: AppleReadMode? = .incremental
     ) {
+        self.appleMode = appleMode
         self.store = store
         self.vault = vault
         self.state = state
@@ -131,15 +136,52 @@ public final class SyncHarness: Sendable {
         return plan
     }
 
+    /// The change tracker runs use (history acceleration, architecture §10).
+    public var tracker: AppleChangeTracker {
+        AppleChangeTracker(store: store, state: state, deviceID: device.id)
+    }
+
     /// Gathers and plans a sync (writes only the observations, like `plan`).
     public func plan(_ options: SyncOptions = SyncOptions()) throws -> (plan: SyncPlan, index: VaultIndex) {
+        let gathered = try gatherAndPlan(options, mode: appleMode)
+        try SyncPlanner.recordObservations(gathered.plan, index: gathered.index, state: state, now: clock.now)
+        if appleMode != nil, gathered.plan.breaker == nil {
+            try tracker.commit(gathered.apple, postWrite: nil, compared: false, now: clock.now)
+        }
+        return (gathered.plan, gathered.index)
+    }
+
+    /// Gathers and plans like `VaultSession.prepareSync` (re-planned on a full
+    /// snapshot when an incremental plan needs images it did not read).
+    public func gatherAndPlan(_ options: SyncOptions = SyncOptions(), mode: AppleReadMode?) throws -> Planned {
         let loaded = try VaultConfig.load(from: vault)
-        let gathered = try SyncPlanner.gather(
-            fs: vault, store: store, state: state, config: (try config, loaded?.text), now: clock.now)
-        let plan = try SyncPlanner(fs: vault, keyer: keyer, ids: ids, options: options).plan(
-            gathered.including(device).inputs)
-        try SyncPlanner.recordObservations(plan, index: gathered.index, state: state, now: clock.now)
-        return (plan, gathered.index)
+        var mode = mode
+        var reason = FullSnapshotReason.requested
+        while true {
+            let source: AppleSource =
+                mode.map {
+                    .tracked(
+                        AppleReadRequest(
+                            tracker: tracker, mode: $0, fullReason: reason,
+                            deleteConfirmInterval: options.deleteConfirmInterval))
+                } ?? .snapshot(store)
+            let gathered = try SyncPlanner.gather(
+                fs: vault, state: state, config: (try config, loaded?.text), now: clock.now, apple: source)
+            let plan = try SyncPlanner(fs: vault, keyer: keyer, ids: ids, options: options).plan(
+                gathered.including(device).inputs)
+            if SyncPlanner.needsImages(plan, read: gathered.apple) {
+                (mode, reason) = (.full, .imagesNeeded)
+                continue
+            }
+            return Planned(plan: plan, index: gathered.index, apple: gathered.apple)
+        }
+    }
+
+    /// A gathered and planned run.
+    public struct Planned: Sendable {
+        public var plan: SyncPlan
+        public var index: VaultIndex
+        public var apple: AppleRead
     }
 
     /// The outcome of one sync.
@@ -147,13 +189,17 @@ public final class SyncHarness: Sendable {
         public var plan: SyncPlan
         /// `nil` when a breaker stopped the run.
         public var result: SyncResult?
+        /// How Apple Contacts was read.
+        public var apple: AppleRead?
     }
 
-    /// Plans and executes one sync.
+    /// Plans and executes one sync (`mode` overrides `appleMode` for this run).
     @discardableResult
-    public func sync(_ options: SyncOptions = SyncOptions()) throws -> Run {
-        let (plan, index) = try self.plan(options)
-        guard plan.breaker == nil else { return Run(plan: plan, result: nil) }
+    public func sync(_ options: SyncOptions = SyncOptions(), mode: AppleReadMode? = nil) throws -> Run {
+        let gathered = try gatherAndPlan(options, mode: mode ?? appleMode)
+        let (plan, index) = (gathered.plan, gathered.index)
+        try SyncPlanner.recordObservations(plan, index: index, state: state, now: clock.now)
+        guard plan.breaker == nil else { return Run(plan: plan, result: nil, apple: gathered.apple) }
         let executor = SyncExecutor(
             fs: vault, store: store, state: state, clock: clock,
             noteBackups: NoteBackup(directory: backupDirectory, clock: clock),
@@ -161,10 +207,15 @@ public final class SyncHarness: Sendable {
         let backups = VCardBackup(directory: backupDirectory, clock: clock)
         let result = try executor.execute(plan) { try backups.backup(store) }
         try state.saveFileCache(index.fileCache.merging(result.markdown.writtenCache) { _, new in new })
+        if mode ?? appleMode != nil {
+            try tracker.commit(
+                gathered.apple, postWrite: result.postWriteSnapshot.map { ($0, result.postWriteHistoryToken) },
+                compared: gathered.apple.isComplete, now: clock.now)
+        }
         try DeviceRecord.write(
             DeviceRecord(deviceID: device.id, deviceName: device.name, lastSync: clock.now, summary: "test"),
             fs: vault)
-        return Run(plan: plan, result: result)
+        return Run(plan: plan, result: result, apple: gathered.apple)
     }
 
     /// Records `choice` for the pending review item `id` (as `review decide` does).

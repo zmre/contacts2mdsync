@@ -21,7 +21,7 @@ Companion docs: [plan.md](plan.md) (milestones, decisions), [markdown-schema.md]
 ```
 App/
   project.yml                       XcodeGen spec (macOS now, iOS in M7)
-  Contacts2MdSync/                  SwiftUI app: views, AppModel, watchers, bookmarks, SyncCoordinator
+  Contacts2MdSync/                  SwiftUI app: views, AppModel, bookmarks; hosts the SyncTriggers coordinator
 Packages/Contacts2MdSyncKit/
   ContactModel/     value types, normalization, comparison keys, label map,
                     ContactStore seam + Apple snapshot types                 (Foundation only)
@@ -34,8 +34,10 @@ Packages/Contacts2MdSyncKit/
                     SyncPlanner, RecordMerger, Diff3, AppleWritePlanner, SyncExecutor, LeaseManager,
                     LocalLock, SyncScope (M3)
   SyncStateDB/      SyncStateStore on SQLite (GRDB), M1 records.json import
+  SyncTriggers/     live sync (M5): SyncCoordinator actor, trigger sources (Contacts notification,
+                    FSEvents, wake, sweep, launch), OwnWriteRegistry, per-device TriggerSettings (no SwiftUI)
   Contacts2MdCLI/   CLI library + VaultSession (shared with the app): status / plan / export / review (M1–M2),
-                    sync / config (M3), see §15
+                    sync / config (M3), watch + VaultSyncRunner (M5), see §15
   contacts2md/      dev executable wrapping Contacts2MdCLI (the app binary runs the same CLI)
   SyncTestSupport/  FakeContactStore, InMemoryVault, fixtures (~60 contacts), golden-file helper
 ```
@@ -92,7 +94,7 @@ Paths in `VaultFS` are root-relative strings (`Inbox/Jane Doe.md`), never URLs: 
 
 `FakeContactStore` has switchable misbehaviours that mirror real-world bugs: unified contacts across iCloud/Google/read-only containers, identifier churn, server-normalization echo (`4155550100` → `(415) 555-0100`), linked-card display precedence, missing notes entitlement (the key silently unavailable, as observed in spike S2, or error 102), per-container groups. Since M3 the fake writes to card values and recomputes the unified view from the cards (the most recently saved card wins single-valued display). It also models phone normalization on save (`setNormalizePhonesOnSave`), a container that silently ignores writes to a field (`dropWrites`), a failed save request, and the unified-save fan-out: an operation addressed to a linked contact's unified id writes to every card and increments `unifiedSaveCount`, which every scenario test expects to stay 0.
 
-The app target holds only SwiftUI, an `@Observable AppModel`, FSEvents + `CNContactStoreDidChange` watchers, security-scoped bookmarks, and a `SyncCoordinator` actor that serializes runs.
+The app target holds only SwiftUI, an `@Observable AppModel` and security-scoped bookmarks. The watchers (FSEvents, `CNContactStoreDidChange`, wake, sweep) and the `SyncCoordinator` actor that serializes runs live in `SyncTriggers` (M5), so `contacts2md watch` and tests use them too; the app only hosts them (§10 "Hosting in the app").
 
 ## 3. Canonical model
 
@@ -156,13 +158,13 @@ Observed rewrites behind these keys ([spike S5](spikes.md#s5-normalization-catal
 
 **Why decisions are append-only per device.** Each `decisions.jsonl` has one writer, so iCloud never produces conflict copies. Every device reads the union. A follower device can queue intents ("these two are distinct people", "delete confirmed", "opt this file in") for the leader to execute.
 
-Device-state tables (M2 schema `v1`, `SyncStateDB`): `records` (id, unified id *cache*, last path, `base_json`), `record_cards` (record id, card id, container, account kind, first seen, `stamp_seen`), `field_hashes` (record id, field, sha256 of the base keys), `file_cache` (path, mtime, size, sha256, kind contact/other/problem, sync id, title, aliases, problem, contact-related flag), `groups` (CN group id, container, name, tag), `pending` (review item id, kind, JSON, first seen), `decisions` (mirror of the vault logs), `reported_problems` (sha256 of non-contact files with invalid YAML already reported), `unapplyable` (M3, empty), `sessions` (one JSON row per run, last 500), `meta` (`last_export`, `pending_computed_at`; `history_token` from M5).
+Device-state tables (M2 schema `v1`, `SyncStateDB`): `records` (id, unified id *cache*, last path, `base_json`), `record_cards` (record id, card id, container, account kind, first seen, `stamp_seen`), `field_hashes` (record id, field, sha256 of the base keys), `file_cache` (path, mtime, size, sha256, kind contact/other/problem, sync id, title, aliases, problem, contact-related flag), `groups` (CN group id, container, name, tag), `pending` (review item id, kind, JSON, first seen), `decisions` (mirror of the vault logs), `reported_problems` (sha256 of non-contact files with invalid YAML already reported), `unapplyable` (M3, empty), `sessions` (one JSON row per run, last 500), `meta` (`last_export`, `pending_computed_at`; `apple_cache` and `last_full_compare` from M5, see §10).
 
 `base_json` held the Apple side at the last export in M2 (comparison keys per markdown field, plus `name`). From M3 it is the merge base: what Apple and the note agreed on after the last sync (`RecordBase` version 2, see §7). M3 schema `v2` adds `unapplyable.attempted` / `observed` and `record_cards.confirmed`, and uses these `meta` keys: `vanished_records` (record id → first time its contact was missing), `image_hashes` (note images by path, mtime and size, so unchanged images are not re-read).
 
 The vault holds `.c2mdsync/lease.json` (§11) and `.c2mdsync/devices/<id>.json` (`device_id`, `device_name`, `last_sync`, `summary`), written after every sync. The device records let a device see that others use the vault.
 
-The vault-side decision log is `.c2mdsync/devices/<device-id>/decisions.jsonl`, one JSON object per line: `{"id", "kind", "at", "device_id", "device_name", "contacts": [{"card_ids", "title"}], "path", "sync_id", "item"}`. Kinds: `distinct-people` (contacts pairwise distinct; with `path`: the contact is not the person in that note), `sync-only` (keep `contacts[0]`, exclude the rest), `ignore-candidate` (`path` or `sync_id`), `adopt` (`path` → `contacts[0]`), `dup-id-keep` (`path` keeps `sync_id`). M3 adds `resolve-conflict` (`item` = conflict id, `choice`, `apple_hash`, `markdown_hash`), `apple-delete` (`sync_id`, `choice` trash/keep/restore), `markdown-delete` (`sync_id`, `contacts`, `choice` restore/unlink/delete-contact) and `create-contact` (`path`). Contacts are referenced by underlying card ids, never the unified id. Every device reads the union; unknown kinds are ignored, unreadable lines reported as warnings.
+The vault-side decision log is `.c2mdsync/devices/<device-id>/decisions.jsonl`, one JSON object per line: `{"id", "kind", "at", "device_id", "device_name", "contacts": [{"card_ids", "title"}], "path", "sync_id", "item"}`. Kinds: `distinct-people` (contacts pairwise distinct; with `path`: the contact is not the person in that note), `sync-only` (keep `contacts[0]`, exclude the rest), `ignore-candidate` (`path` or `sync_id`), `adopt` (`path` → `contacts[0]`), `dup-id-keep` (`path` keeps `sync_id`). M3 adds `resolve-conflict` (`item` = conflict id, `choice`, `apple_hash`, `markdown_hash`), `apple-delete` (`sync_id`, `choice` trash/keep/restore), `markdown-delete` (`sync_id`, `contacts`, `choice` restore/unlink/delete-contact) and `create-contact` (`path`). M5 adds `merge-keep` (`contacts[0]` carries several stamps; the note at `path` keeps its record, the other notes are detached and their stamps removed; review choice `keep:N` on a `merge-…` item). Contacts are referenced by underlying card ids, never the unified id. Every device reads the union; unknown kinds are ignored, unreadable lines reported as warnings.
 
 ## 5. Sync cycle
 
@@ -180,7 +182,7 @@ acquire lease ──► scan vault ──► snapshot Apple ──► match/bind
 ```
 
 1. **Scan vault** — enumerate root, skip `.c2mdsync`, `_images`, excluded paths; re-parse only files whose (mtime, size) changed. Dataless iCloud placeholders count as present and are downloaded only when needed.
-2. **Snapshot Apple** — unified contacts plus underlying cards (`unifyResults = false`, mapped via `isUnifiedWithContactWithIdentifier`). From M5, the history token narrows which contacts to re-fetch; a full snapshot is always the fallback and the source of truth.
+2. **Snapshot Apple** — unified contacts plus underlying cards (`unifyResults = false`, mapped via `isUnifiedWithContactWithIdentifier`). From M5, the history token narrows which contacts to re-fetch (the cached snapshot is patched with them, §10); a full snapshot is always the fallback and the source of truth for deletions and the breaker.
 3. **Match / bind** — §6.
 4. **Merge** — §7.
 5. **Plan** — a list of typed operations: `createFile`, `updateFile`, `updateCard`, `createCard`, `addToGroup`, `queueDelete`, `conflict`, `review`. The UI shows it; the CLI prints it.
@@ -402,7 +404,7 @@ A card id that vanishes while its stamp shows up on another card is identifier c
 
 ## 10. Change detection and echo suppression
 
-- M3 compares a full snapshot with the merge base on every run. The history-token hook (`ContactStore.changes(since:excluding:)`, the `history_token` meta key) is left for M5.
+- M3 compared a full snapshot with the merge base on every run. M5 adds history-token acceleration (below, "As implemented (M5)").
 - **Markdown**: canonical-model hash vs base (bytes never compared directly). FSEvents (file-level) triggers a debounced run. Own writes are remembered as (path, sha) for 30 s and ignored.
 - **Apple**: full snapshot diff through M4 (thousands of contacts ≈ 1 s). From M5 the ObjC-shimmed change-history enumerator narrows the set; history fetch excludes `com.zmre.contacts2mdsync.*` authors (spike S3: works); a `DropEverything` event, a nil token, or error 603/604 → full snapshot. `DropEverything` is the main reset signal: a garbage token raised no error and no exception, it just returned `DropEverything` plus the full snapshot (S3). Group events arrive even with `includeGroupChanges = false`, so events are filtered by type. Saves made by Google sync after our own writes (for example, replacing a card we created) are not authored by us and show up as changes; comparison keys and the stamp-based re-fetch absorb them. `CNContactStoreDidChange` is only a debounced "go look" signal.
 - **Server echo** (iCloud/Google reformatting our writes) is neutralized by comparison keys plus refreshing the base from a post-write re-fetch.
@@ -424,6 +426,43 @@ Live sync is event-driven, not polling. Events can be missed, though: the app ma
 - Timers use `NSBackgroundActivityScheduler` so macOS can coalesce them for battery life.
 - If the Contacts history token is expired or invalid (603/604, or a `DropEverything` event), the next run of any kind falls back to a full snapshot.
 - When the app isn't running at all, the launchd schedule (§15) is the only trigger.
+
+### As implemented (M5)
+
+**History acceleration** (`SyncEngine.AppleChangeTracker`, used by `VaultSession.prepareSync` and so by the app, `sync`, `plan` and `watch`):
+
+- The device state keeps a mirror of Apple Contacts in `meta.apple_cache`: the snapshot without image bytes, image sha256 per contact, the settings key (hash of `config.yaml` text and decision ids) and the history token it is current as of, lzfse-compressed JSON. Token and snapshot are one blob, so they can never disagree.
+- An incremental read (`SyncRequest.appleMode = .incremental`, the default) asks `ContactStore.changes(since:excluding:)` for card-level events (`shouldUnifyResults = NO`) without this device's own authors (`com.zmre.contacts2mdsync.<deviceID>` and the export stamper's `…cli`; `excludedTransactionAuthors` takes exact names, so other devices' writes are *not* excluded). Changed cards, plus the cards of records whose note changed since the last scan (file-cache diff), are re-read with `ContactStore.refetch(cardIDs:siblingHints:)`: each card's unified contact (`unifiedContact(withIdentifier:)`) with all its cards (cache siblings, same-name cards, `isUnifiedWithContact`), plus all containers and groups. The patched mirror is what the planner sees.
+- A full snapshot is taken instead, with the reason in the output and the session (`apple_read` full/incremental), when: the run asks for one (`.full`: launch, wake, sweep, Sync Now, `--full`); there is no cache or no token (first run, `.unsupported` history); `DropEverything`, a `nil` token or error 603/604 (`.reset`); the history read throws; **any card was deleted**; a group was added, renamed or deleted (group membership events only mark the member as changed); more than max(100, 20 %) cards changed; the config or the decisions changed; a possibly-deleted record is due for its confirming snapshot; a synced record has no card left in the patched mirror; or the plan would create a note for a contact whose image was not re-read (re-planned, `images-needed`).
+- **Incremental runs never conclude deletions.** Deleted cards force a full snapshot. The planner gets `SyncInputs.appleSnapshotComplete = false` for patched snapshots: `planAppleDeletes` then only carries existing `vanished_records` entries forward — it records no newly vanished record, confirms nothing (no queue item, no trash) and adds nothing to the mass-vanish count. A vanished record whose 10 minutes have passed forces the next run to be full, so the two-snapshot rule still completes on its own. The vault side is always enumerated in full (parse cache), so note deletions are detected as before.
+- Images of contacts that were not re-read have no bytes in the mirror; the patched snapshot marks them `imageUnavailable` ("unknown": never compared, never removed, the base keeps its hash). A note whose image changed is a vault change, so its contact is re-read with bytes.
+- After a run that wrote to Apple, the mirror is the executor's post-write full snapshot and the token read just before it (`SyncResult.postWriteSnapshot` / `postWriteHistoryToken`), so our saves are never reported back. Otherwise the mirror is what the run read. A dry run (`plan`) advances the mirror too (it describes Contacts, not the sync), except when the breaker tripped.
+- `meta.last_full_compare` records the last run *planned* on a full snapshot (any process on this device); the sweep window uses it.
+- Not covered by events: linking or unlinking cards in Contacts.app (no history event type; S3 did not observe what is reported). A stale link in the mirror lasts until the next full compare (launch, wake, sweep, Sync Now). To verify with a scratch account (see Open issues in the M5 report).
+
+**Triggers** (`SyncTriggers`):
+
+- `SyncCoordinator` (actor) runs one request at a time through a `SyncRunner`. Live events (`.live`, `.rescanVault`) wait for 3 s of quiet (each event restarts the window, capped at 30 s after the first); `.launch`, `.wake`, `.sweep`, `.manual` start at once and absorb pending live events. Coalesced requests run full when any part needs it. Triggers during a run coalesce into one follow-up run. Status is published as an `AsyncStream<SyncCoordinatorStatus>`: `idle`, `scheduled(kind, startsAt)`, `running(kind, phase?)`, `finished(SyncRunSummary)`, `blocked(reason)`, `failed`, `skipped(kind, reason)`.
+- Another run on this Mac (local lock, waited `lockWait` = 5 s) → `blocked(.localRunInProgress)`, retried after 30 s up to 3 times. Another device's lease, the breaker, or a vault that is not ready → `blocked`, no retry (the next trigger or the sweep tries again).
+- Sources: `ContactsChangeSource` (`CNContactStoreDidChange` → `.live`; our own saves post it too, and that run is a no-op because the history excludes our author), `VaultChangeSource` (FSEvents, file-level, recursive, `WatchRoot`; `.c2mdsync/` and dot paths ignored; `MustScanSubDirs`, `UserDropped`, `KernelDropped`, `RootChanged` → `.rescanVault`; own writes ignored through `OwnWriteRegistry`), `WakeSource` (`NSWorkspace.didWakeNotification` + 30 s, restarted by another wake), `SweepScheduler` (`NSBackgroundActivityScheduler`, repeats every `sweepInterval`, tolerance ¼) or `ClockSweepSource` (a plain timer, for `watch`), `LaunchCatchUp` (one `.launch`).
+- FSEvents only trigger runs: every run enumerates the whole vault (the parse cache keeps it cheap), so merged or dropped events lose nothing; `.rescanVault` is a normal run tagged as such.
+- **Own-write suppression:** `VaultSyncRunner` records every note and image a run wrote (path, sha256) and every note it trashed (path, no hash) in an `OwnWriteRegistry`; an FSEvent for such a path within 30 s is ignored while the file still has that content (or is still gone). An edit made right after our write has another hash and triggers a run.
+- The sweep fires every interval; the coordinator skips it when `lastFullCompare` is within the interval (`skipped(.sweep, "full compare N min ago")`).
+- **Settings** (`TriggerSettings`, `<state>/triggers.json`, per device and vault-independent, next to `device.json`): `live_sync` (default on; gates live, rescan, launch and wake triggers; Sync Now always works) and `sweep_interval_seconds` (default 7200, clamped to 1–6 h, `null` = off). Not in the vault's `config.yaml`, because that file is shared by every device through iCloud while watching and sweeping are properties of one Mac (laptop vs desktop, leader vs follower).
+- Not implemented: the "network reachable after wake" condition (the 30 s delay stands in for it).
+
+### Hosting in the app
+
+The app wires these after the folder is chosen and the first sync is done:
+
+1. Keep the folder's security scope open (`RootBookmark.open()`) for as long as live sync runs; FSEvents needs it.
+2. `let ownWrites = OwnWriteRegistry()`; `let runner = VaultSyncRunner(root: root.url, environment: env, ownWrites: ownWrites)` with `env = CLIEnvironment.live()` and `env.trigger = "GUI"` (the runner overrides `trigger` per run with the kind: `Live`, `Launch`, `Wake`, `Sweep`, `Manual`, `Rescan`). `options` defaults to `SyncRequest(policy: .gui)`.
+3. `let settingsStore = TriggerSettingsStore(directory: env.stateDirectory)`; `let coordinator = SyncCoordinator(runner: runner, settings: settingsStore.load())`.
+4. `await coordinator.start([LaunchCatchUp(), ContactsChangeSource(), VaultChangeSource(root: root.url, ownWrites: ownWrites), WakeSource(), SweepScheduler()])`.
+5. Observe `for await status in await coordinator.statusUpdates()` on the main actor for the menu bar and Overview; `lastSummary` holds the last run; refresh review data on `.finished`.
+6. Sync Now → `await coordinator.syncNow()` (full, never debounced). Settings toggles → `settingsStore.save(s)` then `await coordinator.update(s)`.
+7. Any other vault write the app makes outside the coordinator (export, review decisions) may record its files in `ownWrites`, or simply cause one no-op run.
+8. On folder change or quit: `await coordinator.shutdown()` (stops the sources, waits for a run in progress), then close the scope.
 
 ## 11. Multi-device
 
@@ -542,6 +581,18 @@ common: --quiet  --verbose  --json
 - Review choices: conflicts `apple | markdown | both`; deleted in Contacts `trash | keep | restore`; note deleted `restore | unlink | delete-contact`; markdown-only notes `add | ignore`. Markdown-only items are informational and never make the exit code 1.
 - `status` adds `sync apple_writes=… stamp_contacts=… devices=N`, the lease holder, the identity warning, and counts of conflicts, deletions and markdown-only notes.
 - Exit codes follow the table below. Write failures give 5. A tripped breaker gives 4 even for `plan`.
+
+**M5 as implemented** (app binary also dispatches on `watch`):
+
+```
+contacts2md sync  [--full] [M3 options]
+contacts2md plan  [--full] [M3 options]
+contacts2md watch [--root <dir>] [--debounce 3] [--sweep 2|off] [--no-catch-up] [--lock-wait 5]
+```
+
+- `sync` and `plan` read Apple through the change history when the token is valid, else a full snapshot. They print `apple    incremental: N changed cards, M contacts re-read` or `apple    full snapshot (<reason>)`; `--json` adds the setting `apple_read` (`full`/`incremental`). `--full` forces a full snapshot.
+- `watch` (development and testing; also useful headless) runs the `SyncCoordinator` with every source (`LaunchCatchUp` unless `--no-catch-up`, Contacts notification, FSEvents on the root, wake, a clock sweep timer) until Ctrl-C or SIGTERM, keeping the main run loop running. Lines: `watch    live  debounce=…  sweep=…  catch-up=…`, `running  <kind>`, `synced   <kind>  <time>  apple c/u/d …  md c/u/d …  review N  (<apple read>)  <seconds>`, `WARNING  held …`, `WARNING  pending …`, `note     blocked: …`, `ERROR    …` (breaker, failures), and `--verbose` adds `scheduled`, phases, `skipped` and `idle`. It needs a vault synced on this Mac before (exit 3), uses the headless decision policy, and exits 0.
+- Sessions carry per-side counts (`SessionRecord.sides`: Apple and markdown created/updated/deleted, held count and reason, `apple_read`); older rows decode with `sides == nil`.
 
 ### What runs vs. what is skipped
 

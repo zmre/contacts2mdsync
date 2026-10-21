@@ -4,7 +4,7 @@
 /// Values keep their **display form** exactly as written; equality for sync
 /// purposes goes through `ComparisonKeys`, never through `==` on display text.
 /// `==` here is structural and is what the codec's round-trip check uses.
-public struct CanonicalContact: Hashable, Sendable {
+public struct CanonicalContact: Hashable, Sendable, Codable {
     public var kind: ContactKind
     /// Markdown-owned headline; also mbr's primary link-match key.
     public var title: String

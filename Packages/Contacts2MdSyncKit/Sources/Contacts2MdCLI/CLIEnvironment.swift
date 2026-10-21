@@ -4,6 +4,7 @@ public import Foundation
 internal import PhoneNumberKeys
 public import SyncEngine
 internal import SyncStateDB
+public import SyncTriggers
 internal import Synchronization
 public import VaultIndex
 
@@ -45,6 +46,14 @@ public struct CLIEnvironment: Sendable {
     public var leaseSettle: TimeInterval
     /// Sleeps (lock polling, lease settle); injectable so tests never wait.
     public var sleep: @Sendable (TimeInterval) -> Void
+    /// `watch`: the trigger sources for a root (Contacts notifications,
+    /// FSEvents, wake, sweep timer). Tests pass fakes.
+    public var makeTriggerSources: @Sendable (_ root: URL, _ ownWrites: OwnWriteRegistry) -> [any SyncTriggerSource]
+    /// `watch`: blocks until Ctrl-C (keeping the main run loop running so
+    /// notifications arrive). Tests return once they have seen what they need.
+    public var waitForInterrupt: @Sendable (SyncCoordinator) -> Void
+    /// `watch`: debounce and sweep timing.
+    public var triggerClock: any TriggerClock
 
     /// Creates an environment.
     public init(
@@ -66,8 +75,15 @@ public struct CLIEnvironment: Sendable {
         trigger: String = "CLI",
         lockWait: TimeInterval = 60,
         leaseSettle: TimeInterval = 60,
-        sleep: @escaping @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+        sleep: @escaping @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) },
+        makeTriggerSources: @escaping @Sendable (URL, OwnWriteRegistry) -> [any SyncTriggerSource] =
+            CLIEnvironment.liveTriggerSources,
+        waitForInterrupt: @escaping @Sendable (SyncCoordinator) -> Void = CLIEnvironment.waitForControlC,
+        triggerClock: any TriggerClock = SystemTriggerClock()
     ) {
+        self.makeTriggerSources = makeTriggerSources
+        self.waitForInterrupt = waitForInterrupt
+        self.triggerClock = triggerClock
         self.lockWait = lockWait
         self.leaseSettle = leaseSettle
         self.sleep = sleep
@@ -92,6 +108,28 @@ public struct CLIEnvironment: Sendable {
     @Sendable
     public static func openStateStore(_ directory: URL) throws -> any SyncStateStore {
         try GRDBSyncStateStore.open(directory: directory)
+    }
+
+    /// Contacts changes, FSEvents on `root`, wake (30 s delay) and a sweep timer.
+    @Sendable
+    public static func liveTriggerSources(root: URL, ownWrites: OwnWriteRegistry) -> [any SyncTriggerSource] {
+        [ContactsChangeSource(), VaultChangeSource(root: root, ownWrites: ownWrites), WakeSource(), ClockSweepSource()]
+    }
+
+    /// Blocks until SIGINT or SIGTERM, running the main run loop meanwhile.
+    @Sendable
+    public static func waitForControlC(_ coordinator: SyncCoordinator) {
+        let interrupted = InterruptFlag()
+        let signals = [SIGINT, SIGTERM].map { number in
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler { interrupted.set() }
+            source.resume()
+            return source
+        }
+        while !interrupted.isSet { RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.25)) }
+        for source in signals { source.cancel() }
+        for number in [SIGINT, SIGTERM] { signal(number, SIG_DFL) }
     }
 
     /// The production environment.
@@ -170,4 +208,12 @@ public final class CLIOutput: Sendable {
     public var stdout: String { buffer.withLock { $0.out } }
     /// Everything written to stderr (capturing outputs only).
     public var stderr: String { buffer.withLock { $0.err } }
+}
+
+/// Set once by a signal handler.
+private final class InterruptFlag: Sendable {
+    private let flag = Mutex(false)
+
+    func set() { flag.withLock { $0 = true } }
+    var isSet: Bool { flag.withLock { $0 } }
 }

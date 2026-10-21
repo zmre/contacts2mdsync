@@ -8,7 +8,7 @@ public enum ContactKind: String, Hashable, Sendable, Codable, CaseIterable {
 }
 
 /// The structured parts of a person's name.
-public struct PersonName: Hashable, Sendable {
+public struct PersonName: Hashable, Sendable, Codable {
     public var prefix: String?
     public var given: String?
     public var middle: String?
@@ -41,7 +41,7 @@ public struct PersonName: Hashable, Sendable {
 /// `label` is `nil` for a plain alias (markdown-only), `nickname` for
 /// `CNContact.nickname` and `maiden_name` for `CNContact.previousFamilyName`.
 /// Any other label (`formerly`, …) round-trips as authored.
-public struct Alias: Hashable, Sendable {
+public struct Alias: Hashable, Sendable, Codable {
     /// Label for `CNContact.nickname`.
     public static let nicknameLabel = "nickname"
     /// Label for `CNContact.previousFamilyName`.
@@ -66,7 +66,7 @@ public struct Alias: Hashable, Sendable {
 
 /// The `company:` value. Either plain text or an mbr wikilink to an
 /// organization note (`[[Acme Corp]]`, optionally `[[Target|Shown]]`).
-public struct CompanyRef: Hashable, Sendable {
+public struct CompanyRef: Hashable, Sendable, Codable {
     /// The value exactly as written (`[[Acme Corp]]` or `Acme Corp`).
     public var raw: String
 
@@ -125,7 +125,7 @@ public struct Labeled<Value: Hashable & Sendable>: Hashable, Sendable {
 
 /// One postal address. Either structured components or, when the markdown
 /// author wrote a plain string, `formatted` preformatted lines.
-public struct PostalAddress: Hashable, Sendable {
+public struct PostalAddress: Hashable, Sendable, Codable {
     public var street: String?
     public var city: String?
     public var region: String?
@@ -163,7 +163,7 @@ public struct PostalAddress: Hashable, Sendable {
 
 /// A date that may lack a year (the normal case for phone-book birthdays),
 /// or free text that is not a date at all (mbr shows it verbatim).
-public enum PartialDate: Hashable, Sendable {
+public enum PartialDate: Hashable, Sendable, Codable {
     case full(year: Int, month: Int, day: Int)
     case monthDay(month: Int, day: Int)
     case yearMonth(year: Int, month: Int)
@@ -242,7 +242,7 @@ public enum PartialDate: Hashable, Sendable {
 
 /// A social profile: a profile URL or, when Apple has none, the username.
 /// The service is the `Labeled` label (`linkedin`, `twitter`, …).
-public struct SocialHandle: Hashable, Sendable {
+public struct SocialHandle: Hashable, Sendable, Codable {
     public var value: String
 
     /// Creates a handle.
@@ -250,7 +250,7 @@ public struct SocialHandle: Hashable, Sendable {
 }
 
 /// An instant-messaging address. The service is the `Labeled` label.
-public struct IMHandle: Hashable, Sendable {
+public struct IMHandle: Hashable, Sendable, Codable {
     public var value: String
 
     /// Creates a handle.
@@ -258,7 +258,7 @@ public struct IMHandle: Hashable, Sendable {
 }
 
 /// The other end of a relationship.
-public enum RelationshipTarget: Hashable, Sendable {
+public enum RelationshipTarget: Hashable, Sendable, Codable {
     /// A synced record, by `c2mdsync.id`. Engine-internal: resolved to a
     /// `.wikilink` (the record's title) before encoding.
     case record(UUID)
@@ -279,7 +279,7 @@ public enum RelationshipTarget: Hashable, Sendable {
 
 /// One `relationships:` entry. mbr derives reverse edges itself; we only
 /// ever write the edges Apple (or the author) declared.
-public struct RelationshipRef: Hashable, Sendable {
+public struct RelationshipRef: Hashable, Sendable, Codable {
     /// mbr relationship type (`spouse`, `parent`, `reports_to`, custom snake_case).
     public var type: String
     /// Optional refinement (`father`, `wife`, …).
@@ -301,7 +301,7 @@ public struct RelationshipRef: Hashable, Sendable {
 /// The `image:` reference as written in markdown: a path relative to the
 /// note's folder, or a URL. Image bytes live outside the canonical model
 /// (`AppleContact.imageData`, sidecar files) and are compared by hash.
-public struct ImageRef: Hashable, Sendable {
+public struct ImageRef: Hashable, Sendable, Codable {
     public var path: String
 
     /// Creates a reference.
@@ -309,7 +309,7 @@ public struct ImageRef: Hashable, Sendable {
 }
 
 /// Apple fields mbr has no slot for, stored under `apple:`.
-public struct AppleExtras: Hashable, Sendable {
+public struct AppleExtras: Hashable, Sendable, Codable {
     public var phoneticGiven: String?
     public var phoneticMiddle: String?
     public var phoneticFamily: String?
@@ -340,7 +340,7 @@ public struct AppleExtras: Hashable, Sendable {
 }
 
 /// The engine-owned `c2mdsync:` block.
-public struct SyncMetadata: Hashable, Sendable {
+public struct SyncMetadata: Hashable, Sendable, Codable {
     /// The record identity (`c2mdsync.id`), lowercase UUID v4 in markdown.
     public var id: UUID?
     /// `detached` when out of scope / unlinked (M3).
@@ -373,3 +373,5 @@ extension Optional where Wrapped == String {
 extension Character {
     var isASCIIDigit: Bool { isASCII && isNumber }
 }
+
+extension Labeled: Codable where Value: Codable {}

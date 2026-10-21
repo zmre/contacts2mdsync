@@ -14,17 +14,21 @@ public struct SyncRequest: Hashable, Sendable {
     /// Take the vault lease from another device.
     public var takeOverLease: Bool
     public var policy: DecisionPolicy
+    /// `.incremental` (default): use the Contacts change-history token when
+    /// it is valid, else a full snapshot. `.full`: always a full snapshot.
+    public var appleMode: AppleReadMode
 
     /// Creates a request.
     public init(
         maxAppleChanges: Int? = nil, allowMassVanish: Bool = false, allowUndownloaded: Bool = false,
-        takeOverLease: Bool = false, policy: DecisionPolicy = .headless
+        takeOverLease: Bool = false, policy: DecisionPolicy = .headless, appleMode: AppleReadMode = .incremental
     ) {
         self.maxAppleChanges = maxAppleChanges
         self.allowMassVanish = allowMassVanish
         self.allowUndownloaded = allowUndownloaded
         self.takeOverLease = takeOverLease
         self.policy = policy
+        self.appleMode = appleMode
     }
 }
 
@@ -39,6 +43,15 @@ public struct PreparedSync: Sendable {
     public let decisionProblems: [String]
     public let config: VaultConfig
     public let plan: SyncPlan
+    /// How Apple Contacts was read (full snapshot or history-incremental).
+    public let apple: AppleRead
+    let tracker: AppleChangeTracker
+
+    /// The Apple snapshot the plan was made from (read-only; no second read
+    /// of Contacts needed for review details). After an incremental read it
+    /// is the cached snapshot patched with the re-read contacts, and images
+    /// of contacts that were not re-read have no bytes (`imageUnavailable`).
+    public var snapshot: AppleSnapshot { apple.snapshot }
 }
 
 /// Why a sync did not start.
@@ -98,7 +111,10 @@ extension VaultSession {
 
     /// Scans, snapshots and plans a two-way sync. Requires a vault exported
     /// or synced on this device before (`VaultNotReady` otherwise).
-    public func prepareSync(_ request: SyncRequest) throws -> PreparedSync {
+    public func prepareSync(
+        _ request: SyncRequest, progress: @Sendable (SyncPhase) -> Void = { _ in }
+    ) throws -> PreparedSync {
+        progress(.scanning)
         let fs = environment.makeVault(root)
         let vault = try configured(fs)
         let (config, text, directory) = (vault.config, vault.text, vault.directory)
@@ -114,25 +130,57 @@ extension VaultSession {
                 description:
                     "first sync not done on this Mac: run it in Contacts2MdSync (or `contacts2md export --yes`) once")
         }
-        let gathered = try SyncPlanner.gather(
-            fs: fs, store: store, state: state, config: (config, text), now: environment.clock.now)
-        try state.saveDecisionMirror(gathered.decisions)
+        let device = try environment.device()
+        let tracker = AppleChangeTracker(store: store, state: state, deviceID: device.id)
         let keyer = environment.makeKeyer(config.defaultRegion ?? environment.fallbackRegion)
         let options = SyncOptions(
             export: ExportOptions(autoAdopt: .never, allowUndownloaded: request.allowUndownloaded),
             policy: request.policy, maxAppleChanges: request.maxAppleChanges,
             allowMassVanish: request.allowMassVanish)
-        let plan = try SyncPlanner(fs: fs, keyer: keyer, ids: environment.ids, options: options).plan(
-            gathered.including(try environment.device()).inputs)
-        return PreparedSync(
-            fs: fs, store: store, state: state, stateDirectory: directory, index: gathered.index,
-            decisions: gathered.decisions, decisionProblems: gathered.decisionProblems, config: config, plan: plan)
+        var mode = request.appleMode
+        var fullReason = FullSnapshotReason.requested
+        while true {
+            let gathered = try SyncPlanner.gather(
+                fs: fs, state: state, config: (config, text), now: environment.clock.now,
+                apple: .tracked(
+                    AppleReadRequest(
+                        tracker: tracker, mode: mode, fullReason: fullReason,
+                        deleteConfirmInterval: options.deleteConfirmInterval)))
+            try state.saveDecisionMirror(gathered.decisions)
+            progress(.planning)
+            let plan = try SyncPlanner(fs: fs, keyer: keyer, ids: environment.ids, options: options).plan(
+                gathered.including(device).inputs)
+            if SyncPlanner.needsImages(plan, read: gathered.apple) {
+                (mode, fullReason) = (.full, .imagesNeeded)
+                continue
+            }
+            return PreparedSync(
+                fs: fs, store: store, state: state, stateDirectory: directory, index: gathered.index,
+                decisions: gathered.decisions, decisionProblems: gathered.decisionProblems, config: config,
+                plan: plan, apple: gathered.apple, tracker: tracker)
+        }
     }
 
-    /// Records what a dry run found (review queue, file cache).
+    /// When a sync on this device was last planned on a full Apple snapshot
+    /// (by the app or the CLI); `nil` when never or not configured.
+    public func lastFullCompare() -> Date? {
+        let fs = environment.makeVault(root)
+        guard let directory = try? configured(fs).directory,
+            FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)),
+            let state = try? environment.makeStateStore(directory)
+        else { return nil }
+        return AppleChangeTracker.lastFullCompare(in: state)
+    }
+
+    /// Records what a dry run found (review queue, file cache). The Apple
+    /// mirror advances too (it describes Contacts, not what was synced),
+    /// unless a breaker tripped.
     public func recordSyncPlan(_ prepared: PreparedSync, command: String, startedAt: Date) throws {
         try SyncPlanner.recordObservations(
             prepared.plan, index: prepared.index, state: prepared.state, now: environment.clock.now)
+        if prepared.plan.breaker == nil {
+            try prepared.tracker.commit(prepared.apple, postWrite: nil, compared: false, now: environment.clock.now)
+        }
         try prepared.state.appendSession(
             syncSession(prepared, command: command, startedAt: startedAt, result: nil))
     }
@@ -162,6 +210,9 @@ extension VaultSession {
         try SyncPlanner.recordObservations(
             prepared.plan, index: prepared.index, state: prepared.state, now: environment.clock.now,
             written: result.markdown.writtenCache)
+        try prepared.tracker.commit(
+            prepared.apple, postWrite: result.postWriteSnapshot.map { ($0, result.postWriteHistoryToken) },
+            compared: prepared.apple.isComplete, now: environment.clock.now)
         try prepared.state.appendSession(
             syncSession(prepared, command: command, startedAt: startedAt, result: result))
         let summary =
@@ -179,7 +230,7 @@ extension VaultSession {
         _ prepared: PreparedSync, command: String, startedAt: Date, result: SyncResult?
     ) -> SessionRecord {
         let plan = prepared.plan
-        return SessionRecord(
+        var record = SessionRecord(
             startedAt: startedAt, finishedAt: environment.clock.now, command: command, trigger: environment.trigger,
             deviceID: (try? environment.device().id) ?? "",
             created: (result?.markdown.created.count ?? 0) + (result?.apple.filter { $0.kind == .create }.count ?? 0),
@@ -189,6 +240,17 @@ extension VaultSession {
             pendingReview: plan.markdown.reviews.filter(\.needsDecision).count,
             stamped: result?.apple.filter { $0.kind == .stamp }.count ?? 0,
             failures: (result?.markdown.failures.count ?? 0) + (result?.appleFailures.count ?? 0))
+        let apple = result?.apple ?? []
+        record.sides = SessionSides(
+            appleCreated: apple.filter { $0.kind == .create }.count,
+            appleUpdated: apple.filter { $0.kind != .create && $0.kind != .delete }.count,
+            appleDeleted: apple.filter { $0.kind == .delete }.count,
+            markdownCreated: result?.markdown.created.count ?? 0,
+            markdownUpdated: result?.markdown.updated.count ?? 0,
+            markdownDeleted: result?.trashed.count ?? 0,
+            held: plan.appleHold == nil ? 0 : plan.apple.count, heldReason: plan.appleHold?.reason,
+            appleRead: prepared.apple.isComplete ? "full" : "incremental")
+        return record
     }
 
     // MARK: - Settings the app and `contacts2md config` change

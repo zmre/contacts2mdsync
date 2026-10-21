@@ -18,6 +18,45 @@ public struct GatheredSync: Sendable {
     public var decisions: [Decision]
     /// Unreadable decision-log lines.
     public var decisionProblems: [String]
+    /// How Apple Contacts was read (full snapshot or incremental), and what
+    /// `AppleChangeTracker.commit` remembers after the run.
+    public var apple: AppleRead
+}
+
+/// How `SyncPlanner.gather` reads Apple Contacts.
+public enum AppleSource: Sendable {
+    /// A plain full snapshot (no cache, no token).
+    case snapshot(any ContactStore)
+    /// Through the change tracker (history acceleration, architecture §10).
+    case tracked(AppleReadRequest)
+
+    /// The store read.
+    public var store: any ContactStore {
+        switch self {
+        case .snapshot(let store): store
+        case .tracked(let request): request.tracker.store
+        }
+    }
+}
+
+/// A tracked Apple read: the tracker, the mode, and why a full read was asked for.
+public struct AppleReadRequest: Sendable {
+    public var tracker: AppleChangeTracker
+    public var mode: AppleReadMode
+    public var fullReason: FullSnapshotReason
+    /// The delete rail's confirmation interval (a due confirmation forces a full read).
+    public var deleteConfirmInterval: TimeInterval
+
+    /// Creates a request.
+    public init(
+        tracker: AppleChangeTracker, mode: AppleReadMode, fullReason: FullSnapshotReason = .requested,
+        deleteConfirmInterval: TimeInterval = SyncOptions().deleteConfirmInterval
+    ) {
+        self.tracker = tracker
+        self.mode = mode
+        self.fullReason = fullReason
+        self.deleteConfirmInterval = deleteConfirmInterval
+    }
 }
 
 extension SyncPlanner {
@@ -26,12 +65,37 @@ extension SyncPlanner {
         fs: any VaultFS, store: any ContactStore, state: any SyncStateStore,
         config loaded: (config: VaultConfig, text: String?), now: Date
     ) throws -> GatheredSync {
+        try gather(fs: fs, state: state, config: loaded, now: now, apple: .snapshot(store))
+    }
+
+    /// Scans the vault, reads Apple as `apple` says (history-accelerated
+    /// through a tracker, architecture §10, or a plain full snapshot), and
+    /// loads this device's state.
+    public static func gather(
+        fs: any VaultFS, state: any SyncStateStore, config loaded: (config: VaultConfig, text: String?), now: Date,
+        apple: AppleSource
+    ) throws -> GatheredSync {
         let (config, configText) = loaded
+        let store = apple.store
         let (decisions, problems) = try DecisionLog.readAll(fs)
+        let previousCache = try state.loadFileCache()
         let index = try VaultIndex.scan(
-            fs, excludedFolders: [config.imagesFolder], excludeGlobs: config.excludePaths,
-            cache: try state.loadFileCache())
-        let snapshot = try store.snapshot()
+            fs, excludedFolders: [config.imagesFolder], excludeGlobs: config.excludePaths, cache: previousCache)
+        let records = try state.load()
+        let vanished = try state.loadVanished()
+        let read: AppleRead
+        switch apple {
+        case .snapshot(let store):
+            read = .full(try store.snapshot())
+        case .tracked(let request):
+            let context = AppleReadContext(
+                records: records,
+                vaultTouchedRecords: changedRecords(before: previousCache, after: index.fileCache),
+                settingsKey: AppleChangeTracker.settingsKey(configText: configText, decisions: decisions),
+                vanished: vanished, now: now, deleteConfirmInterval: request.deleteConfirmInterval)
+            read = try request.tracker.read(mode: request.mode, context: context, fullReason: request.fullReason)
+        }
+        let snapshot = read.snapshot
         let writable = (try? store.capabilities.writableContainerIDs) ?? snapshot.containers.map(\.id)
         let knownMissing = Set(
             try state.loadPending().items.compactMap { entry -> UUID? in
@@ -41,10 +105,10 @@ extension SyncPlanner {
                 }
             })
         let export = ExportInputs(
-            snapshot: snapshot, index: index, records: try state.load(), config: config, configText: configText,
+            snapshot: snapshot, index: index, records: records, config: config, configText: configText,
             decisions: DecisionSet(decisions), reportedProblems: try state.reportedProblemHashes(), now: now)
         var inputs = SyncInputs(
-            export: export, unapplyable: try state.loadUnapplyable(), vanished: try state.loadVanished(),
+            export: export, unapplyable: try state.loadUnapplyable(), vanished: vanished,
             knownMissingNotes: knownMissing, writableContainerIDs: writable,
             deviceIDs: DeviceRecord.deviceIDs(fs: fs))
         let isNote = { (path: String) in
@@ -54,7 +118,31 @@ extension SyncPlanner {
             try fs.enumerate().filter { !isNote($0.path) }.map { ($0.path, $0) },
             uniquingKeysWith: { first, _ in first })
         inputs.imageHashes = try state.loadImageHashes()
-        return GatheredSync(inputs: inputs, index: index, decisions: decisions, decisionProblems: problems)
+        inputs.appleSnapshotComplete = read.isComplete
+        return GatheredSync(
+            inputs: inputs, index: index, decisions: decisions, decisionProblems: problems, apple: read)
+    }
+
+    /// Records whose note changed (content, new, or gone) since the cached scan.
+    static func changedRecords(before: [String: FileCacheEntry], after: [String: FileCacheEntry]) -> Set<UUID> {
+        var ids = Set<UUID>()
+        for path in Set(before.keys).union(after.keys) {
+            let (old, new) = (before[path], after[path])
+            guard old?.sha256 != new?.sha256 || old?.syncID != new?.syncID else { continue }
+            if let id = old?.syncID { ids.insert(id) }
+            if let id = new?.syncID { ids.insert(id) }
+        }
+        return ids
+    }
+
+    /// `true` when the plan would create a note for a contact whose image
+    /// was not re-read (incremental runs): re-plan on a full snapshot so the
+    /// note gets its image.
+    public static func needsImages(_ plan: SyncPlan, read: AppleRead) -> Bool {
+        guard !read.isComplete, !read.maskedCards.isEmpty else { return false }
+        return plan.markdown.creates.contains { change in
+            plan.markdown.bindings[change.recordID]?.cards.contains { read.maskedCards.contains($0.id) } ?? false
+        }
     }
 
     /// Saves what planning observed: the review queue, the file cache and
@@ -76,4 +164,15 @@ extension SyncEngine {
     /// `com.zmre.contacts2mdsync.<deviceID>`: the `transactionAuthor` of our
     /// Apple writes (excluded from change history in M5).
     public static func transactionAuthor(deviceID: String) -> String { transactionAuthorPrefix + deviceID }
+}
+
+/// Where a sync run is (for status displays).
+public enum SyncPhase: String, Hashable, Sendable, Codable {
+    /// Waiting for another run on this Mac (local lock) or taking the lease.
+    case waitingForLock = "waiting-for-lock"
+    /// Scanning the vault and reading Apple Contacts.
+    case scanning
+    case planning
+    /// Backing up, writing Contacts and notes.
+    case writing
 }

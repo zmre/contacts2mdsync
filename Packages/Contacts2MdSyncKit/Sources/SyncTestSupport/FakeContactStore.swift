@@ -46,6 +46,15 @@ public final class FakeContactStore: ContactStore {
         var unifiedSaves = 0
         var created = 0
         var failNextApply = false
+        /// Change history (M5): events with their transaction author (`nil`:
+        /// the user, Contacts.app or account sync).
+        var history: [(author: String?, event: FakeHistoryEvent)] = []
+        /// Bumped by `resetHistory()`: older tokens get `DropEverything`.
+        var historyEpoch = 0
+        var historySupported = true
+        var failNextHistory = false
+        var historyReads = 0
+        var refetches: [[String]] = []
     }
 
     let state: Mutex<State>
@@ -100,22 +109,28 @@ public final class FakeContactStore: ContactStore {
         try state.withLock { state in
             guard state.accessGranted else { throw ContactStoreError.accessDenied }
             state.snapshots += 1
-            let generation = state.snapshots
-            let contacts = state.contacts.enumerated().map { offset, contact in
-                var copy = contact
-                if !state.notesEntitled {
-                    copy.contact.body = nil
-                    for index in copy.cards.indices { copy.cards[index].values?.body = nil }
-                }
-                if state.synthesizeLinkedIDs, copy.cards.count > 1 {
-                    copy.unifiedID = "SYNTH-\(generation)-\(offset)"
-                }
-                return copy
-            }
-            return AppleSnapshot(
-                contacts: contacts, containers: state.containers, groups: state.groups,
-                notesAvailable: state.notesEntitled)
+            return Self.view(of: state)
         }
+    }
+
+    /// The store as a snapshot would show it (notes stripped without the
+    /// entitlement, synthesized linked ids).
+    static func view(of state: State) -> AppleSnapshot {
+        let generation = state.snapshots
+        let contacts = state.contacts.enumerated().map { offset, contact in
+            var copy = contact
+            if !state.notesEntitled {
+                copy.contact.body = nil
+                for index in copy.cards.indices { copy.cards[index].values?.body = nil }
+            }
+            if state.synthesizeLinkedIDs, copy.cards.count > 1 {
+                copy.unifiedID = "SYNTH-\(generation)-\(offset)"
+            }
+            return copy
+        }
+        return AppleSnapshot(
+            contacts: contacts, containers: state.containers, groups: state.groups,
+            notesAvailable: state.notesEntitled)
     }
 
     public func fetch(unifiedIDs: [String]) throws -> [AppleContact] {
@@ -133,8 +148,12 @@ public final class FakeContactStore: ContactStore {
             var result = AppleWriteResult(applied: [])
             for operation in batch.operations {
                 do {
+                    let created = result.createdCardIDs
                     try Self.apply(operation, to: &state, result: &result)
                     result.applied.append(operation)
+                    for event in Self.events(for: operation, createdBefore: created, after: result.createdCardIDs) {
+                        state.history.append((author, event))
+                    }
                 } catch {
                     result.failed.append(AppleWriteFailure(operation: operation, message: String(describing: error)))
                 }
@@ -143,8 +162,6 @@ public final class FakeContactStore: ContactStore {
             return result
         }
     }
-
-    public func changes(since token: Data?, excluding authors: [String]) throws -> HistoryResult { .unsupported }
 
     public func exportVCards() throws -> Data {
         try state.withLock { state in
@@ -159,7 +176,7 @@ public final class FakeContactStore: ContactStore {
 
     // MARK: - Writes
 
-    private struct FakeError: Error, CustomStringConvertible {
+    struct FakeError: Error, CustomStringConvertible {
         let description: String
     }
 
@@ -262,6 +279,18 @@ public final class FakeContactStore: ContactStore {
         result.createdCardIDs[new.recordID] = cardID
     }
 
+    /// History events a saved operation produces.
+    private static func events(
+        for operation: AppleWriteOperation, createdBefore: [UUID: String], after: [UUID: String]
+    ) -> [FakeHistoryEvent] {
+        switch operation {
+        case .create(let new):
+            return createdBefore[new.recordID] == nil ? after[new.recordID].map { [.changed($0)] } ?? [] : []
+        case .delete(let id): return [.deleted(id)]
+        default: return operation.cardID.map { [.changed($0)] } ?? []
+        }
+    }
+
     private static func isNote(_ edit: CardEdit) -> Bool {
         if case .note = edit { return true }
         return false
@@ -278,4 +307,11 @@ public final class FakeContactStore: ContactStore {
             }
         return state.dropped.contains("\(kind.rawValue):\(field)")
     }
+}
+
+/// One change-history event of the fake store.
+enum FakeHistoryEvent: Hashable, Sendable {
+    case changed(String)
+    case deleted(String)
+    case group
 }

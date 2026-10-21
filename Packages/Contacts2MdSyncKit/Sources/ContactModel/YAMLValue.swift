@@ -5,7 +5,7 @@
 /// Scalars keep their text exactly as YAML resolved it plus whether they were
 /// written plain (unquoted) so that re-emitting a value never changes how mbr
 /// types it (`count: 3` stays an integer, `"3"` stays a string).
-public indirect enum YAMLValue: Hashable, Sendable {
+public indirect enum YAMLValue: Hashable, Sendable, Codable {
     /// `~`, `null` or an empty value.
     case null
     /// A scalar's text; `plain` is `false` for quoted and block scalars.
@@ -26,7 +26,7 @@ public indirect enum YAMLValue: Hashable, Sendable {
 }
 
 /// One `key: value` pair of a `YAMLValue.mapping`.
-public struct YAMLField: Hashable, Sendable {
+public struct YAMLField: Hashable, Sendable, Codable {
     /// The mapping key as text.
     public var key: String
     /// The value.

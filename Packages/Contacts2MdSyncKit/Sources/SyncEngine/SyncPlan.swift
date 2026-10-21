@@ -76,6 +76,10 @@ public struct SyncInputs: Sendable {
     public var files: [String: FileEntry]?
     /// Image hashes from earlier runs, by path.
     public var imageHashes: [String: ImageHashEntry] = [:]
+    /// `false` when the Apple snapshot is the cached one patched from change
+    /// history (an incremental run): Apple deletions are then neither
+    /// recorded, confirmed nor counted by the breaker (architecture §9, §10).
+    public var appleSnapshotComplete = true
 
     /// Creates inputs.
     public init(

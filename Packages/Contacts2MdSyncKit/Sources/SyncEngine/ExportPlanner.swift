@@ -137,6 +137,8 @@ struct PlanningRun {
     var detachedIDs = Set<UUID>()
     /// Note paths proposed as possible matches this run.
     var proposedPaths = Set<String>()
+    /// Records merged into another by a merge-keep decision.
+    var mergedAway: [UUID: MergedRecord] = [:]
     /// Two-way sync state (`nil` for a one-way export).
     var sync: SyncRun?
 
@@ -219,10 +221,7 @@ struct PlanningRun {
         for contact in contacts {
             let stamps = contact.stampIDs
             if stamps.count > 1 {
-                let paths = stamps.flatMap { id in index.entries(withID: id).map(\.path) }.sorted()
-                plan.reviews.append(.mergeRecords(contact: ref(contact), ids: stamps, paths: paths))
-                skip(contact, "carries several sync stamps (linked cards); pick the surviving note")
-                blocked.insert(contact.unifiedID)
+                resolveSeveralStamps(contact, stamps: stamps)
                 claimedByStamp.formUnion(stamps)
             } else if let id = stamps.first {
                 boundIDs[contact.unifiedID] = id

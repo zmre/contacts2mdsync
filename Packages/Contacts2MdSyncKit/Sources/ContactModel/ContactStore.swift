@@ -18,9 +18,21 @@ public protocol ContactStore: Sendable {
     /// Applies a batch of writes as one save request tagged with `author`.
     func apply(_ batch: AppleWriteBatch, author: String) throws -> AppleWriteResult
 
-    /// Change history since `token` (M5). Implementations may return
-    /// `HistoryResult.unsupported` to force a full snapshot.
+    /// Change history since `token` (M5): which cards changed, excluding
+    /// saves tagged with any of `authors` (our own writes). Implementations
+    /// may return `.unsupported` or `.reset` to force a full snapshot.
     func changes(since token: Data?, excluding authors: [String]) throws -> HistoryResult
+
+    /// The store's current change-history token (`nil`: history unsupported).
+    /// Read it *before* a snapshot, so changes made while the snapshot is
+    /// read are reported again next time (harmless) rather than lost.
+    func currentHistoryToken() throws -> Data?
+
+    /// Re-reads the unified contacts that contain any of `cardIDs`, each with
+    /// all of its cards, plus every container and group. `siblingHints` are
+    /// card ids the caller believes are linked to them (from its cache), so
+    /// the store can find every card of a linked contact.
+    func refetch(cardIDs: [String], siblingHints: [String]) throws -> AppleRefetch
 
     /// All contacts serialized as vCards (backup before any Apple write session).
     func exportVCards() throws -> Data
@@ -69,7 +81,7 @@ public enum AccountKind: String, Hashable, Sendable, Codable {
 }
 
 /// One Contacts account container.
-public struct AppleContainer: Hashable, Sendable {
+public struct AppleContainer: Hashable, Sendable, Codable {
     public var id: String
     public var name: String
     public var kind: AccountKind
@@ -86,7 +98,7 @@ public struct AppleContainer: Hashable, Sendable {
 }
 
 /// One Contacts group (only iCloud / local containers have them).
-public struct AppleGroup: Hashable, Sendable {
+public struct AppleGroup: Hashable, Sendable, Codable {
     public var id: String
     public var name: String
     public var containerID: String
@@ -100,7 +112,7 @@ public struct AppleGroup: Hashable, Sendable {
 }
 
 /// One underlying card of a unified contact (`unifyResults = false`).
-public struct AppleCard: Hashable, Sendable {
+public struct AppleCard: Hashable, Sendable, Codable {
     public var id: String
     public var containerID: String
     public var accountKind: AccountKind
@@ -125,7 +137,7 @@ public struct AppleCard: Hashable, Sendable {
 }
 
 /// One unified Apple contact as the engine sees it.
-public struct AppleContact: Hashable, Sendable {
+public struct AppleContact: Hashable, Sendable, Codable {
     /// Unified contact identifier. For a single card it is the card's id; for
     /// linked cards Contacts synthesizes an id that is neither card's and is
     /// volatile (spike S4/S9). Never use it as identity: cache only.
@@ -185,7 +197,7 @@ public struct AppleContact: Hashable, Sendable {
 }
 
 /// A full snapshot of the Contacts database.
-public struct AppleSnapshot: Hashable, Sendable {
+public struct AppleSnapshot: Hashable, Sendable, Codable {
     public var contacts: [AppleContact]
     public var containers: [AppleContainer]
     public var groups: [AppleGroup]
@@ -293,12 +305,80 @@ public struct AppleWriteFailure: Hashable, Sendable {
     }
 }
 
-/// Change-history result (M5).
+/// Change-history result (M5, architecture §10).
 public enum HistoryResult: Hashable, Sendable {
     /// History is not available; take a full snapshot.
     case unsupported
-    /// Ids changed since the token, ids deleted, and the new token.
-    case changes(changedUnifiedIDs: [String], deletedIDs: [String], token: Data?)
+    /// The token is unusable (a `DropEverything` event, error 603/604, or no
+    /// starting token): take a full snapshot. `token` is the store's new token.
+    case reset(token: Data?)
+    /// What changed since the token.
+    case changes(HistoryChanges)
+}
+
+/// Contact changes reported by the change history since a token.
+public struct HistoryChanges: Hashable, Sendable {
+    /// Cards added or updated, including cards added to or removed from a group.
+    public var changedCardIDs: [String]
+    /// Cards deleted.
+    public var deletedCardIDs: [String]
+    /// A group was added, renamed or deleted (membership changes are in
+    /// `changedCardIDs`).
+    public var groupsChanged: Bool
+    /// Number of events read (after author exclusion).
+    public var eventCount: Int
+    /// Token to persist and pass as `since` next time.
+    public var token: Data?
+
+    /// Creates changes.
+    public init(
+        changedCardIDs: [String] = [], deletedCardIDs: [String] = [], groupsChanged: Bool = false,
+        eventCount: Int = 0, token: Data?
+    ) {
+        self.changedCardIDs = changedCardIDs
+        self.deletedCardIDs = deletedCardIDs
+        self.groupsChanged = groupsChanged
+        self.eventCount = eventCount
+        self.token = token
+    }
+
+    /// `true` when nothing changed.
+    public var isEmpty: Bool { changedCardIDs.isEmpty && deletedCardIDs.isEmpty && !groupsChanged }
+}
+
+/// A partial re-read of Apple Contacts (`ContactStore.refetch`).
+public struct AppleRefetch: Hashable, Sendable {
+    /// Unified contacts containing any requested card, each with all its cards.
+    public var contacts: [AppleContact]
+    /// Every container.
+    public var containers: [AppleContainer]
+    /// Every group (iCloud / local containers).
+    public var groups: [AppleGroup]
+    public var notesAvailable: Bool
+
+    /// Creates a refetch result.
+    public init(
+        contacts: [AppleContact], containers: [AppleContainer], groups: [AppleGroup], notesAvailable: Bool
+    ) {
+        self.contacts = contacts
+        self.containers = containers
+        self.groups = groups
+        self.notesAvailable = notesAvailable
+    }
+}
+
+extension ContactStore {
+    /// Default: no change history (always a full snapshot).
+    public func currentHistoryToken() throws -> Data? { nil }
+
+    /// Default: filters a full snapshot (correct, not faster).
+    public func refetch(cardIDs: [String], siblingHints: [String]) throws -> AppleRefetch {
+        let snapshot = try snapshot()
+        let wanted = Set(cardIDs)
+        return AppleRefetch(
+            contacts: snapshot.contacts.filter { $0.cards.contains { wanted.contains($0.id) } },
+            containers: snapshot.containers, groups: snapshot.groups, notesAvailable: snapshot.notesAvailable)
+    }
 }
 
 /// Errors any `ContactStore` may throw.

@@ -74,6 +74,9 @@ public struct SessionRecord: Codable, Hashable, Sendable {
     public var pendingReview: Int
     public var stamped: Int
     public var failures: Int
+    /// Per-side counts of a two-way sync (M5; `nil` in older records and
+    /// for exports, where `created`/`updated` are markdown counts).
+    public var sides: SessionSides?
 
     /// Creates a session record.
     public init(
@@ -94,6 +97,52 @@ public struct SessionRecord: Codable, Hashable, Sendable {
         self.pendingReview = pendingReview
         self.stamped = stamped
         self.failures = failures
+    }
+}
+
+/// What a two-way sync did on each side, plus Apple changes held back.
+public struct SessionSides: Codable, Hashable, Sendable {
+    public var appleCreated: Int
+    public var appleUpdated: Int
+    public var appleDeleted: Int
+    public var markdownCreated: Int
+    public var markdownUpdated: Int
+    /// Notes moved to the Trash.
+    public var markdownDeleted: Int
+    /// Apple changes planned but not written.
+    public var held: Int
+    /// Why they were held (`apple writes disabled`, the change limit).
+    public var heldReason: String?
+    /// `full` or `incremental` (how Apple Contacts was read).
+    public var appleRead: String?
+
+    /// Creates counts.
+    public init(
+        appleCreated: Int = 0, appleUpdated: Int = 0, appleDeleted: Int = 0, markdownCreated: Int = 0,
+        markdownUpdated: Int = 0, markdownDeleted: Int = 0, held: Int = 0, heldReason: String? = nil,
+        appleRead: String? = nil
+    ) {
+        self.appleCreated = appleCreated
+        self.appleUpdated = appleUpdated
+        self.appleDeleted = appleDeleted
+        self.markdownCreated = markdownCreated
+        self.markdownUpdated = markdownUpdated
+        self.markdownDeleted = markdownDeleted
+        self.held = held
+        self.heldReason = heldReason
+        self.appleRead = appleRead
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case appleCreated = "apple_created"
+        case appleUpdated = "apple_updated"
+        case appleDeleted = "apple_deleted"
+        case markdownCreated = "markdown_created"
+        case markdownUpdated = "markdown_updated"
+        case markdownDeleted = "markdown_deleted"
+        case held
+        case heldReason = "held_reason"
+        case appleRead = "apple_read"
     }
 }
 

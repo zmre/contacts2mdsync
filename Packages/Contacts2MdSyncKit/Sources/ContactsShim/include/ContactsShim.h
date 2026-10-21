@@ -52,6 +52,18 @@ FOUNDATION_EXPORT NSString *const C2MExceptionNameKey;
                                                           error:(NSError *_Nullable *_Nullable)error
     NS_SWIFT_NAME(c2m_changeHistoryEvents(for:token:));
 
+/// Like `c2m_changeHistoryEventsFor:token:error:`, with the request's
+/// `shouldUnifyResults` and `excludedTransactionAuthors` set. With
+/// `unify == NO` contact events carry underlying card identifiers.
+/// `includeGroupChanges` is left off, but group events still arrive
+/// (spike S3), so callers filter events by class.
+- (nullable C2MChangeHistoryResult *)c2m_changeHistoryEventsFor:(NSArray<id<CNKeyDescriptor>> *)keysToFetch
+                                                          token:(nullable NSData *)startingToken
+                                                          unify:(BOOL)unify
+                                               excludingAuthors:(NSArray<NSString *> *)excludedAuthors
+                                                          error:(NSError *_Nullable *_Nullable)error
+    NS_SWIFT_NAME(c2m_changeHistoryEvents(for:token:unify:excludingAuthors:));
+
 /// Probes whether `CNContactNoteKey` can be fetched (it needs the
 /// `com.apple.developer.contacts.notes` entitlement). Fetches at most one
 /// contact. Exceptions are converted to errors, so this never crashes.

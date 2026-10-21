@@ -4,6 +4,7 @@ import Foundation
 import PhoneNumberKeys
 import SyncEngine
 import SyncTestSupport
+import SyncTriggers
 import Testing
 import VaultIndex
 
@@ -36,7 +37,9 @@ final class CLIHarness: Sendable {
     deinit { try? FileManager.default.removeItem(at: stateDirectory) }
 
     func environment(
-        output: CLIOutput = .capturing(), isDirectory: Bool = true, rootAccess: RootAccess = .explicitOnly
+        output: CLIOutput = .capturing(), isDirectory: Bool = true, rootAccess: RootAccess = .explicitOnly,
+        sources: @escaping @Sendable (URL, OwnWriteRegistry) -> [any SyncTriggerSource] = { _, _ in [] },
+        waitForInterrupt: @escaping @Sendable (SyncCoordinator) -> Void = { _ in }
     ) -> CLIEnvironment {
         let store = self.store
         let vault = self.vault
@@ -56,7 +59,9 @@ final class CLIHarness: Sendable {
             rootAccess: rootAccess,
             lockWait: 0,
             leaseSettle: 0,
-            sleep: { _ in }
+            sleep: { _ in },
+            makeTriggerSources: sources,
+            waitForInterrupt: waitForInterrupt
         )
     }
 
@@ -91,6 +96,7 @@ struct CLITests {
         #expect(Contacts2MdCLI.isCLIInvocation(["sync"]))
         #expect(Contacts2MdCLI.isCLIInvocation(["config"]))
         #expect(Contacts2MdCLI.isCLIInvocation(["review", "list"]))
+        #expect(Contacts2MdCLI.isCLIInvocation(["watch"]))
     }
 
     @Test("plan prints the dry run with stable prefixes and writes nothing")

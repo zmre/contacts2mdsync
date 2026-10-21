@@ -2,6 +2,7 @@ internal import ArgumentParser
 internal import ContactModel
 internal import Foundation
 internal import SyncEngine
+internal import SyncTriggers
 internal import VaultIndex
 
 /// The folder and output options every subcommand takes.
@@ -102,6 +103,9 @@ struct PlanCommand: ParsableCommand, EnvironmentCommand {
     @Option(name: .long, help: "Approve up to N Apple changes (default: limits.max_apple_changes_without_approval).")
     var maxAppleChanges: Int?
 
+    @Flag(name: .long, help: "Read all of Contacts instead of only what the change history reports.")
+    var full = false
+
     func run(in environment: CLIEnvironment) -> CLIExitCode {
         let session = Session(options: options, environment: environment, command: "plan")
         let resolved = oneWay ? nil : try? environment.rootAccess.resolve(options.rootPath)
@@ -109,7 +113,10 @@ struct PlanCommand: ParsableCommand, EnvironmentCommand {
         resolved?.close()
         guard twoWay else { return session.export(export.request, write: false, stamp: false, backup: false) }
         return session.sync(
-            SyncRequest(maxAppleChanges: maxAppleChanges, allowUndownloaded: export.allowUndownloaded), write: false)
+            SyncRequest(
+                maxAppleChanges: maxAppleChanges, allowUndownloaded: export.allowUndownloaded,
+                appleMode: full ? .full : .incremental),
+            write: false)
     }
 }
 
@@ -140,13 +147,59 @@ struct SyncCommand: ParsableCommand, EnvironmentCommand {
     @Flag(name: .long, help: "Take the sync lease from another device.")
     var takeOver = false
 
+    @Flag(
+        name: .long,
+        help: "Read all of Contacts (a full snapshot) instead of only what the change history reports.")
+    var full = false
+
     func run(in environment: CLIEnvironment) -> CLIExitCode {
         Session(options: options, environment: environment, command: "sync").sync(
             SyncRequest(
                 maxAppleChanges: maxAppleChanges, allowMassVanish: allowMassVanish,
                 allowUndownloaded: allowUndownloaded, takeOverLease: takeOver,
-                policy: environment.trigger == "GUI" ? .gui : .headless),
+                policy: environment.trigger == "GUI" ? .gui : .headless, appleMode: full ? .full : .incremental),
             write: true)
+    }
+}
+
+struct WatchCommand: ParsableCommand, EnvironmentCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "watch",
+        abstract: "Sync live until Ctrl-C (for development and testing; the app does this in the menu bar).",
+        discussion: """
+            Watches Contacts (CNContactStoreDidChange) and the notes folder (FSEvents), debounces \
+            changes, and runs the same sync as `contacts2md sync`: incremental from the Contacts change \
+            history for live events, a full compare at start (catch-up), after wake and on the safety \
+            sweep. Prints one line per run. Another device's lease or another run on this Mac makes a run \
+            a no-op. Never resolves anything needing review.
+            """)
+
+    @OptionGroup var options: RootOptions
+
+    @Option(name: .long, help: "Seconds of quiet after the last change before a run.")
+    var debounce: Double = 3
+
+    @Option(name: .long, help: "Safety sweep interval in hours (1–6), or `off`.")
+    var sweep: String = "2"
+
+    @Flag(name: .long, help: "Do not run a full catch-up sync at start.")
+    var noCatchUp = false
+
+    @Option(name: .long, help: "Seconds to wait for another sync on this Mac before skipping a run.")
+    var lockWait: Double = 5
+
+    func validate() throws {
+        guard debounce >= 0 else { throw ValidationError("--debounce must not be negative") }
+        guard sweep.lowercased() == "off" || Double(sweep) != nil else {
+            throw ValidationError("--sweep takes hours (1–6) or `off`")
+        }
+    }
+
+    func run(in environment: CLIEnvironment) -> CLIExitCode {
+        let hours = sweep.lowercased() == "off" ? nil : Double(sweep)
+        let interval = hours.flatMap { TriggerSettings(sweepInterval: $0 * 3600).sweepInterval }
+        return Session(options: options, environment: environment, command: "watch").watch(
+            WatchSettings(debounce: debounce, sweepInterval: interval, catchUp: !noCatchUp, lockWait: lockWait))
     }
 }
 

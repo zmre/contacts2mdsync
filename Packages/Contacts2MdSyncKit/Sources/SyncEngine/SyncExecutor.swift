@@ -17,6 +17,10 @@ public struct SyncResult: Sendable {
     public var newUnapplyable: [UnapplyableEntry] = []
     /// Notes not linked because their contact was not created.
     public var skippedLinks: [String] = []
+    /// The full snapshot re-read after the Apple writes, and the change-history
+    /// token read just before it (the Apple mirror after a run that wrote).
+    public var postWriteSnapshot: AppleSnapshot?
+    public var postWriteHistoryToken: Data?
 
     /// Creates an empty result.
     public init() {}
@@ -112,7 +116,11 @@ public struct SyncExecutor: Sendable {
                     appliedUpdates.append((change.recordID, operation))
                 }
             }
+            // Token first: our own saves are older than it, so they are never
+            // reported back as changes (they are excluded by author as well).
+            result.postWriteHistoryToken = try? store.currentHistoryToken()
             postSnapshot = try store.snapshot()
+            result.postWriteSnapshot = postSnapshot
         } else if let noteBackups {
             result.markdown.noteBackup = try backupNotes(plan, to: noteBackups)
         }

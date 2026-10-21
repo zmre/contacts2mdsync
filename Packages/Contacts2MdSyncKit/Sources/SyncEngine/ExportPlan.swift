@@ -166,7 +166,8 @@ public enum ReviewItem: Codable, Hashable, Sendable {
         case .duplicateCluster(let members, _): ["distinct"] + members.indices.map { "only:\($0 + 1)" }
         case .possibleMatch: ["adopt", "distinct", "ignore"]
         case .duplicateSyncID(_, let paths): paths.indices.map { "keep:\($0 + 1)" }
-        case .mergeRecords, .missingFile, .unreadableFile, .undownloaded: []
+        case .mergeRecords(_, _, let paths): paths.indices.map { "keep:\($0 + 1)" }
+        case .missingFile, .unreadableFile, .undownloaded: []
         case .conflict(let conflict): conflict.options.map(\.rawValue)
         case .appleDeleted: ["trash", "keep", "restore"]
         case .markdownDeleted: ["restore", "unlink", "delete-contact"]
@@ -223,6 +224,8 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             return make(kind, contacts: kind == .ignoreCandidate ? [] : [contact], path: path)
         case .duplicateSyncID(let id, let paths):
             return make(.duplicateIDKeep, path: paths[number ?? 0], syncID: id)
+        case .mergeRecords(let contact, _, let paths):
+            return make(.mergeKeep, contacts: [contact], path: paths[number ?? 0])
         default:
             // Undecidable items have no choices and were rejected above.
             return syncDecisions(for: choice, device: device, at: date)

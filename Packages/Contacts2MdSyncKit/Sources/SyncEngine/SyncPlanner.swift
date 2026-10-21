@@ -30,6 +30,7 @@ public struct SyncPlanner: Sendable {
         run.sync = SyncRun(options: options, inputs: inputs)
         run.reportVaultProblems()
         run.resolveIdentities()
+        run.applyMergeDecisions()
         run.blockDetached()
         run.applyExclusions()
         run.applyUnlinks()
@@ -145,6 +146,11 @@ extension PlanningRun {
     /// A record no contact points at any more (no stamp, no card id, no
     /// re-match ≥ 0.5) whose note is still here: missing in two full
     /// snapshots at least `deleteConfirmInterval` apart → queued.
+    ///
+    /// An incremental run (a cached snapshot patched from change history)
+    /// never concludes anything here: it keeps the records already seen
+    /// missing as they are, records no new ones, confirms nothing, and adds
+    /// nothing to the mass-vanish count. Only full snapshots do.
     mutating func planAppleDeletes() {
         guard let sync else { return }
         let bound = Set(boundIDs.values)
@@ -153,6 +159,10 @@ extension PlanningRun {
             guard !bound.contains(id), !claimedRecords.contains(id), !pausedIDs.contains(id),
                 !detachedIDs.contains(id), !sync.removed.contains(id)
             else { continue }
+            guard sync.inputs.appleSnapshotComplete else {
+                if let first = sync.inputs.vanished[id] { self.sync?.vanished[id] = first }
+                continue
+            }
             guard let entry = note(of: id) else {
                 self.sync?.removed.insert(id)  // both sides gone: nothing left to sync
                 continue

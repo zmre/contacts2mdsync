@@ -6,11 +6,12 @@
 // Dependency graph (arrows point at dependencies):
 //
 //   contacts2md (exe) -> Contacts2MdCLI -> SyncEngine      -> VaultIndex -> MarkdownCodec -> ContactModel, Yams
+//                                       -> SyncTriggers    -> SyncEngine (+ Contacts, FSEvents, AppKit notifications)
 //                                       -> SyncStateDB     -> SyncEngine, GRDB
 //                                       -> ContactsAdapter -> ContactModel, ContactsShim
 //                                       -> PhoneNumberKeys -> ContactModel, PhoneNumberKit
 //                                       -> ArgumentParser
-//   SyncTestSupport -> SyncEngine, PhoneNumberKeys
+//   SyncTestSupport -> SyncEngine, SyncTriggers, PhoneNumberKeys
 //
 // The engine never imports Contacts.framework: it sees Apple Contacts only
 // through the `ContactStore` protocol (ContactModel), implemented by
@@ -41,6 +42,7 @@ let package = Package(
         .library(name: "VaultIndex", targets: ["VaultIndex"]),
         .library(name: "SyncEngine", targets: ["SyncEngine"]),
         .library(name: "SyncStateDB", targets: ["SyncStateDB"]),
+        .library(name: "SyncTriggers", targets: ["SyncTriggers"]),
         .library(name: "Contacts2MdCLI", targets: ["Contacts2MdCLI"]),
         .library(name: "SyncTestSupport", targets: ["SyncTestSupport"]),
         .executable(name: "contacts2md", targets: ["contacts2md"]),
@@ -104,6 +106,11 @@ let package = Package(
             swiftSettings: swiftSettings
         ),
         .target(
+            name: "SyncTriggers",
+            dependencies: ["ContactModel", "SyncEngine", "VaultIndex"],
+            swiftSettings: swiftSettings
+        ),
+        .target(
             name: "Contacts2MdCLI",
             dependencies: [
                 "ContactModel",
@@ -111,6 +118,7 @@ let package = Package(
                 "PhoneNumberKeys",
                 "SyncEngine",
                 "SyncStateDB",
+                "SyncTriggers",
                 "VaultIndex",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
@@ -123,7 +131,9 @@ let package = Package(
         ),
         .target(
             name: "SyncTestSupport",
-            dependencies: ["ContactModel", "MarkdownCodec", "PhoneNumberKeys", "SyncEngine", "VaultIndex"],
+            dependencies: [
+                "ContactModel", "MarkdownCodec", "PhoneNumberKeys", "SyncEngine", "SyncTriggers", "VaultIndex",
+            ],
             swiftSettings: swiftSettings
         ),
         .testTarget(
@@ -153,6 +163,11 @@ let package = Package(
             swiftSettings: swiftSettings
         ),
         .testTarget(
+            name: "SyncTriggersTests",
+            dependencies: ["SyncTriggers", "SyncEngine", "SyncTestSupport", "ContactModel", "VaultIndex"],
+            swiftSettings: swiftSettings
+        ),
+        .testTarget(
             name: "SyncStateDBTests",
             dependencies: ["SyncStateDB", "SyncEngine", "ContactModel", "VaultIndex"],
             swiftSettings: swiftSettings
@@ -160,7 +175,8 @@ let package = Package(
         .testTarget(
             name: "Contacts2MdCLITests",
             dependencies: [
-                "Contacts2MdCLI", "SyncTestSupport", "SyncEngine", "ContactModel", "VaultIndex", "PhoneNumberKeys",
+                "Contacts2MdCLI", "SyncTestSupport", "SyncEngine", "SyncTriggers", "ContactModel", "VaultIndex",
+                "PhoneNumberKeys",
             ],
             swiftSettings: swiftSettings
         ),

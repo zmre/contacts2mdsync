@@ -34,11 +34,26 @@ static NSError *C2MErrorFromException(NSException *exception) {
 - (C2MChangeHistoryResult *)c2m_changeHistoryEventsFor:(NSArray<id<CNKeyDescriptor>> *)keysToFetch
                                                  token:(NSData *)startingToken
                                                  error:(NSError **)error {
+    return [self c2m_changeHistoryEventsFor:keysToFetch
+                                      token:startingToken
+                                      unify:YES
+                           excludingAuthors:@[]
+                                      error:error];
+}
+
+- (C2MChangeHistoryResult *)c2m_changeHistoryEventsFor:(NSArray<id<CNKeyDescriptor>> *)keysToFetch
+                                                 token:(NSData *)startingToken
+                                                 unify:(BOOL)unify
+                                      excludingAuthors:(NSArray<NSString *> *)excludedAuthors
+                                                 error:(NSError **)error {
     CNChangeHistoryFetchRequest *request = [[CNChangeHistoryFetchRequest alloc] init];
     request.startingToken = startingToken;
     request.additionalContactKeyDescriptors = keysToFetch;
-    request.shouldUnifyResults = YES;
+    request.shouldUnifyResults = unify;
     request.mutableObjects = NO;
+    if (excludedAuthors.count > 0) {
+        request.excludedTransactionAuthors = excludedAuthors;
+    }
 
     @try {
         NSError *fetchError = nil;

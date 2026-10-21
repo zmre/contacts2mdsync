@@ -58,6 +58,10 @@ public struct Decision: Codable, Hashable, Sendable {
         case markdownDelete = "markdown-delete"
         /// Create an Apple contact from the markdown-only note at `path`.
         case createContact = "create-contact"
+        /// `contacts[0]` carries several stamps (cards stamped separately,
+        /// then linked): the note at `path` keeps its record; the other
+        /// notes are detached and the other stamps removed.
+        case mergeKeep = "merge-keep"
     }
 
     public var id: UUID
@@ -311,6 +315,11 @@ public struct DecisionSet: Sendable {
             decision.kind == .markdownDelete && decision.choice == "unlink"
                 && decision.contacts.contains { $0.matches(contact) }
         }
+    }
+
+    /// The note that survives for `contact` when it carries several stamps (latest wins).
+    public func mergeKeptPath(for contact: AppleContact) -> String? {
+        all.last { $0.kind == .mergeKeep && $0.contacts.contains { $0.matches(contact) } }?.path
     }
 
     /// The user asked to create an Apple contact from the note at `path`.

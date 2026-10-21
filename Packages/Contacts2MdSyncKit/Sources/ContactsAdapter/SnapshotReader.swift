@@ -102,6 +102,92 @@ struct SnapshotReader {
         return result
     }
 
+    // MARK: - Partial re-read (history acceleration, M5)
+
+    /// The unified contacts that contain any of `cardIDs`, each with all its
+    /// cards (found among `siblingHints`, the requested cards, and cards with
+    /// the same name), plus every container and group. Cards that no longer
+    /// exist are skipped.
+    func refetch(cardIDs: [String], siblingHints: [String]) throws -> AppleRefetch {
+        let notesAvailable = CNContactStoreAdapter.notesAvailable(in: store)
+        let containers = try CNContactStoreAdapter.containers(in: store)
+        let unified = try unifiedContacts(
+            containing: cardIDs, keys: AppleContactMapper.keysToFetch(includeNote: notesAvailable))
+        let candidates = try sameNameCards(of: unified).union(cardIDs + siblingHints + unified.map(\.identifier))
+        let cards = try cards(candidates, of: unified, containers: containers, includeNote: notesAvailable)
+        let groups = try fetchGroups(in: containers, unifiedIDByCard: cards.unifiedIDByCard)
+        let contacts = unified.map { contact in
+            let ownCards = cards.byUnified[contact.identifier] ?? []
+            return AppleContact(
+                unifiedID: contact.identifier,
+                cards: ownCards.isEmpty
+                    ? [AppleCard(id: contact.identifier, containerID: "", accountKind: .unknown)] : ownCards,
+                contact: AppleContactMapper.canonical(from: contact),
+                imageData: AppleContactMapper.imageData(of: contact),
+                imageUnavailable: AppleContactMapper.imageUnavailable(of: contact),
+                groupIDs: groups.byUnified[contact.identifier] ?? [])
+        }
+        return AppleRefetch(
+            contacts: contacts, containers: containers, groups: groups.all, notesAvailable: notesAvailable)
+    }
+
+    /// The unified contact holding each card (deduplicated; deleted cards skipped).
+    private func unifiedContacts(containing cardIDs: [String], keys: [any CNKeyDescriptor]) throws -> [CNContact] {
+        var unified: [CNContact] = []
+        for id in cardIDs where !unified.contains(where: { Self.holds($0, card: id) }) {
+            do {
+                unified.append(try store.unifiedContact(withIdentifier: id, keysToFetch: keys))
+            } catch let error as NSError
+                where error.domain == CNErrorDomain && error.code == CNError.Code.recordDoesNotExist.rawValue
+            {
+                continue
+            }
+        }
+        return unified
+    }
+
+    /// Card ids with the same name as any of `unified` (Contacts links same-name cards on its own).
+    private func sameNameCards(of unified: [CNContact]) throws -> Set<String> {
+        var ids = Set<String>()
+        for contact in unified {
+            let name = Self.nameKey(contact).split(separator: "|").filter { !$0.isEmpty }.joined(separator: " ")
+            guard !name.isEmpty else { continue }
+            let request = CNContactFetchRequest(keysToFetch: [CNContactIdentifierKey as NSString])
+            request.predicate = CNContact.predicateForContacts(matchingName: name)
+            request.unifyResults = false
+            try store.enumerateContacts(with: request) { card, _ in ids.insert(card.identifier) }
+        }
+        return ids
+    }
+
+    /// The `candidates` that belong to one of `unified`, with their containers.
+    private func cards(
+        _ candidates: Set<String>, of unified: [CNContact], containers: [AppleContainer], includeNote: Bool
+    ) throws -> Cards {
+        let byID = Dictionary(containers.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let request = CNContactFetchRequest(keysToFetch: AppleContactMapper.cardKeys(includeNote: includeNote))
+        request.predicate = CNContact.predicateForContacts(withIdentifiers: candidates.sorted())
+        request.unifyResults = false
+        var fetched: [CNContact] = []
+        try store.enumerateContacts(with: request) { card, _ in fetched.append(card) }
+        var result = Cards()
+        for card in fetched {
+            guard let owner = unified.first(where: { Self.holds($0, card: card.identifier) }) else { continue }
+            let predicate = CNContainer.predicateForContainerOfContact(withIdentifier: card.identifier)
+            let containerID = try store.containers(matching: predicate).first?.identifier ?? ""
+            result.unifiedIDByCard[card.identifier] = owner.identifier
+            result.byUnified[owner.identifier, default: []].append(
+                AppleCard(
+                    id: card.identifier, containerID: containerID, accountKind: byID[containerID]?.kind ?? .unknown,
+                    stampID: AppleContactMapper.stampID(of: card), values: AppleContactMapper.canonical(from: card)))
+        }
+        return result
+    }
+
+    private static func holds(_ unified: CNContact, card id: String) -> Bool {
+        unified.identifier == id || unified.isUnifiedWithContact(withIdentifier: id)
+    }
+
     private func unifiedID(
         for card: CNContact, unifiedByID: [String: CNContact], byName: [String: [CNContact]]
     )
