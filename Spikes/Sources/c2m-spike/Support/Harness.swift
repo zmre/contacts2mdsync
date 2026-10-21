@@ -19,6 +19,8 @@ enum Harness {
     static let legacyMarkerScheme = "x-mdsync-spike:"
     /// Every scheme that identifies a harness marker, current first.
     static let markerSchemes = [markerScheme, legacyMarkerScheme]
+    /// Exact names of the scratch groups the harness may create and delete (S13).
+    static let scratchGroupNames: Set<String> = ["ZZ Spike S13 Group"]
 
     /// Keys needed to evaluate `isHarness`.
     nonisolated(unsafe) static let identityKeys: [any CNKeyDescriptor] = [
@@ -210,6 +212,71 @@ struct SafeWriter {
     func delete(_ id: String) throws {
         let fresh = try verifiedCard(id, keys: [])
         guard let mutable = fresh.mutableCopy() as? CNMutableContact else { throw SpikeError("mutableCopy failed") }
+        let request = CNSaveRequest()
+        request.delete(mutable)
+        try execute(request)
+    }
+
+    // MARK: Scratch groups (S13)
+
+    /// Creates a scratch group. `name` must start with the harness name prefix
+    /// and equal one of `Harness.scratchGroupNames`. Returns the new group id.
+    func addGroup(named name: String, to containerID: String) throws -> String {
+        guard Harness.scratchGroupNames.contains(name), name.hasPrefix(Harness.namePrefix) else {
+            throw SpikeError("SAFETY: refusing to create a group that is not a harness scratch group.")
+        }
+        let group = CNMutableGroup()
+        group.name = name
+        let request = CNSaveRequest()
+        request.add(group, toContainerWithIdentifier: containerID)
+        try execute(request)
+        guard let saved = try scratchGroups(named: name).first(where: { $0.name == name }) else {
+            throw SpikeError("Created group \"\(name)\" but could not find it again.")
+        }
+        return saved.identifier
+    }
+
+    /// Scratch groups whose name is exactly `name` (must be a harness scratch group name).
+    func scratchGroups(named name: String) throws -> [CNGroup] {
+        guard Harness.scratchGroupNames.contains(name) else { return [] }
+        return try catchingObjC { try store.groups(matching: nil) }.filter { $0.name == name }
+    }
+
+    /// Members of a group as underlying cards: (harness, non-harness) counts and ids.
+    func groupMembers(_ groupID: String) throws -> (harness: [String], other: [String]) {
+        let request = CNContactFetchRequest(keysToFetch: Harness.identityKeys)
+        request.unifyResults = false
+        request.predicate = CNContact.predicateForContactsInGroup(withIdentifier: groupID)
+        var harness: [String] = []
+        var other: [String] = []
+        try catchingObjC {
+            try store.enumerateContacts(with: request) { contact, _ in
+                if Harness.isHarness(contact) { harness.append(contact.identifier) } else { other.append(contact.identifier) }
+            }
+        }
+        return (harness, other)
+    }
+
+    /// Deletes a scratch group only if its name is exactly a harness scratch
+    /// group name and every member (if any) is a harness card. Re-checked on
+    /// a fresh fetch right before the save.
+    func deleteGroup(_ groupID: String) throws {
+        let groups = try catchingObjC {
+            try store.groups(matching: CNGroup.predicateForGroups(withIdentifiers: [groupID]))
+        }
+        guard let group = groups.first(where: { $0.identifier == groupID }) else {
+            throw SpikeError("Group \(groupID) not found; nothing to delete.")
+        }
+        guard Harness.scratchGroupNames.contains(group.name) else {
+            throw SpikeError("SAFETY: group \(groupID) is not a harness scratch group. Refusing to delete.")
+        }
+        let members = try groupMembers(groupID)
+        guard members.other.isEmpty else {
+            throw SpikeError(
+                "SAFETY: group \"\(group.name)\" has \(members.other.count) non-harness member(s). Refusing to delete; "
+                    + "remove them in Contacts.app first if they were added by hand.")
+        }
+        guard let mutable = group.mutableCopy() as? CNMutableGroup else { throw SpikeError("mutableCopy failed") }
         let request = CNSaveRequest()
         request.delete(mutable)
         try execute(request)

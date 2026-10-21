@@ -1,14 +1,15 @@
 # c2m-spike: the spike harness
 
-`c2m-spike` is a standalone command-line tool for the spikes in [`docs/spikes.md`](../docs/spikes.md) that need a real address book: S1, S3, S4, S5, S9, S11 and S12. It also gives partial evidence for S2 (the notes-key probe in `inventory`). It doesn't depend on `Contacts2MdSyncKit`.
+`c2m-spike` is a command-line tool for the spikes in [`docs/spikes.md`](../docs/spikes.md) that need a real address book: S1, S3, S4, S5, S9, S11, S12 and S13. It also gives partial evidence for S2 (the notes-key probe in `inventory`). S1–S12 use Contacts.framework directly. S13 links `ContactModel` and `ContactsAdapter` from `Packages/Contacts2MdSyncKit` (a path dependency) so it can run the app's real write path; the harness never modifies the kit.
 
 ## Safety model
 
 - **Writes only touch scratch cards.** A card counts as a harness card only if both of these hold: its name (`givenName familyName`) starts with `ZZ Spike `, and one of its URL values starts with `x-c2mdsync-spike:`. That URL carries the label `c2mdsync-spike` and has the form `x-c2mdsync-spike:<spike>:<account>:<uuid>`. Scratch cards created before the rename carry the legacy marker `x-mdsync-spike:` (label `mdsync-spike`); the harness still recognizes those for checks and cleanup (the name prefix is still required), but never creates new ones. The harness never reads or writes the notes field through Contacts.framework. The one exception is S12: it uses Apple Events to Contacts.app to write a synthetic note, and only to a scratch card.
 - **S12 writes go through Contacts.app, so they are checked on both sides.** Right before `set note`, `s12-notes write` verifies every underlying card behind the target with `SafeWriter.verifiedCard`. It also asks Contacts.app for the target person's `id`, first and last name, and `url` values, and refuses unless they show the `ZZ Spike ` prefix and one of the expected marker URLs. The handler arguments are passed as Apple Event descriptors, never pasted into script source.
 - **Checks happen right before every write.** All writes go through `SafeWriter` (`Sources/c2m-spike/Support/Harness.swift`). It fetches the target card again by identifier with unified results off, refuses to continue unless the card passes both checks, and checks again after the mutation. A save to a unified contact (S4 `--unified-write`) requires every underlying card to pass.
+- **S13 runs the app's real write path behind a harness guard.** `s13-writes` calls `CNContactStoreAdapter.apply` (which uses `CardWriter`) only through `HarnessGuardedStore` (`Sources/c2m-spike/Support/KitGuard.swift`). Before each batch, the guard fetches every target card again by id with unified results off. Every card must pass both checks and carry the `s13` spike tag, or the guard refuses the whole batch and nothing is saved. The guard also refuses a URL-list edit that would drop the marker, a name edit that would drop the `ZZ Spike ` prefix, note and image edits, a create without the prefix and an `s13` marker, and group operations on any group other than `ZZ Spike S13 Group`. After the save it checks the cards again. The wrapper exposes only `apply`, so the harness can't reach any other write entry point.
 - **Writes are dry runs until you add `--yes`.** Every write subcommand prints its plan. Without `--yes`, nothing is written.
-- **`cleanup` needs both markers.** It deletes only cards that pass both checks. If a card matches only one, `cleanup` lists it and you delete it by hand. This can happen when Google strips the marker URL during S1 or S5.
+- **`cleanup` needs both markers.** It deletes only cards that pass both checks. It deletes the S13 scratch group only if the group's name is exactly `ZZ Spike S13 Group` and it is empty or holds only harness cards; this is checked again right before the delete. If a card matches only one, `cleanup` lists it and you delete it by hand. This can happen when Google strips the marker URL during S1 or S5.
 - **Read-only output contains no PII.** `inventory`, `s9-ids` and `s12-notes probe` print counts, timings and opaque identifiers only. `s12-notes probe` reads every note but never prints note text or names. Container names that contain `@` are redacted. S9 files store SHA-256 hashes of identifiers.
 
 ## Build
@@ -267,6 +268,58 @@ Even a dry-run `write` sends **read-only** Apple Events to resolve and check the
 
 **Record:** the probe output (it's PII-free) and the write reports under S12. Then decide: can the body ↔ notes mapping use Apple Events when the entitlement is missing, and if so, read in bulk and write per person?
 
+## S13: the real write path (M3 `ContactStore.apply`) on scratch cards
+
+Question: does the app's real Apple write path (`CNContactStoreAdapter.apply` → `CardWriter`) do the right thing against the real Contacts store, iCloud and Google, before you turn on `apple_writes` for your real address book?
+
+```sh
+c2m-spike s13-writes setup                 # dry run: plan + containers
+c2m-spike s13-writes setup --yes           # creates 4 scratch cards via CardWriter .create
+#   wait about 15 min: automatic linking + Google id churn
+c2m-spike s13-writes run                   # dry run: finds the cards by marker, shows whether the pair is linked
+c2m-spike s13-writes run --yes             # scripted writes, PASS/FAIL table, results/s13-<date>.md
+#   wait 15–30 min; open the S13 cards on iCloud.com and contacts.google.com
+c2m-spike s13-writes check                 # read-only round-trip check, results/s13-check-<date>.md
+c2m-spike cleanup --spike s13 --yes        # cards + "ZZ Spike S13 Group"
+```
+
+`setup` creates these four cards in a single `apply` batch. The marker URL is written through the kit's label mapping, so it shows the label `C2mdsync Spike`. Identity only depends on the URL value.
+
+| Card | Container | Contents |
+|---|---|---|
+| `ZZ Spike S13 Linked <id>` | iCloud | shared email, shared phone …0113, phone …0114, job title `S13 baseline icloud`, relation `ZZ Spike S13 Assistant` |
+| `ZZ Spike S13 Linked <id>` | Google | the same name and shared email, so Contacts links the pair; shared phone …0113, phone …0115, job title `S13 baseline google` |
+| `ZZ Spike S13 iCloud <id>` | iCloud | its own email |
+| `ZZ Spike S13 Google <id>` | Google | its own email and phone …0116 |
+
+`run` refuses to start until the pair is linked; to run anyway, pass `--allow-unlinked`, which turns the unified-view checks into INFO. Every step finds the cards by marker again, so a Google id that changed is followed. The batches follow architecture §6, *Stamping and write targets*. They are built by hand because `AppleWritePlanner` is internal to the engine and covered by its unit tests. Here are the steps:
+
+0. **Guard self-test.** Each of these batches must be refused before anything reaches the adapter: an unknown card id mixed with a valid edit (so the whole batch is refused), a URL edit that drops the marker, a name edit that drops the prefix, a non-harness create, and a group that isn't the scratch group.
+1. **Add an email to the linked contact.** It should land on the iCloud card only. The Google card should not get it, because a unified save would put it on both (S4).
+2. **Edit the shared email on both cards.** Each card should show the new value and keep its labeled-value id.
+3. **Change the job title on both linked cards.** Check each card again and the unified view.
+4. **Delete the shared phone from both cards.** The other phones should keep their ids.
+5. **Add a `x-c2mdsync:<uuid>` stamp** to the linked iCloud card and the Google-only card. Check the label, the marker, and the ids of the other URLs. The linked Google card should get no stamp.
+6. **Group membership.** The harness creates `ZZ Spike S13 Group` in iCloud, or reuses it. Then it runs `addMember` for both iCloud cards and `removeMember` for the iCloud-only card.
+7. **Relations.** Rename the iCloud card's relation; its id and label should be kept. Add a relation to the Google-only card.
+8. **No unified save.** Every operation should name an underlying card id, and the step 1 content should be right. The change history should record authored events only on the target cards (`unify=false`).
+9. **`transactionAuthor`.** Each batch is tagged `com.zmre.contacts2mdsync.spike-s13`. Unfiltered history should show it, and history with `excludedTransactionAuthors` should hide it.
+
+`run` prints the PASS/FAIL/WARN/INFO/SKIP table, writes `Spikes/results/s13-<date>.md`, and saves `results/s13-state.json`. If a step aborts, for example on a SAFETY refusal, it writes `s13-<date>-aborted.md`.
+
+`check` writes nothing. For each card it reports:
+
+- whether the id is the same or changed (found by marker);
+- whether each email, phone, URL and relation value survived, with its labeled-value id, any server rewrites, and any new values;
+- the job title and the stamp;
+- whether the card is still in the group.
+
+For the unified contact, it reports whether the pair is still linked, whether the unified job title is still the written value and which card supplies it, and whether any email shows twice. It writes `results/s13-check-<date>.md`.
+
+**Observe:** any FAIL in `run`. A WARN in step 8 or 9 can come from Google sync saving the card again at the same moment; run `check` and read the log. In `check`, look for Google rewriting or dropping the stamp (this is also the missing S1 Google evidence), labeled-value ids that change after a round trip, and a unified job title that flips to the other card.
+
+**Record:** the `run` and `check` tables under S13 in `docs/spikes.md`. Then decide whether `apple_writes: enabled` is safe to turn on for the real address book.
+
 ## Cleanup
 
 ```sh
@@ -274,6 +327,7 @@ c2m-spike cleanup                 # dry run: lists harness cards, plus any half-
 c2m-spike cleanup --yes           # delete all harness cards
 c2m-spike cleanup --spike s5 --yes
 c2m-spike cleanup --spike s12 --yes   # S12 scratch cards (single card and linked pair)
+c2m-spike cleanup --spike s13 --yes   # S13 cards, plus "ZZ Spike S13 Group" if all its members are harness cards
 ```
 
 Cards that match only one marker are listed for manual deletion and never deleted by the tool. After cleanup, delete any leftovers on contacts.google.com and iCloud.com by hand, and unload the S11 LaunchAgent and cron line.

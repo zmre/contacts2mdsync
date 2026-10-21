@@ -16,6 +16,7 @@ Each spike is a throwaway target under `Spikes/` with a written result here. Run
 | S10| Does the real `mbr` render our fixture files with zero contact problems (incl. `[[Title]]` relationships after moving files into subfolders)? | Format contract.                                   | Add mbr as flake input + check derivation in M1.                                         | done (M1): `checks.mbr` / `just mbr-check` — 59 fixture notes, 0 problems with mbr 0.7.0 |
 | S11| Headless TCC + sandbox: does the app binary run with a `sync` argument from Terminal, cron and a launchd user agent keep the app's Contacts grant and read its security-scoped bookmark? | Headless CLI (architecture §15).             | Works from launchd at minimum. Otherwise fall back to `open -g -a … --args sync`. | **partial**: Terminal is authorized. launchd and cron report `notDetermined`; `--request` was never tried, so prompting and granting are untested. Bookmark not tested |
 | S12| Notes without the entitlement: can we read and write the Notes field by scripting Contacts.app with Apple Events (`note` and `id` of `person`)? How long do a bulk read and a per-person read take for about 2,500 contacts? Do AppleScript ids match CNContact card ids or unified ids? Which card of a linked pair gets the write? | Body ↔ notes mapping while S2 is blocked on Apple. | Bulk read of all notes takes a few seconds or less, writes keep the text exactly, no other fields or ids change, the linked-pair write target is predictable, and the Automation prompt is acceptable. Then Apple Events become the fallback notes path in architecture §8. | todo |
+| S13| Real M3 write path on scratch cards: does `CNContactStoreAdapter.apply` → `CardWriter` (behind a harness-only guard) add, edit and delete list values, write single-valued fields through to linked cards, stamp, manage group membership and edit relations correctly on real iCloud and Google cards? Labeled-value ids kept, no unified save, `transactionAuthor` excluded from history, values intact after a server round trip? | Go/no-go for `apple_writes: enabled` on the real address book. | `run`: every row PASS (WARN in steps 8–9 only if explained by a concurrent Google re-save). `check` after 15–30 min: values, stamps and ids survive, or each server rewrite is understood and covered by comparison keys. | todo |
 
 ## Results (2026-10-21 UTC run)
 
@@ -254,3 +255,41 @@ Run the steps in this order. Steps 2–7 touch the real address book, but only s
    Record which card the change history names, and where the note shows up: on iCloud.com, on contacts.google.com, or on both.
 
 4. **Clean up:** `c2m-spike cleanup --spike s12 --yes`.
+
+### S13 run steps
+
+`c2m-spike s13-writes` runs the app's real write path, `CNContactStoreAdapter.apply` → `CardWriter`, against the real Contacts store. Every batch first goes through the harness guard, which fetches each target card again (unified results off) and refuses the whole batch unless every card is an S13 scratch card. Run S13 before you set `apple_writes: enabled` on your real address book. For what each step checks, see [`Spikes/README.md`](../Spikes/README.md#s13-the-real-write-path-m3-contactstoreapply-on-scratch-cards).
+
+1. **Rebuild** (step 1 above). The harness now links `ContactModel` and `ContactsAdapter` from `Packages/Contacts2MdSyncKit`, so it builds whatever kit is in the working tree.
+
+2. **Setup.** This creates a linked iCloud + Google pair, an iCloud-only card and a Google-only card.
+
+   ```sh
+   c2m-spike s13-writes setup          # dry run
+   c2m-spike s13-writes setup --yes
+   ```
+
+3. **Wait about 15 minutes** for automatic linking and the Google id change. Then:
+
+   ```sh
+   c2m-spike s13-writes run            # dry run: "linked pair: YES"?
+   c2m-spike s13-writes run --yes      # PASS/FAIL table → Spikes/results/s13-<date>.md
+   ```
+
+   If the pair never links, link it by hand in Contacts.app, or pass `--allow-unlinked`.
+
+4. **After 15–30 minutes,** with the S13 cards opened once on iCloud.com and contacts.google.com:
+
+   ```sh
+   c2m-spike s13-writes check          # read-only → Spikes/results/s13-check-<date>.md
+   ```
+
+   Look for these:
+
+   - the Google-only card's `x-c2mdsync:` stamp (this is the S1 Google answer);
+   - labeled-value ids after the round trip;
+   - which card's job title the unified view shows.
+
+   You can also look at the cards on the iPhone.
+
+5. **Clean up:** `c2m-spike cleanup --spike s13 --yes`. This deletes the cards and `ZZ Spike S13 Group`. Then check iCloud.com and contacts.google.com for leftover "ZZ Spike S13" cards.
