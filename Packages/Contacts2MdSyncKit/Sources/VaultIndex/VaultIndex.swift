@@ -18,12 +18,15 @@ public struct VaultEntry: Sendable {
     /// Facts from the file cache, for files that were not read this scan
     /// (unchanged non-contact notes, unchanged problem files, dataless files).
     public var cached: FileCacheEntry?
+    /// Unresolved iCloud conflict versions of this file (architecture §11).
+    public var conflictVersions: [FileConflictVersion]
 
     /// Creates an entry.
     public init(
         path: String, stamp: FileStamp? = nil, note: ParsedNote? = nil, problem: String? = nil,
-        isDataless: Bool = false, cached: FileCacheEntry? = nil
+        isDataless: Bool = false, cached: FileCacheEntry? = nil, conflictVersions: [FileConflictVersion] = []
     ) {
+        self.conflictVersions = conflictVersions
         self.path = path
         self.stamp = stamp
         self.note = note
@@ -127,30 +130,45 @@ public struct VaultIndex: Sendable {
                 && !excluded.contains { file.path.hasPrefix($0) }
                 && !excludeGlobs.contains { PathGlob.matches($0, file.path) }
         }
+        var tally = ScanTally()
+        var entries: [VaultEntry] = []
+        for file in files {
+            let versions =
+                file.hasUnresolvedConflicts && !file.isDataless
+                ? ((try? fs.unresolvedConflictVersions(file.path)) ?? []) : []
+            var entry = scanEntry(fs, file: file, cache: cache, tally: &tally)
+            entry.conflictVersions = versions
+            entries.append(entry)
+        }
+        return VaultIndex(
+            entries: entries, fileCache: tally.newCache, filesRead: tally.read, filesFromCache: tally.fromCache)
+    }
+
+    /// What one scan read, reused and cached.
+    private struct ScanTally {
         var newCache: [String: FileCacheEntry] = [:]
         var read = 0
         var fromCache = 0
-        var entries: [VaultEntry] = []
-        for file in files {
-            let previous = cache[file.path]
-            if file.isDataless {
-                if previous == nil || previous?.kind == .contact { fs.requestDownload(file.path) }
-                if let previous { newCache[file.path] = previous }
-                entries.append(VaultEntry(path: file.path, isDataless: true, cached: previous))
-                continue
-            }
-            if let previous, previous.kind != .contact, previous.matches(file) {
-                fromCache += 1
-                newCache[file.path] = previous
-                entries.append(VaultEntry(path: file.path, problem: previous.problem, cached: previous))
-                continue
-            }
-            read += 1
-            let entry = readEntry(fs, file: file)
-            if let cacheEntry = entry.cached { newCache[file.path] = cacheEntry }
-            entries.append(entry)
+    }
+
+    private static func scanEntry(
+        _ fs: any VaultFS, file: FileEntry, cache: [String: FileCacheEntry], tally: inout ScanTally
+    ) -> VaultEntry {
+        let previous = cache[file.path]
+        if file.isDataless {
+            if previous == nil || previous?.kind == .contact { fs.requestDownload(file.path) }
+            if let previous { tally.newCache[file.path] = previous }
+            return VaultEntry(path: file.path, isDataless: true, cached: previous)
         }
-        return VaultIndex(entries: entries, fileCache: newCache, filesRead: read, filesFromCache: fromCache)
+        if let previous, previous.kind != .contact, previous.matches(file) {
+            tally.fromCache += 1
+            tally.newCache[file.path] = previous
+            return VaultEntry(path: file.path, problem: previous.problem, cached: previous)
+        }
+        tally.read += 1
+        let entry = readEntry(fs, file: file)
+        if let cacheEntry = entry.cached { tally.newCache[file.path] = cacheEntry }
+        return entry
     }
 
     /// The cache entry for bytes just written to `path` (so a note evicted by
@@ -278,5 +296,31 @@ public struct VaultIndex: Sendable {
     /// Organization notes' titles (name keys), for `company:` wikilinks.
     public var organizationTitleKeys: Set<String> {
         Set(contacts.filter { $0.contact?.kind == .organization }.map { ComparisonKeys.name($0.title) })
+    }
+}
+
+extension FileConflictVersion {
+    /// `true` when two copies of a note say the same thing: equal canonical
+    /// contacts (after normalization, so formatting, key order and quoting do
+    /// not count) for contact notes, else equal text up to line endings and
+    /// trailing whitespace. Used to resolve iCloud conflict versions without
+    /// asking (architecture §11).
+    public static func notesAreCanonicallyEqual(_ lhs: Data, _ rhs: Data) -> Bool {
+        if lhs == rhs { return true }
+        guard let left = String(data: lhs, encoding: .utf8), let right = String(data: rhs, encoding: .utf8) else {
+            return false
+        }
+        if let leftNote = try? MarkdownCodec.parse(left), let rightNote = try? MarkdownCodec.parse(right),
+            let leftContact = leftNote.contact, let rightContact = rightNote.contact
+        {
+            return MarkdownCodec.normalize(leftContact) == MarkdownCodec.normalize(rightContact)
+        }
+        return plainText(left) == plainText(right)
+    }
+
+    private static func plainText(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.replacing(/[ \t]+$/, with: "") }.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

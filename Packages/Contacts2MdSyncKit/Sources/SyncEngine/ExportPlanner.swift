@@ -120,8 +120,11 @@ struct PlanningRun {
     var adoptions: [String: (entry: VaultEntry, detail: String)] = [:]
     /// Unified ids that must not be exported this run.
     var blocked = Set<String>()
-    /// Record ids paused because their notes were copied.
+    /// Record ids paused because their notes were copied (or have iCloud
+    /// conflict versions, `pauseReasons`).
     var pausedIDs = Set<UUID>()
+    /// Why a record is paused, when it is not a copied note.
+    var pauseReasons: [UUID: String] = [:]
     /// Paths of copies ignored by a dup-id-keep decision.
     var ignoredCopies = Set<String>()
     /// New notes are held back (unknown iCloud placeholders).
@@ -201,6 +204,7 @@ struct PlanningRun {
                 plan.reviews.append(.duplicateSyncID(id: id, paths: paths.sorted()))
             }
         }
+        planVersionConflicts()
         let undownloaded = index.undownloaded.map(\.path)
         if !undownloaded.isEmpty, !planner.options.allowUndownloaded {
             holdCreates = true
@@ -344,7 +348,7 @@ struct PlanningRun {
                     apple: contact, recordID: id, existing: adoption.entry, title: adoption.entry.title,
                     path: adoption.entry.path, kind: .adopt, detail: adoption.detail))
         } else if pausedIDs.contains(id) {
-            skip(contact, "its note was copied; pick one first")
+            skip(contact, pauseReasons[id] ?? "its note was copied; pick one first")
         } else if let entry = note(of: id) {
             useExisting(entry, for: contact, id: id)
         } else if records[id] != nil, !index.undownloaded.isEmpty {

@@ -61,6 +61,7 @@ struct Reporter {
         for change in plan.updates { item(Self.verb(change.kind, done: false), "md", Self.describe(change)) }
         for image in plan.images { item("write", "image", image.path) }
         if plan.configText != nil { item("write", "config", VaultConfig.path) }
+        versionPlan(plan)
         if stamping {
             for request in plan.stamps { item("stamp", "apple", request.title) }
         }
@@ -77,7 +78,21 @@ struct Reporter {
         for change in result.updated { item(Self.verb(change.kind, done: true), "md", Self.describe(change)) }
         for image in result.imagesWritten { item("wrote", "image", image.path) }
         if result.configWritten { item("wrote", "config", VaultConfig.path) }
+        for resolution in result.versionsResolved { item("resolved", "md", Self.describe(resolution)) }
         for failure in result.failures { error("\(failure.path): \(failure.message)") }
+    }
+
+    /// `resolve md <path>  (iCloud versions: …)` lines of a plan.
+    func versionPlan(_ plan: ExportPlan) {
+        for resolution in plan.versionResolutions { item("resolve", "md", Self.describe(resolution)) }
+    }
+
+    private static func describe(_ resolution: FileVersionResolution) -> String {
+        let what =
+            resolution.keep == nil
+            ? (resolution.reason == "identical" ? "identical iCloud versions; current kept" : "current kept (decision)")
+            : "iCloud version kept (decision)"
+        return "\(resolution.path)  (\(what))"
     }
 
     private static func verb(_ kind: FileChangeKind, done: Bool) -> String {
@@ -159,6 +174,8 @@ struct Reporter {
             warning("delete", "\(review.summary), confirm in app or `review decide` \(id)")
         case .markdownOnly:
             break  // summarized in one `pending` line
+        case .fileVersionConflict:
+            warning("version", "\(review.summary) — record paused; keep one in the app or `review decide` \(id)")
         }
     }
 
@@ -201,6 +218,7 @@ extension Reporter {
         for change in markdown.updates { item(Self.verb(change.kind, done: false), "md", Self.describe(change)) }
         for image in markdown.images { item("write", "image", image.path) }
         if markdown.configText != nil { item("write", "config", VaultConfig.path) }
+        versionPlan(markdown)
         for trash in plan.trash { item("trash", "md", "\(trash.path)  (deleted in Contacts)") }
         if plan.appleWritesAllowed {
             for change in plan.apple { item(Self.appleVerb(change.kind, done: false), "apple", Self.describe(change)) }

@@ -1,6 +1,5 @@
 public import ContactModel
 public import Foundation
-public import VaultIndex
 
 /// An Apple contact as referenced by a decision or review item: its
 /// underlying card ids (the unified id is volatile, spike S4) and a title for
@@ -62,6 +61,11 @@ public struct Decision: Codable, Hashable, Sendable {
         /// then linked): the note at `path` keeps its record; the other
         /// notes are detached and the other stamps removed.
         case mergeKeep = "merge-keep"
+        /// The note (or vault file) at `path` has iCloud conflict versions:
+        /// keep the current contents (`choice` `keep-current`) or the version
+        /// whose sha256 is `version` (`keep-other:N`), only while the current
+        /// contents still hash to `markdown_hash` (M6, architecture §11).
+        case fileVersionKeep = "file-version-keep"
     }
 
     public var id: UUID
@@ -80,13 +84,16 @@ public struct Decision: Codable, Hashable, Sendable {
     /// Conflict side hashes the choice was made against.
     public var appleHash: String?
     public var markdownHash: String?
+    /// The chosen iCloud conflict version (its sha256), for `file-version-keep`.
+    public var version: String?
 
     /// Creates a decision.
     public init(
         id: UUID = UUID(), kind: Kind, createdAt: Date, device: DeviceIdentity, contacts: [ContactRef] = [],
         path: String? = nil, syncID: UUID? = nil, itemID: String? = nil, choice: String? = nil,
-        appleHash: String? = nil, markdownHash: String? = nil
+        appleHash: String? = nil, markdownHash: String? = nil, version: String? = nil
     ) {
+        self.version = version
         self.choice = choice
         self.appleHash = appleHash
         self.markdownHash = markdownHash
@@ -117,6 +124,7 @@ public struct Decision: Codable, Hashable, Sendable {
         case choice
         case appleHash = "apple_hash"
         case markdownHash = "markdown_hash"
+        case version
     }
 
     public init(from decoder: any Decoder) throws {
@@ -133,6 +141,7 @@ public struct Decision: Codable, Hashable, Sendable {
         choice = try container.decodeIfPresent(String.self, forKey: .choice)
         appleHash = try container.decodeIfPresent(String.self, forKey: .appleHash)
         markdownHash = try container.decodeIfPresent(String.self, forKey: .markdownHash)
+        version = try container.decodeIfPresent(String.self, forKey: .version)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -149,99 +158,29 @@ public struct Decision: Codable, Hashable, Sendable {
         try container.encodeIfPresent(choice, forKey: .choice)
         try container.encodeIfPresent(appleHash, forKey: .appleHash)
         try container.encodeIfPresent(markdownHash, forKey: .markdownHash)
-    }
-}
-
-/// Reading and appending `decisions.jsonl` files in the vault.
-public enum DecisionLog {
-    /// Folder holding one subfolder per device.
-    public static let devicesFolder = ".c2mdsync/devices"
-
-    /// The log of `deviceID`.
-    public static func path(deviceID: String) -> String { "\(devicesFolder)/\(deviceID)/decisions.jsonl" }
-
-    /// Errors writing the log.
-    public enum LogError: Error, Hashable, Sendable, CustomStringConvertible {
-        case invalidDeviceID(String)
-
-        public var description: String {
-            switch self {
-            case .invalidDeviceID(let id): "invalid device id for the decision log: \(id)"
-            }
-        }
-    }
-
-    /// The union of every device's decisions, oldest first, plus lines that
-    /// could not be read (`path:line: message`). Never throws for bad lines.
-    public static func readAll(_ fs: any VaultFS) throws -> (decisions: [Decision], problems: [String]) {
-        var decisions: [Decision] = []
-        var problems: [String] = []
-        var seen = Set<UUID>()
-        for device in try fs.list(devicesFolder) where !device.hasPrefix(".") {
-            let logPath = "\(devicesFolder)/\(device)/decisions.jsonl"
-            guard fs.exists(logPath) else { continue }
-            let (data, _) = try fs.read(logPath)
-            let text = String(bytes: data, encoding: .utf8) ?? ""
-            for (number, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                guard !trimmed.isEmpty else { continue }
-                do {
-                    let decision = try decoder.decode(Decision.self, from: Data(trimmed.utf8))
-                    if seen.insert(decision.id).inserted { decisions.append(decision) }
-                } catch {
-                    problems.append("\(logPath):\(number + 1): unreadable decision")
-                }
-            }
-        }
-        decisions.sort { ($0.createdAt, $0.id.uuidString) < ($1.createdAt, $1.id.uuidString) }
-        return (decisions, problems)
-    }
-
-    /// Appends `decisions` to this device's log (compare-and-swap on the
-    /// current bytes, so a concurrent writer on this device is not lost).
-    public static func append(_ decisions: [Decision], deviceID: String, fs: any VaultFS) throws {
-        guard !decisions.isEmpty else { return }
-        guard !deviceID.isEmpty, !deviceID.contains("/"), !deviceID.hasPrefix(".") else {
-            throw LogError.invalidDeviceID(deviceID)
-        }
-        let logPath = path(deviceID: deviceID)
-        var expectation = WriteExpectation.absent
-        var data = Data()
-        if fs.exists(logPath) {
-            let (current, stamp) = try fs.read(logPath)
-            data = current
-            expectation = .unchanged(stamp)
-            if let last = data.last, last != UInt8(ascii: "\n") { data.append(UInt8(ascii: "\n")) }
-        }
-        for decision in decisions {
-            data.append(try encoder.encode(decision))
-            data.append(UInt8(ascii: "\n"))
-        }
-        _ = try fs.write(data, to: logPath, expecting: expectation)
-    }
-
-    private static var encoder: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        encoder.dateEncodingStrategy = .iso8601
-        return encoder
-    }
-
-    private static var decoder: JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
+        try container.encodeIfPresent(version, forKey: .version)
     }
 }
 
 /// Decisions indexed for the planner.
 public struct DecisionSet: Sendable {
-    /// All decisions, oldest first.
+    /// All decisions in effect, oldest first.
     public let all: [Decision]
 
-    /// Indexes `decisions` (oldest first; later decisions win where they conflict).
+    /// Indexes `decisions` (oldest first). Of several decisions answering
+    /// the same review item (`itemID`), only the latest is in effect: a
+    /// re-decided item, or one decided differently on two devices (latest
+    /// wins, `DecisionLog.read` warns), never mixes both answers.
     public init(_ decisions: [Decision] = []) {
-        self.all = decisions.filter { $0.kind != nil }
+        let known = decisions.filter { $0.kind != nil }
+        var latestForItem: [String: UUID] = [:]
+        for decision in known { if let item = decision.itemID { latestForItem[item] = decision.id } }
+        self.all = known.filter { decision in decision.itemID.map { latestForItem[$0] == decision.id } ?? true }
+    }
+
+    /// The latest file-version decision for `path`.
+    public func fileVersionChoice(forPath path: String) -> Decision? {
+        all.last { $0.kind == .fileVersionKeep && $0.path == path }
     }
 
     /// `first` and `second` were declared different people.

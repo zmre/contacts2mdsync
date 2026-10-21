@@ -107,20 +107,24 @@ struct VaultSyncRunnerTests {
         #expect(try harness.stateStore().recentSessions(limit: 1).first?.trigger == "Live")
     }
 
-    @Test("another device's lease: blocked, nothing written")
+    @Test("another device's lease: follower dry run, nothing written, status recorded")
     func leaseHeld() throws {
         let harness = CLIHarness.exported()
         let other = DeviceIdentity(id: "other-device", name: "Other Mac")
         _ = try LeaseManager(fs: harness.vault, device: other, clock: harness.clock, settle: 0).acquire(
             otherDevicesKnown: false)
         harness.store.editCard("bob:icloud") { $0.jobTitle = "Chef" }
+        harness.vault.resetWrites()
         let outcome = harness.runner().runNow(request) { _ in }
-        guard case .blocked(.leaseHeldElsewhere(let name, _)) = outcome else {
-            Issue.record("expected lease held, got \(outcome)")
+        guard case .following(let holder, let summary?) = outcome else {
+            Issue.record("expected following, got \(outcome)")
             return
         }
-        #expect(name == "Other Mac")
+        #expect(holder.deviceName == "Other Mac" && !holder.isStale)
+        #expect(summary.markdownUpdated == 1 && summary.appleUpdated == 0)  // what the leader still has to do
         #expect(harness.vault.text("Inbox/Bob Two.md")?.contains("Chef") == false)
+        #expect(harness.vault.writes.isEmpty)
+        #expect(try harness.stateStore().recentSessions(limit: 1).first?.command == "follow")
     }
 
     @Test("not configured: blocked as not runnable")

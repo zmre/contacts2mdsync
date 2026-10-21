@@ -145,7 +145,8 @@ struct SyncCommandTests {
         harness.store.editCard("bob:icloud") { $0.jobTitle = "Chef" }
         let run = harness.sync()
         #expect(run.code == 0)
-        #expect(run.out.contains("note     Mac B leads syncing for this vault until"))
+        #expect(run.out.contains("note     following Mac B: it leads syncing for this vault until"))
+        #expect(run.out.contains("follow   leader still to do: apple 0 changes  md 0 new, 1 updates"))
         #expect(!(harness.vault.text("Inbox/Bob Two.md") ?? "").contains("Chef"))
         let taken = harness.sync(["--take-over"])
         #expect(taken.code == 0 && (harness.vault.text("Inbox/Bob Two.md") ?? "").contains("Chef"))

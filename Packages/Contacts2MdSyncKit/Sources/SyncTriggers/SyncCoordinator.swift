@@ -11,6 +11,10 @@ public enum SyncCoordinatorStatus: Hashable, Sendable {
     case running(SyncRunKind, SyncPhase?)
     /// A run finished (written or not; see the summary).
     case finished(SyncRunSummary)
+    /// Another device leads this vault: the run was a read-only dry run
+    /// (`followerSummary`); review decisions made here are executed by the
+    /// leader. Also emitted when a heartbeat check finds another leader.
+    case following(device: LeaseHolder)
     /// A run could not happen or stopped before writing.
     case blocked(SyncBlockReason)
     /// A run failed unexpectedly.
@@ -42,6 +46,13 @@ public protocol SettingsAwareTriggerSource: SyncTriggerSource {
 /// - **Settings.** With `liveSync` off, live, rescan, launch and wake
 ///   triggers are ignored; Sync Now always runs; the sweep runs only when
 ///   `sweepInterval` is set and no full compare happened within it.
+/// - **Lease (M6).** With a `LeaseKeeper`, the coordinator heartbeats the
+///   vault lease every `heartbeatInterval` while it is alive (also during a
+///   long run), so another device sees this one lead even between runs. A
+///   run while another device leads is a read-only dry run reported as
+///   `following(device:)`. When the other leader's lease lapses (expired or
+///   released), a catch-up run takes it. `shutdown()` releases the lease;
+///   `takeOver()` takes it explicitly and syncs.
 public actor SyncCoordinator {
     /// Timing knobs.
     public struct Configuration: Hashable, Sendable {
@@ -66,7 +77,7 @@ public actor SyncCoordinator {
     }
 
     private let runner: any SyncRunner
-    private let clock: any TriggerClock
+    let clock: any TriggerClock
     public let configuration: Configuration
     public private(set) var settings: TriggerSettings
 
@@ -76,6 +87,13 @@ public actor SyncCoordinator {
     public private(set) var lastSummary: SyncRunSummary?
     /// Runs started so far.
     public private(set) var runCount = 0
+    /// The last dry run made while another device led.
+    public private(set) var lastFollowerSummary: SyncRunSummary?
+    /// Keeps this device's vault lease alive (`nil`: the runner's own lease handling only).
+    public let leaseKeeper: LeaseKeeper?
+    /// The lease as last seen by the keeper (`nil` without a keeper or before the first check).
+    public internal(set) var leaseStatus: LeaseStatus?
+    var heartbeatTask: Task<Void, Never>?
 
     private var pending: SyncRunRequest?
     /// First and latest debounced event of the pending request.
@@ -83,10 +101,10 @@ public actor SyncCoordinator {
     private var lastEventAt: Date?
     /// Earliest start of the pending request's non-debounced part.
     private var immediateAt: Date?
-    private var current: SyncRunKind?
+    var current: SyncRunKind?
     private var timer: Task<Void, Never>?
     private var generation = 0
-    private var stopped = false
+    var stopped = false
     private var sources: [any SyncTriggerSource] = []
     private var subscribers: [UUID: AsyncStream<SyncCoordinatorStatus>.Continuation] = [:]
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
@@ -94,12 +112,14 @@ public actor SyncCoordinator {
     /// Creates a coordinator around `runner`.
     public init(
         runner: any SyncRunner, settings: TriggerSettings = TriggerSettings(),
-        configuration: Configuration = Configuration(), clock: any TriggerClock = SystemTriggerClock()
+        configuration: Configuration = Configuration(), clock: any TriggerClock = SystemTriggerClock(),
+        leaseKeeper: LeaseKeeper? = nil
     ) {
         self.runner = runner
         self.settings = settings
         self.configuration = configuration
         self.clock = clock
+        self.leaseKeeper = leaseKeeper
     }
 
     // MARK: - Sources and settings
@@ -107,6 +127,7 @@ public actor SyncCoordinator {
     /// Starts `sources`; their triggers are submitted to this coordinator.
     public func start(_ sources: [any SyncTriggerSource]) {
         guard !stopped else { return }
+        startHeartbeats()
         self.sources += sources
         for source in sources {
             if let aware = source as? any SettingsAwareTriggerSource { aware.apply(settings) }
@@ -133,6 +154,8 @@ public actor SyncCoordinator {
     /// finishes; use `shutdown()` to wait for it.
     public func stop() {
         stopped = true
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
         for source in sources { source.stop() }
         sources = []
         timer?.cancel()
@@ -146,6 +169,9 @@ public actor SyncCoordinator {
     public func shutdown() async {
         stop()
         await waitUntilIdle()
+        if let leaseKeeper {
+            leaseStatus = await Task.detached { leaseKeeper.release() }.value
+        }
         for continuation in subscribers.values { continuation.finish() }
         subscribers = [:]
     }
@@ -243,27 +269,37 @@ public actor SyncCoordinator {
             guard let self else { return }
             Task { await self.progress(request.kind, phase) }
         }
+        if let leaseKeeper { leaseStatus = await Task.detached { leaseKeeper.status() }.value }
         current = nil
-        switch outcome {
-        case .finished(let summary):
-            lastSummary = summary
-            emit(.finished(summary))
-        case .blocked(.localRunInProgress) where request.attempt < configuration.maxLockRetries && !stopped:
-            emit(.blocked(.localRunInProgress))
-            var retry = request
-            retry.attempt += 1
-            enqueue(retry, notBefore: clock.now.addingTimeInterval(configuration.lockRetryDelay))
-            return
-        case .blocked(let reason):
-            emit(.blocked(reason))
-        case .failed(let message):
-            emit(.failed(message))
-        }
+        guard handle(outcome, of: request) else { return }
         if pending != nil, !stopped {
             schedule()
         } else {
             becomeIdle()
         }
+    }
+
+    /// Publishes a run's outcome; `false` when a retry was scheduled instead.
+    private func handle(_ outcome: SyncRunOutcome, of request: SyncRunRequest) -> Bool {
+        switch outcome {
+        case .finished(let summary):
+            lastSummary = summary
+            emit(.finished(summary))
+        case .following(let holder, let summary):
+            if let summary { lastFollowerSummary = summary }
+            emit(.following(device: holder))
+        case .blocked(.localRunInProgress) where request.attempt < configuration.maxLockRetries && !stopped:
+            emit(.blocked(.localRunInProgress))
+            var retry = request
+            retry.attempt += 1
+            enqueue(retry, notBefore: clock.now.addingTimeInterval(configuration.lockRetryDelay))
+            return false
+        case .blocked(let reason):
+            emit(.blocked(reason))
+        case .failed(let message):
+            emit(.failed(message))
+        }
+        return true
     }
 
     private func progress(_ kind: SyncRunKind, _ phase: SyncPhase) {
@@ -314,7 +350,7 @@ public actor SyncCoordinator {
     /// The pending request, if any (tests, diagnostics).
     public var pendingRequest: SyncRunRequest? { pending }
 
-    private func emit(_ status: SyncCoordinatorStatus) {
+    func emit(_ status: SyncCoordinatorStatus) {
         self.status = status
         for continuation in subscribers.values { continuation.yield(status) }
     }

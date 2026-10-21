@@ -200,6 +200,11 @@ public enum SyncBlockReason: Hashable, Sendable {
 /// The result of one runner call.
 public enum SyncRunOutcome: Hashable, Sendable {
     case finished(SyncRunSummary)
+    /// Another device leads: this device computed dry-run status only
+    /// (nothing written to the vault or Contacts; `nil` when it could not,
+    /// e.g. before its first sync). Counts in the summary are what the
+    /// leader still has to do, as seen from here.
+    case following(LeaseHolder, SyncRunSummary?)
     case blocked(SyncBlockReason)
     /// An unexpected error (the message).
     case failed(String)

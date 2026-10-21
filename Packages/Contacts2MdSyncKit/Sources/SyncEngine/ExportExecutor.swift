@@ -14,9 +14,24 @@ public struct ExportResult: Sendable {
     public var writtenCache: [String: FileCacheEntry] = [:]
     /// Files that could not be written (changed underneath us, I/O errors).
     public var failures: [(path: String, message: String)] = []
+    /// iCloud conflict versions resolved (architecture §11).
+    public var versionsResolved: [FileVersionResolution] = []
 
     /// Creates an empty result.
     public init() {}
+
+    /// Resolves the planned iCloud conflict versions (before any note write,
+    /// so a kept version is what later runs see).
+    mutating func resolveVersions(_ resolutions: [FileVersionResolution], fs: any VaultFS) {
+        for resolution in resolutions {
+            do {
+                try fs.resolveConflictVersions(resolution.path, keeping: resolution.keep)
+                versionsResolved.append(resolution)
+            } catch {
+                failures.append((resolution.path, "resolving iCloud versions: \(error)"))
+            }
+        }
+    }
 }
 
 /// Writes an `ExportPlan` to the vault and persists the record map.
@@ -53,6 +68,7 @@ public struct ExportExecutor: Sendable {
         if let noteBackups, !plan.updates.isEmpty {
             result.noteBackup = try noteBackups.backup(plan.updates.map(\.path), from: fs)
         }
+        result.resolveVersions(plan.versionResolutions, fs: fs)
 
         for image in plan.images {
             do {

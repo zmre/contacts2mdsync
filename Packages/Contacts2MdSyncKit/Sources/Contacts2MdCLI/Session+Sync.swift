@@ -16,9 +16,7 @@ extension Session {
                     report.note("another sync is running on this Mac; skipped (nothing to do)")
                     return .success
                 case .leaseHeldElsewhere(let lease):
-                    report.note(
-                        "\(lease.deviceName) leads syncing for this vault until \(report.timestamp(lease.expiresAt)); "
-                            + "skipped (--take-over to take the lease)")
+                    follow(lease, request: request, session: session)
                     return .success
                 case .ready(let acquired, _):
                     lock = acquired
@@ -55,6 +53,62 @@ extension Session {
             report.syncResult(result, of: plan)
             report.syncSummary(plan: plan, result: result, seconds: elapsed)
             return Self.exitCode(plan, failures: result.markdown.failures.count + result.appleFailures.count)
+        }
+    }
+
+    /// Another device leads: a read-only dry run so `review list` and the app
+    /// show current status here; nothing is written. Always exit 0.
+    private func follow(_ lease: VaultLease, request: SyncRequest, session: VaultSession) {
+        let holder = LeaseHolder(lease, now: environment.clock.now)
+        json?.setting("lease_role", LeaseRole.follower.rawValue)
+        let stale = holder.isStale ? " (stale: no heartbeat since \(report.timestamp(holder.lastHeartbeat)))" : ""
+        report.note(
+            "following \(holder.deviceName): it leads syncing for this vault until "
+                + "\(report.timestamp(holder.expiresAt))\(stale); this Mac only checks (dry run, nothing written). "
+                + "Decisions recorded here are carried out by \(holder.deviceName). "
+                + "`contacts2md lease take-over` (or --take-over) makes this Mac the leader")
+        guard hasSynced(session.root), let prepared = try? session.followerDryRun(request, startedAt: startedAt)
+        else { return }
+        let plan = prepared.plan
+        report.info(
+            "follow   leader still to do: apple \(plan.apple.count) changes  md \(plan.markdown.creates.count) new, "
+                + "\(plan.markdown.updates.count) updates  "
+                + "review \(plan.markdown.reviews.filter(\.needsDecision).count)")
+    }
+
+    // MARK: - lease
+
+    /// `lease status | take-over | release`.
+    func lease(_ action: LeaseAction) -> CLIExitCode {
+        run { root in
+            let session = VaultSession(root: root.url, environment: environment)
+            guard try VaultConfig.load(from: environment.makeVault(root.url)) != nil else {
+                throw VaultNotReady(description: "not configured: run the first export or sync once")
+            }
+            switch action {
+            case .status:
+                break
+            case .takeOver:
+                let status = try session.takeOverLease()
+                guard status.role == .leader else {
+                    report.error(
+                        "take-over lost: \(status.holder?.deviceName ?? "another device") wrote the lease at the "
+                            + "same time and kept it")
+                    return .error
+                }
+                report.item("took", "lease", "this Mac now leads syncing for this vault")
+            case .release:
+                if try session.releaseLease() {
+                    report.item("released", "lease", "another device may lead now")
+                } else {
+                    report.note("this Mac does not hold the lease; nothing to release")
+                }
+            }
+            var stored = StoredStatus(lastExport: nil, records: 0, pendingReview: 0, pendingAsOf: nil)
+            stored.apply(try session.leaseStatus())
+            stored.devices = DeviceRecord.all(fs: environment.makeVault(root.url))
+            reportLease(stored)
+            return .success
         }
     }
 

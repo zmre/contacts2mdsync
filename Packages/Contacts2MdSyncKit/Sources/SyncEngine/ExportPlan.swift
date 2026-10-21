@@ -137,6 +137,10 @@ public enum ReviewItem: Codable, Hashable, Sendable {
     /// A contact note without `c2mdsync.id` that matches no contact. Never
     /// acted on unless the user opts it in (`add`); informational only.
     case markdownOnly(path: String, title: String)
+    /// iCloud kept other versions of a note (or of `.c2mdsync/config.yaml`)
+    /// that differ from the current contents (`NSFileVersion`, M6). The
+    /// note's record is paused until the user keeps one.
+    case fileVersionConflict(FileVersionConflict)
 
     /// Stable id: `<kind>-<10 hex>`.
     public var id: String {
@@ -156,6 +160,7 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             case .appleDeleted(let id, _, _): ("deleted", id.uuidString.lowercased())
             case .markdownDeleted(_, let id, _, _): ("missing", id.uuidString.lowercased())
             case .markdownOnly(let path, _): ("mdonly", path)
+            case .fileVersionConflict(let conflict): ("version", conflict.path)
             }
         return prefix + "-" + String(hexSHA256(Data(basis.utf8)).prefix(10))
     }
@@ -172,6 +177,8 @@ public enum ReviewItem: Codable, Hashable, Sendable {
         case .appleDeleted: ["trash", "keep", "restore"]
         case .markdownDeleted: ["restore", "unlink", "delete-contact"]
         case .markdownOnly: ["add", "ignore"]
+        case .fileVersionConflict(let conflict):
+            ["keep-current"] + conflict.versions.indices.map { "keep-other:\($0 + 1)" }
         }
     }
 
@@ -226,6 +233,13 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             return make(.duplicateIDKeep, path: paths[number ?? 0], syncID: id)
         case .mergeRecords(let contact, _, let paths):
             return make(.mergeKeep, contacts: [contact], path: paths[number ?? 0])
+        case .fileVersionConflict(let conflict):
+            return [
+                Decision(
+                    kind: .fileVersionKeep, createdAt: date, device: device, path: conflict.path,
+                    syncID: conflict.recordID, itemID: id, choice: choice, appleHash: conflict.versionsKey,
+                    markdownHash: conflict.currentSHA256, version: number.map { conflict.versions[$0].sha256 })
+            ]
         default:
             // Undecidable items have no choices and were rejected above.
             return syncDecisions(for: choice, device: device, at: date)
@@ -270,6 +284,7 @@ public enum ReviewItem: Codable, Hashable, Sendable {
         case .duplicateSyncID(let id, let paths):
             return
                 "\(paths.count) notes share c2mdsync id \(id.uuidString.lowercased()): \(paths.joined(separator: ", "))"
+                + conflictedCopyHint
         case .mergeRecords(let contact, let ids, let paths):
             let notes = paths.isEmpty ? "" : ": \(paths.joined(separator: ", "))"
             return "\"\(contact.title)\" carries \(ids.count) sync stamps (cards linked after export)\(notes)"
@@ -287,6 +302,8 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             return "\"\(title)\": note \(lastPath ?? "") was deleted; the contact is kept"
         case .markdownOnly(let path, let title):
             return "\(path) (\"\(title)\") is not in Contacts"
+        case .fileVersionConflict(let conflict):
+            return conflict.summary
         }
     }
 }
@@ -331,6 +348,8 @@ public struct ExportPlan: Sendable {
     public var unchanged: Int = 0
     public var images: [ImageWrite] = []
     public var reviews: [ReviewItem] = []
+    /// iCloud conflict versions to resolve (identical ones, or decided).
+    public var versionResolutions: [FileVersionResolution] = []
     public var skipped: [SkippedContact] = []
     /// Non-blocking observations (duplicate titles, …).
     public var warnings: [String] = []
@@ -365,7 +384,9 @@ public struct ExportPlan: Sendable {
     public init(config: VaultConfig) { self.config = config }
 
     /// `true` when nothing would be written.
-    public var isEmpty: Bool { creates.isEmpty && updates.isEmpty && images.isEmpty && configText == nil }
+    public var isEmpty: Bool {
+        creates.isEmpty && updates.isEmpty && images.isEmpty && configText == nil && versionResolutions.isEmpty
+    }
 
     /// Adoptions among `updates`.
     public var adoptions: [FileChange] { updates.filter { $0.kind == .adopt } }

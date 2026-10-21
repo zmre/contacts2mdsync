@@ -25,11 +25,47 @@ public protocol VaultFS: Sendable {
     /// Asks iCloud Drive to download a dataless file in the background.
     /// Never blocks; a no-op for file systems without placeholders.
     func requestDownload(_ path: String)
+    /// iCloud conflict versions of `path` that nobody resolved yet
+    /// (`NSFileVersion.unresolvedConflictVersionsOfItem`, architecture §11).
+    /// Empty when there are none or the file system has no versions.
+    func unresolvedConflictVersions(_ path: String) throws -> [FileConflictVersion]
+    /// Resolves every unresolved conflict version of `path`: with `keeping`
+    /// `nil` the current contents stay; otherwise that version's bytes
+    /// become the current contents first. The other versions are marked
+    /// resolved and removed. Throws `notFound` when `keeping` is no longer
+    /// among the versions.
+    func resolveConflictVersions(_ path: String, keeping: FileConflictVersion?) throws
 }
 
 extension VaultFS {
     /// Default: nothing to download.
     public func requestDownload(_ path: String) {}
+
+    /// Default: no versions.
+    public func unresolvedConflictVersions(_ path: String) throws -> [FileConflictVersion] { [] }
+
+    /// Default: nothing to resolve.
+    public func resolveConflictVersions(_ path: String, keeping: FileConflictVersion?) throws {}
+}
+
+/// An unresolved iCloud conflict version of a file: another device's copy
+/// that iCloud did not pick as the current contents (`NSFileVersion`).
+public struct FileConflictVersion: Hashable, Sendable {
+    /// SHA-256 of the bytes, lowercase hex: the version's identity on every
+    /// device (the decision log refers to versions by it).
+    public var sha256: String
+    public var data: Data
+    public var modificationDate: Date?
+    /// The computer that saved it (`localizedNameOfSavingComputer`), if known.
+    public var deviceName: String?
+
+    /// Creates a version.
+    public init(data: Data, modificationDate: Date? = nil, deviceName: String? = nil) {
+        self.sha256 = FileStamp.hash(data)
+        self.data = data
+        self.modificationDate = modificationDate
+        self.deviceName = deviceName
+    }
 }
 
 /// One enumerated file.
@@ -40,13 +76,20 @@ public struct FileEntry: Hashable, Sendable {
     public var size: Int
     /// iCloud placeholder whose bytes are not downloaded (never treated as deleted).
     public var isDataless: Bool
+    /// iCloud reports unresolved conflict versions
+    /// (`ubiquitousItemHasUnresolvedConflicts`); read them with
+    /// `VaultFS.unresolvedConflictVersions`.
+    public var hasUnresolvedConflicts: Bool
 
     /// Creates an entry.
-    public init(path: String, modificationDate: Date, size: Int, isDataless: Bool = false) {
+    public init(
+        path: String, modificationDate: Date, size: Int, isDataless: Bool = false, hasUnresolvedConflicts: Bool = false
+    ) {
         self.path = path
         self.modificationDate = modificationDate
         self.size = size
         self.isDataless = isDataless
+        self.hasUnresolvedConflicts = hasUnresolvedConflicts
     }
 }
 

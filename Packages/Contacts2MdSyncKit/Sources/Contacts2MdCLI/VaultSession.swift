@@ -83,6 +83,14 @@ public struct StoredStatus: Hashable, Sendable {
     public var markdownOnly = 0
     /// The current vault lease, if any.
     public var lease: VaultLease?
+    /// This device's role: leader, follower or vacant (M6).
+    public var leaseRole: LeaseRole = .vacant
+    /// The other device leading, with its last heartbeat and staleness (follower only).
+    public var leaseHolder: LeaseHolder?
+    /// Notes (or vault files) with iCloud conflict versions awaiting a choice.
+    public var fileVersionConflicts = 0
+    /// Every device that synced this vault (`.c2mdsync/devices/<id>.json`).
+    public var devices: [DeviceRecord] = []
 }
 
 /// One planning/export run against a notes root, shared by the CLI and the
@@ -165,12 +173,14 @@ public struct VaultSession: Sendable {
             case .conflict: status.conflicts += 1
             case .appleDeleted, .markdownDeleted, .missingFile: status.pendingDeletes += 1
             case .markdownOnly: status.markdownOnly += 1
+            case .fileVersionConflict: status.fileVersionConflicts += 1
             default: break
             }
         }
         if let device = try? environment.device() {
-            status.lease = LeaseManager(fs: fs, device: device, clock: environment.clock).read()
+            status.apply(LeaseManager(fs: fs, device: device, clock: environment.clock).status())
         }
+        status.devices = DeviceRecord.all(fs: fs).sorted { $0.lastSync > $1.lastSync }
         return status
     }
 

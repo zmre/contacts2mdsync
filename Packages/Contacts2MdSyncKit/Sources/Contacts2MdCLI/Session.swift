@@ -118,11 +118,7 @@ struct Session {
                     report.info(
                         "sync     apple_writes=\(stored.appleWritesEnabled ? "enabled" : "disabled")"
                             + "  stamp_contacts=\(stored.stampContacts)  devices=\(stored.deviceCount)")
-                    if let lease = stored.lease {
-                        report.info(
-                            "lease    \(lease.deviceName) until \(report.timestamp(lease.expiresAt))"
-                                + (lease.expiresAt < environment.clock.now ? " (expired)" : ""))
-                    }
+                    reportLease(stored)
                     if let warning = stored.identityWarning { report.warning("identity", warning) }
                 }
                 let pending = try opened.loadPending()
@@ -145,6 +141,25 @@ struct Session {
             report.info("summary  \(String(format: "%.1fs", elapsed))")
             guard hasAccess, loaded != nil else { return .notRunnable }
             return needsReview || pendingCount > 0 ? .needsReview : .success
+        }
+    }
+
+    /// `lease    <holder> until <time>  role=…  heartbeat=…` and one line per other device.
+    func reportLease(_ stored: StoredStatus) {
+        json?.setting("lease_role", stored.leaseRole.rawValue)
+        if let lease = stored.lease {
+            let now = environment.clock.now
+            let state = lease.releasedAt != nil ? " (released)" : lease.expiresAt < now ? " (expired)" : ""
+            let stale = lease.isStale(at: now) ? "  STALE (no heartbeat for over 10 min)" : ""
+            report.info(
+                "lease    \(lease.deviceName) until \(report.timestamp(lease.expiresAt))\(state)"
+                    + "  role=\(stored.leaseRole.rawValue)  heartbeat=\(report.timestamp(lease.heartbeatAt))\(stale)")
+        } else {
+            report.info("lease    none  role=\(stored.leaseRole.rawValue)")
+        }
+        let thisDevice = try? environment.device().id
+        for device in stored.devices where device.deviceID != thisDevice {
+            report.info("device   \(device.deviceName)  last sync \(report.timestamp(device.lastSync))")
         }
     }
 

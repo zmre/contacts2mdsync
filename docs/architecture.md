@@ -32,14 +32,15 @@ Packages/Contacts2MdSyncKit/
   VaultIndex/       VaultFS seam + LocalVaultFS, incremental scan (file cache), id/title/alias/stem indexes
   SyncEngine/       ExportPlanner/Executor, Matching, Clustering, RecordMap, SyncStateStore, DecisionLog (M1–M2);
                     SyncPlanner, RecordMerger, Diff3, AppleWritePlanner, SyncExecutor, LeaseManager,
-                    LocalLock, SyncScope (M3)
+                    LocalLock, SyncScope (M3); LeaseKeeper, decision-log merging, iCloud file versions (M6)
   SyncStateDB/      SyncStateStore on SQLite (GRDB), M1 records.json import
   SyncTriggers/     live sync (M5): SyncCoordinator actor, trigger sources (Contacts notification,
                     FSEvents, wake, sweep, launch), OwnWriteRegistry, per-device TriggerSettings (no SwiftUI)
   Contacts2MdCLI/   CLI library + VaultSession (shared with the app): status / plan / export / review (M1–M2),
                     sync / config (M3), watch + VaultSyncRunner (M5), see §15
   contacts2md/      dev executable wrapping Contacts2MdCLI (the app binary runs the same CLI)
-  SyncTestSupport/  FakeContactStore, InMemoryVault, fixtures (~60 contacts), golden-file helper
+  SyncTestSupport/  FakeContactStore, InMemoryVault, fixtures (~60 contacts), golden-file helper,
+                    SimulatedICloud + SimulatedContactsCloud (multi-device replicas with delay, M6)
 ```
 
 The engine depends only on ContactModel, MarkdownCodec and VaultIndex; it never imports Contacts.framework. Only Contacts2MdCLI (and the app) link ContactsAdapter.
@@ -80,7 +81,9 @@ protocol VaultFS: Sendable {                           // VaultIndex; rooted at 
   func exists(_ path: String) -> Bool
   func list(_ directory: String) throws -> [String]    // direct children incl. hidden (decision logs)
   func requestDownload(_ path: String)                 // iCloud: start downloading a dataless file
-  // unresolvedConflictVersions(_:) lands with NSFileVersion handling (M6)
+  func unresolvedConflictVersions(_ path: String) throws -> [FileConflictVersion]   // NSFileVersion (M6)
+  func resolveConflictVersions(_ path: String, keeping: FileConflictVersion?) throws
+                                                       // nil keeps the current contents (M6)
 }
 
 protocol RecordMapStore { … }     // load/save the record map (the executor's seam)
@@ -164,7 +167,7 @@ Device-state tables (M2 schema `v1`, `SyncStateDB`): `records` (id, unified id *
 
 The vault holds `.c2mdsync/lease.json` (§11) and `.c2mdsync/devices/<id>.json` (`device_id`, `device_name`, `last_sync`, `summary`), written after every sync. The device records let a device see that others use the vault.
 
-The vault-side decision log is `.c2mdsync/devices/<device-id>/decisions.jsonl`, one JSON object per line: `{"id", "kind", "at", "device_id", "device_name", "contacts": [{"card_ids", "title"}], "path", "sync_id", "item"}`. Kinds: `distinct-people` (contacts pairwise distinct; with `path`: the contact is not the person in that note), `sync-only` (keep `contacts[0]`, exclude the rest), `ignore-candidate` (`path` or `sync_id`), `adopt` (`path` → `contacts[0]`), `dup-id-keep` (`path` keeps `sync_id`). M3 adds `resolve-conflict` (`item` = conflict id, `choice`, `apple_hash`, `markdown_hash`), `apple-delete` (`sync_id`, `choice` trash/keep/restore), `markdown-delete` (`sync_id`, `contacts`, `choice` restore/unlink/delete-contact) and `create-contact` (`path`). M5 adds `merge-keep` (`contacts[0]` carries several stamps; the note at `path` keeps its record, the other notes are detached and their stamps removed; review choice `keep:N` on a `merge-…` item). Contacts are referenced by underlying card ids, never the unified id. Every device reads the union; unknown kinds are ignored, unreadable lines reported as warnings.
+The vault-side decision log is `.c2mdsync/devices/<device-id>/decisions.jsonl`, one JSON object per line: `{"id", "kind", "at", "device_id", "device_name", "contacts": [{"card_ids", "title"}], "path", "sync_id", "item"}`. Kinds: `distinct-people` (contacts pairwise distinct; with `path`: the contact is not the person in that note), `sync-only` (keep `contacts[0]`, exclude the rest), `ignore-candidate` (`path` or `sync_id`), `adopt` (`path` → `contacts[0]`), `dup-id-keep` (`path` keeps `sync_id`). M3 adds `resolve-conflict` (`item` = conflict id, `choice`, `apple_hash`, `markdown_hash`), `apple-delete` (`sync_id`, `choice` trash/keep/restore), `markdown-delete` (`sync_id`, `contacts`, `choice` restore/unlink/delete-contact) and `create-contact` (`path`). M5 adds `merge-keep` (`contacts[0]` carries several stamps; the note at `path` keeps its record, the other notes are detached and their stamps removed; review choice `keep:N` on a `merge-…` item). Contacts are referenced by underlying card ids, never the unified id. Every device reads the union; unknown kinds are ignored, unreadable lines reported as warnings. M6 adds `file-version-keep` (`path`, `choice` `keep-current` or `keep-other:N`, `version` = sha256 of the kept version, bound to `markdown_hash` = the current contents and `apple_hash` = the version set) and the multi-device reading rules in §11.
 
 ## 5. Sync cycle
 
@@ -462,7 +465,9 @@ The app wires these after the folder is chosen and the first sync is done:
 5. Observe `for await status in await coordinator.statusUpdates()` on the main actor for the menu bar and Overview; `lastSummary` holds the last run; refresh review data on `.finished`.
 6. Sync Now → `await coordinator.syncNow()` (full, never debounced). Settings toggles → `settingsStore.save(s)` then `await coordinator.update(s)`.
 7. Any other vault write the app makes outside the coordinator (export, review decisions) may record its files in `ownWrites`, or simply cause one no-op run.
-8. On folder change or quit: `await coordinator.shutdown()` (stops the sources, waits for a run in progress), then close the scope.
+8. On folder change or quit: `await coordinator.shutdown()` (stops the sources, waits for a run in progress, releases the vault lease), then close the scope.
+
+From M6 the coordinator also owns the vault lease: create it with `SyncCoordinator(runner: runner, settings: …, leaseKeeper: try runner.makeLeaseKeeper())`. It heartbeats every 5 minutes while it runs, reports `following(device:)` when another device leads, and offers `takeOver()`, `releaseLease()` and `leaseStatus` (§11 "As implemented (M6)").
 
 ## 11. Multi-device
 
@@ -471,6 +476,44 @@ The app wires these after the folder is chosen and the first sync is done:
 - **Followers** are read-only: they show status and dry-run diffs; user actions go to their own `decisions.jsonl`.
 - **iCloud conflict versions** (`NSFileVersion`): canonically equal → auto-resolve keeping current; else raise a record conflict.
 - **Handover** is safe because each device keeps its own base.
+
+### As implemented (M6)
+
+**Lease** (`SyncEngine.LeaseManager`, `LeaseKeeper`):
+
+- `lease.json` gains `released_at` (markdown-schema §8). A lease is *free* when it is released or past `expires_at`. TTL 20 min, heartbeat 5 min. A holder whose heartbeat is older than 10 min (two missed heartbeats, or iCloud delivering them late) is *stale*: still the leader, but the UI and `status` offer Take Over.
+- `LeaseManager.status()` gives this device's `LeaseRole` (`leader`, `follower`, `vacant`) and, for a follower, a `LeaseHolder` (device name, acquired, last heartbeat, expiry, stale).
+- Acquire is write, settle (60 s), re-read: the re-read must show this device *and* the same `acquired_at`. Heartbeat and release are compare-and-swap on the bytes just read, so a take-over that landed in between is never overwritten. `heartbeat()` reports `renewed` or `notHeld`. `release()` writes `released_at`. `takeOver()` is acquire with `takeOver: true`.
+- Every lease write goes through `VaultFS.write` (`NSFileCoordinator`, temp file + replace). When two devices write at once, iCloud keeps one write as `lease.json` and the other as a conflict version. Each lease read first resolves those versions by keeping the current contents, so after the settle wait both devices read the same winner. The simulation tests check that the loser follows.
+- `LeaseKeeper` wraps a manager for one device and vault. `SyncCoordinator(…, leaseKeeper:)` calls `heartbeat()` every `heartbeatInterval` while it is alive. The loop is independent of runs, so a long first sync keeps the lease fresh. `shutdown()` releases the lease. `takeOver()` takes it and starts a Sync Now. When a heartbeat finds that the leader it was following has let the lease go (released or expired), the coordinator submits a `launch` catch-up run ("Mac B stopped leading; taking over"), which takes the lease.
+- `executeSync` still refreshes the heartbeat at the end of every run, so the CLI and launchd keep the lease without a coordinator.
+
+**Follower mode**:
+
+- When another device holds the lease, `VaultSyncRunner` returns `SyncRunOutcome.following(holder, summary)` instead of `blocked`. It runs `VaultSession.followerDryRun`: scan, read Contacts, plan, and record the observations in this device's state (review queue, file cache, Contacts mirror, an Activity row with command `follow`). Nothing is written to the vault or to Contacts. The summary counts what the leader still has to do, as seen from here. The coordinator publishes `following(device: LeaseHolder)` and keeps the summary as `lastFollowerSummary`. It does not retry; the next trigger checks again.
+- Review decisions made on a follower go to that device's own `decisions.jsonl` (one writer per file). The leader reads the union on its next run and executes them. Conflict resolutions are bound to side hashes computed from the values, so a decision made on the follower applies on the leader when both see the same data.
+- `contacts2md sync` on a follower prints a `note following …` line, runs the same dry run (so `review list` works there), prints `follow   leader still to do: …` and exits 0.
+- A follower's merge base is never refreshed, because it does not execute. When it takes over, both sides look changed *to the same value* and the run converges with no writes (§4). A test leads three rounds of edits on one device, hands over, and checks that the new leader writes nothing.
+
+**Decision log across devices** (`DecisionLog.read`):
+
+- *Union*: every device's log plus the lines of its unresolved iCloud conflict versions. An append-only log loses nothing when versions are merged. Decisions with the same id are read once.
+- *Order*: time, then device id, then the order the lines were appended. Every device sees the same order, so "latest wins" means the same thing everywhere.
+- *Partial lines*: an unterminated last line that does not parse is a line iCloud is still delivering. It is skipped without a warning (`partialLines`) and read once it is complete. Unreadable *complete* lines are still reported. Appending to this device's log drops such a fragment instead of burying it, and merges the log's conflict versions first (`mergeConflictVersions`, also run after every executed sync). Only the owning device rewrites its log.
+- *Conflicts*: `DecisionSet` keeps only the latest decision per review item (`itemID`), so an item re-decided on one device, or decided differently on two, never applies both answers. When the competing decisions come from different devices within an hour of each other (they could not have seen each other), `read` reports a `DecisionConflict`: `item … decided differently on Mac A (trash) and Mac B (keep); the latest (Mac B: keep) wins`. `readAll` adds it to the warnings, so the CLI prints `WARNING decision`.
+
+**iCloud conflict versions** (`NSFileVersion`):
+
+- `VaultFS.unresolvedConflictVersions(_:)` and `resolveConflictVersions(_:keeping:)`. `LocalVaultFS` uses `NSFileVersion.unresolvedConflictVersionsOfItem`, `replaceItem(at:)`, `isResolved` and `removeOtherVersionsOfItem` inside a coordinated write. Enumeration reads `ubiquitousItemHasUnresolvedConflicts`, so versions are only fetched for flagged files (`FileEntry.hasUnresolvedConflicts`, `VaultEntry.conflictVersions`). Versions are identified by the sha256 of their bytes, which is the same on every device.
+- Notes: a version that is canonically equal to the current note (the same normalized contact, so quoting, key order and formatting do not count; for other notes the same text up to line endings and trailing whitespace) is resolved by keeping the current contents, without asking. Otherwise the plan raises `ReviewItem.fileVersionConflict(FileVersionConflict)` (`version-…`, choices `keep-current` / `keep-other:N`, with each version's device name and changed keys) and pauses the note's record, like a copied note. `keep-other:N` makes that version the current contents and pauses the record for that run. The next run syncs the result as an ordinary markdown edit. A decision applies only while the current contents and the version set are still the ones it was made against. A later edit or another version asks again.
+- `.c2mdsync/config.yaml`: equal settings resolve silently. Different settings raise the same review item (no record paused). `lease.json` and `devices/<id>.json` keep the current contents. Decision logs are merged as above.
+- Resolutions are planned (`ExportPlan.versionResolutions`) and executed only by the leader (`SyncExecutor` and `ExportExecutor`, before any note write). Followers never write the vault.
+- *Conflicted copies*: iCloud sometimes keeps the losing side as a sibling file (`Jane Doe 2.md`). It carries the same `c2mdsync.id`, so it is a copied note (§6 "Vault-side duplicates"): the record pauses and nothing is duplicated. `ReviewItem.conflictedCopyPaths` names such copies, and the summary says `(iCloud conflicted copy: …)`. `keep:N` keeps one. The other is ignored and stays on disk, so no edit is lost.
+- `LocalVaultFS` cannot be tested against real iCloud conflicts here: there is no public API to create a conflict version. Its code path is exercised only for "no versions". The engine logic runs against `InMemoryVault` versions and the `SimulatedICloud` replicas.
+
+**Identity when a device joins**: covered by tests in both stamp modes. With `stamp_contacts` on, the joining device's first import binds every contact by its stamp (even one renamed in Contacts since) and creates nothing. With stamps off, it re-finds notes as orphans by strong keys at ≥ 0.9 and creates nothing; two same-name contacts without strong keys are blocked by the orphan title gate and go to review, never duplicated. The existing `WARNING identity` line still asks for stamps.
+
+**Not done**: the "conflicted copy" files iCloud creates are only recognised by name (`<stem> <n>.md` next to `<stem>.md`) and only when they share the `c2mdsync.id`. A conflicted copy of a markdown-only note is just another markdown-only note.
 
 ## 12. Scope
 
@@ -495,7 +538,7 @@ See `scope:` in [markdown-schema.md §8](markdown-schema.md#config-yaml-sketch).
 - Fixtures validated by the real `mbr` binary (flake check) — zero contact "problems".
 - Scenario DSL (`SyncTestSupport.SyncHarness`, `World` in the tests): one test per row of the merge table; echo convergence; unapplyable; delete queues; breakers. The scenario suites run with `stamp_contacts` off and on.
 - Property tests: random edits on both sides → sync twice → fixpoint, no duplicates, no data loss beyond explicit deletes.
-- Multi-device simulation: two state stores, shared `InMemoryVault` with propagation delay, one Apple store with delay.
+- Multi-device simulation: two state stores, shared `InMemoryVault` with propagation delay, one Apple store with delay. As implemented (M6): `SimulatedICloud` gives each device its own vault replica. A change reaches the others after a delay. Two devices changing one file before seeing each other's change is a conflict, kept as an unresolved version or as a `Name 2.md` copy. `SimulatedContactsCloud` does the same for Contacts, one replica per device. Tests cover alternating leaders with edits on the follower (convergence, one note per contact, no duplicate contacts, no conflicts at all), lease contention, a user edit racing the leader's write, and follower decisions.
 
 ## 15. Headless CLI (cron / launchd)
 
@@ -520,6 +563,7 @@ macOS ties both Contacts permission (TCC) and the sandboxed security-scoped fold
 | `contacts2md sync`            | Run one sync cycle unattended                                                |
 | `contacts2md export` (M1)     | One-way Apple → markdown; dev/testing                                        |
 | `contacts2md config` (M3)     | Show or set `apple_writes` and `stamp_contacts`                              |
+| `contacts2md lease` (M6)      | Show, take over or release the vault lease                                   |
 
 Flags: `--quiet` (warnings and errors only), `--json` (one JSON document on stdout for scripting), `--verbose`.
 
@@ -594,6 +638,20 @@ contacts2md watch [--root <dir>] [--debounce 3] [--sweep 2|off] [--no-catch-up] 
 - `watch` (development and testing; also useful headless) runs the `SyncCoordinator` with every source (`LaunchCatchUp` unless `--no-catch-up`, Contacts notification, FSEvents on the root, wake, a clock sweep timer) until Ctrl-C or SIGTERM, keeping the main run loop running. Lines: `watch    live  debounce=…  sweep=…  catch-up=…`, `running  <kind>`, `synced   <kind>  <time>  apple c/u/d …  md c/u/d …  review N  (<apple read>)  <seconds>`, `WARNING  held …`, `WARNING  pending …`, `note     blocked: …`, `ERROR    …` (breaker, failures), and `--verbose` adds `scheduled`, phases, `skipped` and `idle`. It needs a vault synced on this Mac before (exit 3), uses the headless decision policy, and exits 0.
 - Sessions carry per-side counts (`SessionRecord.sides`: Apple and markdown created/updated/deleted, held count and reason, `apple_read`); older rows decode with `sides == nil`.
 
+**M6 as implemented** (app binary also dispatches on `lease`):
+
+```
+contacts2md lease [status|take-over|release] [--root <dir>]
+contacts2md status    # adds role and heartbeat to the lease line, one line per other device
+contacts2md sync      # as a follower: dry run, info lines, exit 0
+```
+
+- `status`: `lease    <holder> until <time>[ (expired)| (released)]  role=leader|follower|vacant  heartbeat=<time>[  STALE (no heartbeat for over 10 min)]`, or `lease    none  role=vacant`; then `device   <name>  last sync <time>` for every other device. `--json` adds the setting `lease_role`.
+- `lease take-over` takes the lease (write, settle about 60 s when other devices use the vault, re-read). It prints `took     lease …`, or exits 5 when another device wrote at the same moment and kept it. `lease release` prints `released lease …`, or a note when this Mac did not hold it. Both end with the `lease` line.
+- `sync` while another device leads: `note     following <name>: it leads syncing for this vault until <time>[ (stale: …)]; this Mac only checks (dry run, nothing written). Decisions recorded here are carried out by <name>. …`, then (once synced on this Mac) `follow   leader still to do: apple N changes  md N new, N updates  review N`. Exit 0. `--take-over` still takes the lease first.
+- New lines: `resolve md <path>  (identical iCloud versions; current kept | current kept (decision) | iCloud version kept (decision))` in plans, `resolved md …` after a run, and `WARNING version <summary> — record paused; keep one in the app or `review decide` [version-…]`. Copied-note warnings name iCloud conflicted copies.
+- Review choices: iCloud versions `keep-current | keep-other:N`.
+
 ### What runs vs. what is skipped
 
 | Situation                                                  | Headless behavior                                                                  |
@@ -607,7 +665,7 @@ contacts2md watch [--root <dir>] [--debounce 3] [--sweep 2|off] [--no-catch-up] 
 | Copied file (duplicate sync id), invalid YAML              | Skipped, warning                                                                   |
 | Mass-vanish breaker                                        | Whole run aborts before writing, error, exit 4                                     |
 | Blast radius (> 25 Apple changes)                          | Apple writes skipped, markdown writes still run, warning, exit 2. Override with `--max-apple-changes N`. |
-| Another device holds the lease                             | No-op, info line, exit 0 (not an error; cron will try again)                       |
+| Another device holds the lease                             | Dry run only (M6: status and review queue refreshed here, nothing written), info line, exit 0 |
 | GUI instance on this Mac is syncing                        | Wait up to 60 s for the local lock, then no-op as above                            |
 | Not configured / first sync not done                       | Error, exit 3                                                                      |
 

@@ -23,7 +23,7 @@ public struct LocalVaultFS: VaultFS {
     public func enumerate() throws -> [FileEntry] {
         let keys: [URLResourceKey] = [
             .isRegularFileKey, .isDirectoryKey, .contentModificationDateKey, .fileSizeKey,
-            .ubiquitousItemDownloadingStatusKey,
+            .ubiquitousItemDownloadingStatusKey, .ubiquitousItemHasUnresolvedConflictsKey,
         ]
         // Hidden entries are filtered by hand: legacy iCloud placeholders are
         // hidden files (`.Jane Doe.md.icloud`) that stand for `Jane Doe.md`.
@@ -61,7 +61,8 @@ public struct LocalVaultFS: VaultFS {
                     path: String(full.dropFirst(prefix.count)),
                     modificationDate: values.contentModificationDate ?? .distantPast,
                     size: values.fileSize ?? 0,
-                    isDataless: notDownloaded || Self.isDataless(full)
+                    isDataless: notDownloaded || Self.isDataless(full),
+                    hasUnresolvedConflicts: values.ubiquitousItemHasUnresolvedConflicts ?? false
                 ))
         }
         return entries
@@ -90,6 +91,45 @@ public struct LocalVaultFS: VaultFS {
     public func requestDownload(_ path: String) {
         guard let fileURL = try? url(path) else { return }
         try? FileManager.default.startDownloadingUbiquitousItem(at: fileURL)
+    }
+
+    public func unresolvedConflictVersions(_ path: String) throws -> [FileConflictVersion] {
+        let fileURL = try url(path)
+        guard FileManager.default.fileExists(atPath: fileURL.path(percentEncoded: false)) else { return [] }
+        var result: Result<[FileConflictVersion], any Error> = .success([])
+        try coordinate(reading: fileURL) { coordinated in
+            result = Result {
+                try (NSFileVersion.unresolvedConflictVersionsOfItem(at: coordinated) ?? []).map { version in
+                    FileConflictVersion(
+                        data: try Data(contentsOf: version.url), modificationDate: version.modificationDate,
+                        deviceName: version.localizedNameOfSavingComputer)
+                }
+            }
+        }
+        return try result.get()
+    }
+
+    public func resolveConflictVersions(_ path: String, keeping chosen: FileConflictVersion?) throws {
+        let fileURL = try url(path)
+        guard FileManager.default.fileExists(atPath: fileURL.path(percentEncoded: false)) else {
+            throw VaultFSError.notFound(path: path)
+        }
+        var result: Result<Void, any Error> = .success(())
+        try coordinate(writing: fileURL) { coordinated in
+            result = Result {
+                let versions = NSFileVersion.unresolvedConflictVersionsOfItem(at: coordinated) ?? []
+                if let chosen {
+                    let match = versions.first { version in
+                        (try? Data(contentsOf: version.url)).map(FileStamp.hash) == chosen.sha256
+                    }
+                    guard let match else { throw VaultFSError.notFound(path: path) }
+                    _ = try match.replaceItem(at: coordinated, options: [])
+                }
+                for version in versions { version.isResolved = true }
+                try NSFileVersion.removeOtherVersionsOfItem(at: coordinated)
+            }
+        }
+        try result.get()
     }
 
     public func read(_ path: String) throws -> (Data, FileStamp) {

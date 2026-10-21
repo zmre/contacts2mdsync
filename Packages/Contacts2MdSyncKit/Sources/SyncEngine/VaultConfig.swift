@@ -95,6 +95,11 @@ public struct VaultConfig: Hashable, Sendable {
         guard fs.exists(path) else { return nil }
         let (data, _) = try fs.read(path)
         guard let text = String(data: data, encoding: .utf8) else { throw ConfigError.invalid("not UTF-8") }
+        return (try parsed(text), text)
+    }
+
+    /// Parses config text (`load` without the file system).
+    public static func parsed(_ text: String) throws -> VaultConfig {
         guard case .mapping(let fields) = try MarkdownCodec.parseYAML(text) else {
             throw ConfigError.invalid("not a mapping")
         }
@@ -128,7 +133,7 @@ public struct VaultConfig: Hashable, Sendable {
                 entry.value.scalarText.map { GroupTag(group: entry.key, tag: $0) }
             }
         }
-        return (config, text)
+        return config
     }
 
     /// The file text. With `previous` (the current file), only the managed

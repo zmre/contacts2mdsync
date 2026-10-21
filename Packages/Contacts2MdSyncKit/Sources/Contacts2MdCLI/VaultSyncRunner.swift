@@ -64,7 +64,7 @@ public struct VaultSyncRunner: SyncRunner {
             switch try session.beginSync(takeOver: false) {
             case .localRunInProgress: return .blocked(.localRunInProgress)
             case .leaseHeldElsewhere(let lease):
-                return .blocked(.leaseHeldElsewhere(deviceName: lease.deviceName, until: lease.expiresAt))
+                return follow(lease, request: request, session: session, startedAt: startedAt, progress: progress)
             case .ready(let acquired, _): lock = acquired
             }
             defer { lock.release() }
@@ -93,6 +93,49 @@ public struct VaultSyncRunner: SyncRunner {
         } catch {
             return .failed(String(describing: error))
         }
+    }
+
+    /// The keeper for `SyncCoordinator(…, leaseKeeper:)` (heartbeats, Take
+    /// Over, release on shutdown) for this runner's vault.
+    public func makeLeaseKeeper() throws -> LeaseKeeper {
+        try VaultSession(root: root, environment: environment).makeLeaseKeeper()
+    }
+
+    /// Another device leads: a read-only dry run (nothing written to the
+    /// vault or Contacts), reported as `.following`.
+    private func follow(
+        _ lease: VaultLease, request: SyncRunRequest, session: VaultSession, startedAt: Date,
+        progress: @Sendable (SyncPhase) -> Void
+    ) -> SyncRunOutcome {
+        let holder = LeaseHolder(lease, now: environment.clock.now)
+        var syncRequest = options
+        syncRequest.appleMode = request.appleMode
+        guard let prepared = try? session.followerDryRun(syncRequest, startedAt: startedAt, progress: progress) else {
+            return .following(holder, nil)
+        }
+        return .following(
+            holder,
+            Self.plannedSummary(
+                request.kind, prepared: prepared, startedAt: startedAt, finishedAt: environment.clock.now))
+    }
+
+    /// What the leader still has to do, as seen by a follower.
+    static func plannedSummary(
+        _ kind: SyncRunKind, prepared: PreparedSync, startedAt: Date, finishedAt: Date
+    ) -> SyncRunSummary {
+        let plan = prepared.plan
+        var summary = SyncRunSummary(
+            kind: kind, startedAt: startedAt, finishedAt: finishedAt, appleFull: prepared.apple.isComplete,
+            appleRead: prepared.apple.kind.summary)
+        summary.appleCreated = plan.apple.filter { $0.kind == .create }.count
+        summary.appleDeleted = plan.apple.filter { $0.kind == .delete }.count
+        summary.appleUpdated = plan.apple.count - summary.appleCreated - summary.appleDeleted
+        summary.markdownCreated = plan.markdown.creates.count
+        summary.markdownUpdated = plan.markdown.updates.count
+        summary.markdownTrashed = plan.trash.count
+        summary.pendingReview = plan.markdown.reviews.filter(\.needsDecision).count
+        summary.conflicts = plan.conflicts.count
+        return summary
     }
 
     static func summary(

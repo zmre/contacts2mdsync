@@ -216,6 +216,36 @@ struct Switch: ExpressibleByArgument {
     }
 }
 
+/// What `contacts2md lease` does.
+enum LeaseAction: String, ExpressibleByArgument, CaseIterable {
+    case status
+    case takeOver = "take-over"
+    case release
+}
+
+struct LeaseCommand: ParsableCommand, EnvironmentCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "lease",
+        abstract: "Show, take over or release the vault lease (which device leads syncing).",
+        discussion: """
+            One device leads: it writes notes and Contacts. Others follow: `sync` there only checks \
+            (a dry run) and exits 0; review decisions made there are carried out by the leader. \
+            The leader refreshes the lease every 5 minutes; it expires after 20 minutes without a \
+            heartbeat. `take-over` makes this Mac the leader at once (it waits about a minute for iCloud \
+            when other devices use the vault, then checks it still holds the lease). `release` gives it \
+            up so another device can lead.
+            """)
+
+    @OptionGroup var options: RootOptions
+
+    @Argument(help: "status | take-over | release")
+    var action: LeaseAction = .status
+
+    func run(in environment: CLIEnvironment) -> CLIExitCode {
+        Session(options: options, environment: environment, command: "lease \(action.rawValue)").lease(action)
+    }
+}
+
 struct ConfigCommand: ParsableCommand, EnvironmentCommand {
     static let configuration = CommandConfiguration(
         commandName: "config",

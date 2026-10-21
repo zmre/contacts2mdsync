@@ -222,7 +222,9 @@ extension VaultSession {
             DeviceRecord(
                 deviceID: device.id, deviceName: device.name, lastSync: environment.clock.now, summary: summary),
             fs: prepared.fs)
-        try? LeaseManager(fs: prepared.fs, device: device, clock: environment.clock).heartbeat()
+        _ = try? LeaseManager(fs: prepared.fs, device: device, clock: environment.clock).heartbeat()
+        // Only this device writes its decision log: fold in iCloud conflict versions of it.
+        try? DecisionLog.mergeConflictVersions(deviceID: device.id, fs: prepared.fs)
         return result
     }
 

@@ -147,6 +147,7 @@ public struct SyncExecutor: Sendable {
     /// Writes images, config, notes and trashes; returns records whose note failed.
     private func writeMarkdown(_ plan: SyncPlan, created: [UUID: String], result: inout SyncResult) -> Set<UUID> {
         var failed = Set<UUID>()
+        result.markdown.resolveVersions(plan.markdown.versionResolutions, fs: fs)
         for image in plan.markdown.images {
             do {
                 _ = try fs.write(image.data, to: image.path, expecting: .any)

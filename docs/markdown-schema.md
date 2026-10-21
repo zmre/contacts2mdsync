@@ -252,6 +252,22 @@ mbr resolves `to: "[[X]]"` by **global name** (title → alias → filename stem
   Work/ Family/ ...               # anything the user wants
 ```
 
+### `lease.json`
+
+Written by the leading device (architecture §11). Times are ISO 8601.
+
+```json
+{
+  "acquired_at": "2026-10-21T09:00:00Z",
+  "device_id": "3f2c…",
+  "device_name": "Patrick's MacBook Pro",
+  "expires_at": "2026-10-21T09:25:00Z",
+  "heartbeat_at": "2026-10-21T09:05:00Z"
+}
+```
+
+`released_at` is added when the holder gives the lease up (the app quits, `contacts2md lease release`). A released or expired lease is free for any device. The file is engine-owned. Editing it by hand only changes who leads.
+
 ### `config.yaml` sketch
 
 ```yaml
