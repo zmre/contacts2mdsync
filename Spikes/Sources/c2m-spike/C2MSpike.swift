@@ -21,6 +21,7 @@ struct C2MSpike: ParsableCommand {
             S5Normalize.self,
             S9IDs.self,
             S11Headless.self,
+            S12Notes.self,
             Cleanup.self,
         ]
     )

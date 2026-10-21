@@ -8,7 +8,7 @@ struct Cleanup: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Delete scratch cards created by this harness (name prefix AND marker URL both required).")
 
-    @Option(help: "Only delete cards of this spike tag (s1, s3, s4, s5).")
+    @Option(help: "Only delete cards of this spike tag (s1, s3, s4, s5, s12).")
     var spike: String?
 
     @Flag(help: "Actually delete.")

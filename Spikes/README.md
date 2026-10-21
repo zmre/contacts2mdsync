@@ -1,14 +1,15 @@
 # c2m-spike: the spike harness
 
-`c2m-spike` is a standalone command-line tool for the spikes in [`docs/spikes.md`](../docs/spikes.md) that need a real address book: S1, S3, S4, S5, S9 and S11. It also gives partial evidence for S2 (the notes-key probe in `inventory`). It doesn't depend on `Contacts2MdSyncKit`.
+`c2m-spike` is a standalone command-line tool for the spikes in [`docs/spikes.md`](../docs/spikes.md) that need a real address book: S1, S3, S4, S5, S9, S11 and S12. It also gives partial evidence for S2 (the notes-key probe in `inventory`). It doesn't depend on `Contacts2MdSyncKit`.
 
 ## Safety model
 
-- **Writes only touch scratch cards.** A card counts as a harness card only if both of these hold: its name (`givenName familyName`) starts with `ZZ Spike `, and one of its URL values starts with `x-c2mdsync-spike:`. That URL carries the label `c2mdsync-spike` and has the form `x-c2mdsync-spike:<spike>:<account>:<uuid>`. Scratch cards created before the rename carry the legacy marker `x-mdsync-spike:` (label `mdsync-spike`); the harness still recognizes those for checks and cleanup (the name prefix is still required), but never creates new ones. The harness never uses the notes field.
+- **Writes only touch scratch cards.** A card counts as a harness card only if both of these hold: its name (`givenName familyName`) starts with `ZZ Spike `, and one of its URL values starts with `x-c2mdsync-spike:`. That URL carries the label `c2mdsync-spike` and has the form `x-c2mdsync-spike:<spike>:<account>:<uuid>`. Scratch cards created before the rename carry the legacy marker `x-mdsync-spike:` (label `mdsync-spike`); the harness still recognizes those for checks and cleanup (the name prefix is still required), but never creates new ones. The harness never reads or writes the notes field through Contacts.framework. The one exception is S12: it uses Apple Events to Contacts.app to write a synthetic note, and only to a scratch card.
+- **S12 writes go through Contacts.app, so they are checked on both sides.** Right before `set note`, `s12-notes write` verifies every underlying card behind the target with `SafeWriter.verifiedCard`. It also asks Contacts.app for the target person's `id`, first and last name, and `url` values, and refuses unless they show the `ZZ Spike ` prefix and one of the expected marker URLs. The handler arguments are passed as Apple Event descriptors, never pasted into script source.
 - **Checks happen right before every write.** All writes go through `SafeWriter` (`Sources/c2m-spike/Support/Harness.swift`). It fetches the target card again by identifier with unified results off, refuses to continue unless the card passes both checks, and checks again after the mutation. A save to a unified contact (S4 `--unified-write`) requires every underlying card to pass.
 - **Writes are dry runs until you add `--yes`.** Every write subcommand prints its plan. Without `--yes`, nothing is written.
 - **`cleanup` needs both markers.** It deletes only cards that pass both checks. If a card matches only one, `cleanup` lists it and you delete it by hand. This can happen when Google strips the marker URL during S1 or S5.
-- **Read-only output contains no PII.** `inventory` and `s9-ids` print counts and opaque identifiers only. Container names that contain `@` are redacted. S9 files store SHA-256 hashes of identifiers.
+- **Read-only output contains no PII.** `inventory`, `s9-ids` and `s12-notes probe` print counts, timings and opaque identifiers only. `s12-notes probe` reads every note but never prints note text or names. Container names that contain `@` are redacted. S9 files store SHA-256 hashes of identifiers.
 
 ## Build
 
@@ -25,6 +26,8 @@ launchctl plist __TEXT,__info_plist Spikes/.build/debug/c2m-spike
 ```
 
 **Run it from Terminal** (or iTerm, Ghostty, and so on). TCC charges the Contacts grant to the terminal app, the "responsible process". The first command that touches Contacts triggers the prompt. You can also enable your terminal under System Settings ▸ Privacy & Security ▸ Contacts.
+
+`Spikes/Info.plist` also carries `NSAppleEventsUsageDescription`, for S12. The first S12 command that sends an Apple Event makes macOS ask **"<your terminal> wants to control Contacts"** (sometimes it names `c2m-spike`). Click OK. The grant appears under System Settings ▸ Privacy & Security ▸ Automation ▸ <your terminal> ▸ Contacts. If you refuse it, Apple Events fail with error -1743; the command prints how to fix that. To ask again: `tccutil reset AppleEvents` (this resets Automation for every app). The binary is ad-hoc signed without the hardened runtime, so it doesn't need the `com.apple.security.automation.apple-events` entitlement. A notarized app would need it.
 
 Results go to `Spikes/results/`. To write them somewhere else, set `C2M_SPIKE_RESULTS=/path`. The `*.json` and `*.bin` files there are local to this machine and gitignored.
 
@@ -219,12 +222,58 @@ The binary is ad-hoc signed, and its identity changes with every rebuild. If you
 
 **Record:** a table with one row per context (Terminal, launchd, cron, ssh) and these columns: status, count ok, prompt?, parent. Put it under S11 together with the conclusion: direct exec works, or use the `open -g -a … --args sync` fallback.
 
+## S12: notes through Contacts.app (Apple Events)
+
+Question: without the `com.apple.developer.contacts.notes` entitlement, can we read and write the Notes field by scripting Contacts.app (`person` has `note` and `id` in its AppleScript dictionary), and is it fast enough for about 2,500 contacts?
+
+```sh
+c2m-spike s12-notes probe                       # read-only; launches Contacts.app if needed; first run prompts for Automation
+c2m-spike s12-notes probe --quit-if-launched    # same, then quit Contacts.app if this run started it
+c2m-spike s12-notes write                       # dry run; creates nothing. Plans the scratch card
+c2m-spike s12-notes write --yes                 # creates "ZZ Spike S12 Notes <id>" in iCloud (no note yet)
+c2m-spike s12-notes write                       # dry run against the card: resolves the AppleScript person, shows the plan
+c2m-spike s12-notes write --yes                 # sets the note via AppleScript and reports
+c2m-spike s12-notes write --linked              # finds a linked harness pair (S12, else S4), or plans an S12 pair
+c2m-spike s12-notes write --linked --yes        # first run: creates iCloud + Google "ZZ Spike S12 Linked <id>"
+#   wait about 15 min for automatic linking (or link them by hand in Contacts.app), then:
+c2m-spike s12-notes write --linked --yes        # writes the note to the linked person
+```
+
+`probe` makes these Apple Event calls:
+
+1. A warm-up `count every person`. This one absorbs the app launch and the permission prompt.
+2. `id of every person` and `note of every person`, timed separately.
+3. A sample of single `note of person id X` calls (`--sample`, default 20), with an extrapolation to the whole book.
+
+It also fetches all CNContact identifiers twice, with `unifyResults` off and on, and counts how many AppleScript ids match each set.
+
+Even a dry-run `write` sends **read-only** Apple Events to resolve and check the target person. Only `--yes` writes. Without `--linked`, `write` needs an S12 `solo` card and creates one only with `--yes`. If that card has been linked to anything, every member must be a harness card or the write is refused.
+
+**Observe (`probe`):**
+
+- **Permission.** Was there an Automation prompt, and did it name the terminal or `c2m-spike`? With error -1743, follow the printed steps.
+- **Launch.** Was Contacts.app running before, and was it launched by this run?
+- **Counts.** People, non-empty notes, notes with line breaks.
+- **Timing.** Bulk ids and bulk notes, versus the per-person median and its extrapolation.
+- **Id format.** Does `AS id = card id AND unified id`, plus `AS id = synthesized unified id only`, add up to the CN unified count? If so, AppleScript sees unified persons. If `AS id = underlying card id only` is about twice the linked count, it sees cards.
+
+**Observe (`write`):**
+
+- Did `set note` + `save` succeed? How long did it take, and does the AppleScript re-read match? It checks line endings, Unicode and quotes.
+- Is CNContactNoteKey readable? Expect no.
+- On the CN side: is the identifier unchanged, how many other fields changed, and is the unified id unchanged?
+- The change-history events per underlying card (`unify=false`). For a linked pair, these show **which card got the note**. Also look at the per-id `note of person id <card id>` lines, and at whether `person id <card id>` resolves to the unified person.
+- Off the device, look at the note on iCloud.com, on contacts.google.com (for the linked pair) and on the iPhone.
+
+**Record:** the probe output (it's PII-free) and the write reports under S12. Then decide: can the body ↔ notes mapping use Apple Events when the entitlement is missing, and if so, read in bulk and write per person?
+
 ## Cleanup
 
 ```sh
 c2m-spike cleanup                 # dry run: lists harness cards, plus any half-marked cards it will NOT touch
 c2m-spike cleanup --yes           # delete all harness cards
 c2m-spike cleanup --spike s5 --yes
+c2m-spike cleanup --spike s12 --yes   # S12 scratch cards (single card and linked pair)
 ```
 
 Cards that match only one marker are listed for manual deletion and never deleted by the tool. After cleanup, delete any leftovers on contacts.google.com and iCloud.com by hand, and unload the S11 LaunchAgent and cron line.

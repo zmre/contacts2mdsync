@@ -15,6 +15,7 @@ Each spike is a throwaway target under `Spikes/` with a written result here. Run
 | S9 | Is `CNContact.identifier` stable across Contacts.app link/unlink and across iCloud sign-out/in on this Mac? | Validates cascade step 2 confidence.              | Record observed behavior.                                                                | **partial**: only a 30 s compare with no experiment in between. Side evidence: Google card ids change once after create; iCloud ids stayed stable through the Google enable |
 | S10| Does the real `mbr` render our fixture files with zero contact problems (incl. `[[Title]]` relationships after moving files into subfolders)? | Format contract.                                   | Add mbr as flake input + check derivation in M1.                                         | done (M1): `checks.mbr` / `just mbr-check` — 59 fixture notes, 0 problems with mbr 0.7.0 |
 | S11| Headless TCC + sandbox: does the app binary run with a `sync` argument from Terminal, cron and a launchd user agent keep the app's Contacts grant and read its security-scoped bookmark? | Headless CLI (architecture §15).             | Works from launchd at minimum. Otherwise fall back to `open -g -a … --args sync`. | **partial**: Terminal is authorized. launchd and cron report `notDetermined`; `--request` was never tried, so prompting and granting are untested. Bookmark not tested |
+| S12| Notes without the entitlement: can we read and write the Notes field by scripting Contacts.app with Apple Events (`note` and `id` of `person`)? How long do a bulk read and a per-person read take for about 2,500 contacts? Do AppleScript ids match CNContact card ids or unified ids? Which card of a linked pair gets the write? | Body ↔ notes mapping while S2 is blocked on Apple. | Bulk read of all notes takes a few seconds or less, writes keep the text exactly, no other fields or ids change, the linked-pair write target is predictable, and the Automation prompt is acceptable. Then Apple Events become the fallback notes path in architecture §8. | todo |
 
 ## Results (2026-10-21 UTC run)
 
@@ -220,3 +221,36 @@ Run the steps in this order. Steps 2–7 touch the real address book, but only s
    c2m-spike cleanup          # dry run
    c2m-spike cleanup --yes
    ```
+
+### S12 run steps
+
+`c2m-spike s12-notes` sends Apple Events to Contacts.app. The first command that does so triggers the macOS prompt "<terminal> wants to control Contacts". Allow it. If it's refused, the command prints error -1743 and the steps to fix it. Rebuild first (step 1); the new `Info.plist` key is `NSAppleEventsUsageDescription`. For what each command prints and what to look for, see [`Spikes/README.md`](../Spikes/README.md#s12-notes-through-contactsapp-apple-events).
+
+1. **Probe (read-only).** It prints counts and timings only, never note text or names.
+
+   ```sh
+   c2m-spike s12-notes probe --quit-if-launched
+   ```
+
+2. **Single scratch card.** The first `--yes` creates `ZZ Spike S12 Notes <id>` in iCloud. The second `--yes` sets its note via AppleScript.
+
+   ```sh
+   c2m-spike s12-notes write --yes     # creates the card
+   c2m-spike s12-notes write           # dry run: AppleScript resolution + plan
+   c2m-spike s12-notes write --yes     # set note + save; re-read; CN diff; change history
+   ```
+
+   Within about 5 minutes, check the note on iCloud.com and on the iPhone.
+
+3. **Linked pair.** This step creates an iCloud + Google pair with the same name and waits for automatic linking. If an S4 pair from step 3 above is still linked, the command uses that instead.
+
+   ```sh
+   c2m-spike s12-notes write --linked --yes    # creates the pair if no linked harness pair exists
+   #   wait about 15 min (or link by hand), then:
+   c2m-spike s12-notes write --linked          # dry run: are they linked? which AppleScript id?
+   c2m-spike s12-notes write --linked --yes
+   ```
+
+   Record which card the change history names, and where the note shows up: on iCloud.com, on contacts.google.com, or on both.
+
+4. **Clean up:** `c2m-spike cleanup --spike s12 --yes`.

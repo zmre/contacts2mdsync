@@ -14,5 +14,7 @@
 	<string>1</string>
 	<key>NSContactsUsageDescription</key>
 	<string>c2m-spike measures how Apple Contacts, iCloud and Google treat scratch contacts it creates (names starting "ZZ Spike "). It never modifies other contacts.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>c2m-spike (spike S12) asks Contacts.app for people's identifiers and notes to measure whether notes can be synced without the notes entitlement. It only changes the note of its own "ZZ Spike " scratch cards.</string>
 </dict>
 </plist>
