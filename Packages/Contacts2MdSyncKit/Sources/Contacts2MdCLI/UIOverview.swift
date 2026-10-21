@@ -1,6 +1,7 @@
 public import ContactModel
 public import Foundation
 public import SyncEngine
+internal import SyncTriggers
 internal import VaultIndex
 
 /// Created / updated / deleted counts for one side.
@@ -157,9 +158,11 @@ public struct UIOverview: Sendable {
     }
 }
 
-/// Apple / markdown counts of one session: exact for exports and for syncs
-/// started from the app; for other syncs (CLI, launchd) the stored record
-/// combines both sides, so only the totals are known.
+/// Apple / markdown counts of one session. Exact for exports and for syncs
+/// recorded with `SessionRecord.sides` (M5 on: every sync, from the app,
+/// live triggers, the CLI and schedules). Older app syncs kept the split in
+/// the device state's metadata (`UISessionDetail`); older CLI syncs only
+/// stored both sides combined, so only the totals are known.
 struct UISessionSplit {
     var contacts: UIChangeCounts?
     var markdown: UIChangeCounts?
@@ -167,11 +170,23 @@ struct UISessionSplit {
     var combined: UIChangeCounts?
     var held: Int
     var holdReason: String?
+    /// `full` / `incremental` (how Apple Contacts was read), when recorded.
+    var appleRead: String?
 
     init(_ session: SessionRecord, details: [UISessionDetail]) {
         held = 0
         if session.command == "plan" { return }
-        if let detail = details.first(where: { $0.matches(session) }) {
+        if let sides = session.sides {
+            contacts = UIChangeCounts(
+                created: sides.appleCreated, updated: sides.appleUpdated, deleted: sides.appleDeleted)
+            // Adoptions are counted separately (This Session ▸ Existing notes linked).
+            markdown = UIChangeCounts(
+                created: sides.markdownCreated, updated: max(0, sides.markdownUpdated - session.adopted),
+                deleted: sides.markdownDeleted)
+            held = sides.held
+            holdReason = sides.heldReason.map(Self.holdReason)
+            appleRead = sides.appleRead
+        } else if let detail = details.first(where: { $0.matches(session) }) {
             contacts = detail.apple
             markdown = detail.markdown
             held = detail.held
@@ -182,6 +197,14 @@ struct UISessionSplit {
             contacts = UIChangeCounts(updated: session.stamped)
             markdown = UIChangeCounts(created: session.created, updated: session.updated)
         }
+    }
+
+    /// The engine's hold reason (`AppleHold.reason`) in Activity wording,
+    /// without the command-line hint.
+    static func holdReason(_ reason: String) -> String {
+        if reason == AppleHold.appleWritesDisabled.reason { return "Apple writes off" }
+        guard let hint = reason.range(of: " (use --") else { return reason }
+        return String(reason[..<hint.lowerBound])
     }
 }
 
@@ -214,6 +237,8 @@ public struct UIActivityRow: Identifiable, Hashable, Sendable {
     /// Apple changes held (writes off or over the limit), with the reason.
     public var held: Int
     public var holdReason: String?
+    /// `full` / `incremental` (how Apple Contacts was read; M5 syncs).
+    public var appleRead: String?
     public var review: Int
     public var skipped: Int
     public var result: Result
@@ -236,13 +261,16 @@ public struct UIActivityRow: Identifiable, Hashable, Sendable {
                 trigger: Self.trigger(session.trigger), command: session.command, isPreview: preview,
                 contacts: split.contacts, markdown: split.markdown, combined: split.combined,
                 adopted: session.adopted, held: split.held, holdReason: split.holdReason,
-                review: session.pendingReview, skipped: session.skipped, result: result)
+                appleRead: split.appleRead, review: session.pendingReview, skipped: session.skipped, result: result)
         }
     }
 
-    /// docs/ui.md §8 wording: `GUI` → Manual; others (`CLI`, `Live`, `Launch`, …) as recorded.
+    /// docs/ui.md §8 wording: `GUI` → Manual; the coordinator's kinds
+    /// (`Live`, `Launch`, `Wake`, `Sweep`, `Manual`, `Rescan`) and `CLI` as
+    /// recorded; the raw kind names (`rescan-vault`, …) as their labels.
     static func trigger(_ recorded: String) -> String {
-        recorded == "GUI" ? "Manual" : recorded
+        if recorded == "GUI" { return "Manual" }
+        return SyncRunKind(rawValue: recorded)?.displayName ?? recorded
     }
 }
 

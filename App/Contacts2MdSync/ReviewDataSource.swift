@@ -4,7 +4,7 @@ import Foundation
 // The seam between the review UI and the sync engine. Everything goes
 // through `UIVaultReader` (Contacts2MdCLI), the same `VaultSession` paths as
 // `contacts2md`. Review answers (conflicts, deletions, Add to Contacts,
-// duplicates, matches) are decision-log entries recorded with `record`; the
+// duplicates incl. Keep This File, matches) are decision-log entries recorded with `record`; the
 // next sync applies them. Screen data (conflict records, deletion rows) is
 // derived from `UIVaultData` by `UIReviewQueues`.
 
@@ -18,21 +18,11 @@ struct ReviewCapabilities: Sendable, Equatable {
     var deletionActions = true
     /// Markdown-only notes can be created in Contacts.
     var addToContacts = true
-    /// Merge-records groups accept a surviving file. Off: the M3 decision
-    /// log has no kind for it (`mergeRecords` items have no choices).
-    var pickSurvivingFile = false
     /// `apple_writes` / `stamp_contacts` can be read and changed.
     var vaultOptions = true
 
     /// Tooltip for controls the engine does not support yet.
     static let unsupportedHelp = "Not supported by the sync engine yet"
-}
-
-/// The engine operation is not available.
-struct ReviewUnavailable: Error, CustomStringConvertible {
-    let feature: String
-
-    var description: String { "\(feature) is not supported by the sync engine yet." }
 }
 
 /// Everything the review UI reads and writes. Implementations run their
@@ -49,8 +39,6 @@ protocol ReviewDataSource: Sendable {
     /// Appends review answers to the decision log.
     func record(_ answers: [UIReviewDecision], root: URL) async throws
     func setDefaultFolder(_ folder: String, root: URL) async throws
-    /// Merge records: keep the note at `path` (no engine support yet).
-    func pickSurvivingFile(itemID: String, path: String, root: URL) async throws
     /// Writes `apple_writes` / `stamp_contacts`.
     func setVaultOptions(_ options: UIVaultOptions, root: URL) async throws
 }
@@ -82,10 +70,6 @@ struct LiveReviewDataSource: ReviewDataSource {
 
     @concurrent
     func setDefaultFolder(_ folder: String, root: URL) async throws { try reader(root).setDefaultFolder(folder) }
-
-    func pickSurvivingFile(itemID: String, path: String, root: URL) async throws {
-        throw ReviewUnavailable(feature: "Keeping one file of a linked contact")
-    }
 
     @concurrent
     func setVaultOptions(_ options: UIVaultOptions, root: URL) async throws { try reader(root).setOptions(options) }

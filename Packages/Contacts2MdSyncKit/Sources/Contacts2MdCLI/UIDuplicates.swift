@@ -15,8 +15,10 @@ public enum UIDuplicateAction: Hashable, Sendable {
     case keepSyncID(path: Int)
     /// Snooze until the next export (not recorded).
     case ignoreForNow
-    /// Merge-records: keep the note at `path`; the others go to the Trash on confirm.
-    case pickSurvivingFile(path: String)
+    /// Merge records: the note at `index` (of the item's paths, 0-based)
+    /// stays synced with the linked contact; the others are detached and
+    /// their sync ids removed from the contact's cards (`merge-keep`).
+    case pickSurvivingFile(index: Int, path: String)
 
     /// The decision-log answer, or `nil` for actions the log cannot record.
     public func decision(itemID: String) -> UIReviewDecision? {
@@ -24,7 +26,8 @@ public enum UIDuplicateAction: Hashable, Sendable {
         case .notDuplicates: .choice(itemID: itemID, choice: "distinct")
         case .syncOnly(let member): .choice(itemID: itemID, choice: "only:\(member + 1)")
         case .keepSyncID(let path): .choice(itemID: itemID, choice: "keep:\(path + 1)")
-        case .ignoreForNow, .pickSurvivingFile: nil
+        case .pickSurvivingFile(let index, _): .choice(itemID: itemID, choice: "keep:\(index + 1)")
+        case .ignoreForNow: nil
         }
     }
 }
@@ -176,7 +179,8 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
         group.cards =
             [context.contactCard(0, member: nil, ref: contact, accounts: [])]
             + paths.enumerated().map {
-                context.noteCard($0.offset, path: $0.element, action: .pickSurvivingFile(path: $0.element))
+                context.noteCard(
+                    $0.offset, path: $0.element, action: .pickSurvivingFile(index: $0.offset, path: $0.element))
             }
         return group
     }
@@ -187,6 +191,25 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
         case .contacts: [.notDuplicates, .ignoreForNow]
         case .sameSyncID, .mergeRecords: [.ignoreForNow]
         }
+    }
+
+    /// The confirmation for Keep This File (merge records): what happens to
+    /// the other notes and to the stamps on the contact's cards. With Apple
+    /// writes off the stamp removal is held until they are turned on.
+    public func keepFileMessage(keeping path: String, appleWrites: Bool) -> String {
+        let others = cards.compactMap(\.path).filter { $0 != path }
+        let noun = others.count == 1 ? "note" : "notes"
+        let possessive = others.count == 1 ? "note's" : "notes'"
+        var message =
+            "\(path) stays synced with \(title). The other \(noun) (\(others.joined(separator: ", "))) "
+            + "\(others.count == 1 ? "is" : "are") detached on the next sync: marked as no longer synced, "
+            + "left in place, nothing is deleted. "
+        message +=
+            appleWrites
+            ? "The \(possessive) sync IDs are removed from \(title)'s cards."
+            : "Removing the \(possessive) sync IDs from \(title)'s cards is held until "
+                + "“Write changes back to Apple Contacts” is on."
+        return message
     }
 
     /// Every underlying card id (Open in Contacts to Link opens each).

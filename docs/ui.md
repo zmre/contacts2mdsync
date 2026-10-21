@@ -1,6 +1,6 @@
 # Contacts2MdSync — UI Design
 
-Status: M4 review UI wired to the M3 two-way sync engine (see §14 for what is live, what is still pending, and deviations). ASCII mockups; final visuals follow macOS HIG with native SwiftUI components.
+Status: review UI on the two-way engine, with M5 live sync hosted in the app (toolbar, Settings ▸ General, menu bar; see §14 for what is live, what is still pending, and deviations). ASCII mockups; final visuals follow macOS HIG with native SwiftUI components.
 
 ## Principles
 
@@ -326,17 +326,26 @@ Advanced  Contact notes      ◦ Not available — notes stay markdown-only
 - **Avoid in main UI:** local/remote, source/target, orphan, tombstone, lease (Advanced only).
 - Counts: number + plain noun ("12 files"). Relative dates ("Today 10:42 AM").
 
-## 14. As built (M4 UI on the M3 engine)
+## 14. As built (M4 UI, M5 live sync)
 
-**Structure.** `ContentView` shows onboarding (`SetupView`, steps 1–3 and 5) until the folder is configured, a "Can't open the notes folder [Locate…]" pane when the saved bookmark no longer resolves, and otherwise `MainView`: the §1 sidebar with badges, toolbar (status dot + text, disabled `Live` toggle, **Sync Now**, inspector toggle), banners above every screen, and `.inspector`. Menu commands: Contacts ▸ Sync Now (⌘R), Check for Changes (⇧⌘R); View ▸ Show/Hide Inspector (⌥⌘I).
+**Structure.** One main `Window` (id `main`). `ContentView` shows onboarding (`SetupView`, steps 1–3 and 5) until the folder is configured, a "Can't open the notes folder [Locate…]" pane when the saved bookmark no longer resolves, and otherwise `MainView`: the §1 sidebar with badges, toolbar (status dot + text, `Live` toggle, **Sync Now**, inspector toggle), banners above every screen, and `.inspector`. Menu commands: Contacts ▸ Sync Now (⌘R), Check for Changes (⇧⌘R); View ▸ Show/Hide Inspector (⌥⌘I). The `MenuBarExtra` (§10) is a second scene. `AppDelegate` owns the `AppModel` (so it outlives the window), starts it at launch, and stops live sync before quitting.
 
 **Layers.**
 
 - `Contacts2MdCLI/UI*.swift`: view-model adapters over the public engine APIs, tested in `UIReviewTests`, `UISyncTests` and `UISyncOutcomeTests`. `UIVaultReader` (`UIVaultReader.swift`) reads stored state and scans the folder (no Contacts access), runs dry runs and Sync Now through the same `VaultSession` calls as `contacts2md plan` / `sync`, appends decisions, and edits `default_folder`, `apple_writes` and `stamp_contacts`. `UIReviewQueues` turns stored state into screen data: `UIConflictRecord` (`UIConflicts.swift`), `UIDeletionRow` (`UIDeletions.swift`), `UIDuplicateGroup`, `UIMarkdownOnlyRow`. `UISync.swift` has the Sync Now request/outcome/summary, the two-way part of a dry run (`UISyncPlanSummary`) and `UIBanner`. `UIOverview`, `UIActivityRow` and `UILibraryRow` build the remaining screens.
 - `App/…/ReviewDataSource.swift`: the protocol the UI is built against (load, plan, sync, record, folder, options) and `ReviewCapabilities`. `LiveReviewDataSource` runs each call off the main actor (`@concurrent`).
 - `AppModel` (`@MainActor @Observable`): loads stored data, then a dry run; queues, badges, banners, snoozes, decisions, Finder and Contacts links.
+- `LiveSyncController` (App): hosts the `SyncCoordinator` (below). `UILiveSync.swift` (Contacts2MdCLI, tested in `UILiveSyncTests` / `UILiveActivityTests`) holds the logic it shows: `UILiveState` folds the status stream into the toolbar / menu bar line, `UILiveSettings` the pause, `UISweepChoice` the Safety check picker, `UIBackgroundSync` the launchd agents.
+- `BackgroundServices` (App): `SMAppService` for Launch at login and the background agent.
 
 **Dry runs and Sync Now.** Once this Mac has exported or synced the vault, Check for Changes is the two-way plan (`prepareSync` + `recordSyncPlan`, recorded as a `plan` session) and Sync Now is `beginSync` → `prepareSync` → `executeSync` with `DecisionPolicy.gui`, trigger `GUI`. Before that, both fall back to the one-way export plan and the first export, as the CLI does. Onboarding's step 5 stays **Run First Export**: `prepareSync` needs a merge base that only the first export creates (`VaultNotReady` otherwise), and the first import's auto-adoption only exists on the export path. The vCard backup is taken only when the sync writes to Contacts.
+
+**Live sync (M5).** `LiveSyncController` follows architecture §10 "Hosting in the app" once the folder is configured, Contacts access is granted and this Mac has synced (`records.lastExport`; right after the first export too): it opens the folder's scope through `RootBookmark.open()`, creates an `OwnWriteRegistry`, a `VaultSyncRunner` (`CLIEnvironment.live()`, policy `.gui`), loads `TriggerSettingsStore` and starts a `SyncCoordinator` with `LaunchCatchUp`, `ContactsChangeSource`, `VaultChangeSource`, `WakeSource` and `SweepScheduler`. The status stream is observed on the main actor and folded by `UILiveState`: a blocked or failed run stays visible after the coordinator goes idle, until a run finishes. On `.finished`, `.following` and blocked runs (other than the lock retry) the app re-reads stored data and runs a dry run, so Review, badges, banners and Since Last Sync stay current; dry runs never start while a coordinator run is in progress. When the coordinator was just started with live sync on, the launch catch-up replaces the start-up dry run. Folder change → `shutdown()` and a new coordinator; quit → `applicationShouldTerminate` waits for `shutdown()` (at most 20 s) before the scope closes.
+
+- **Sync Now (⌘R)** goes through `coordinator.syncNow()` once hosted (full, never debounced, serialized with live runs). The banner overrides (Apply Anyway, Resume Anyway, Take Over) and the first export still run directly through `UIVaultReader.sync`, which takes the same local lock.
+- **Toolbar status:** `Scheduled`, `Syncing… reading/planning/writing` (with a spinner), `Waiting for <device>`, `Waiting for another sync`, `Paused: safety breaker`, `Can't sync`, `Failed` (tooltip: the message), else `Reading…` / `Checking…`, else Idle or "N to review". The `Live` toggle is `live_sync` (on while not paused; turning it on ends a pause).
+- **Turning live sync on** and **the end of a pause** submit a catch-up run (recorded as `Launch`): changes while it was off were not watched.
+- Failures of a coordinator run show on the Overview ("N changes could not be written"); a Sync Now run with failures also raises the error banner.
 
 **Live.**
 
@@ -344,12 +353,13 @@ Advanced  Contact notes      ◦ Not available — notes stay markdown-only
 |---------------|----------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
 | Overview      | stored status, sessions, latest dry run: Changed in Contacts (notes to write), Changed in Markdown (Apple changes from note edits, with "held" when writes are off or over the limit), notes to Trash, This Session / Last Sync with Apple and markdown C/U/D and held | Check Again, Reveal root, review rows link to their screens |
 | Conflicts     | open `conflict` items grouped per record (one row per field: Previous / Contacts / Markdown, options from the engine; label conflicts offer only Keep Contacts / Keep Markdown) | Keep choice per field, ⌘1–3 for all fields, Apply (⌘↩), Resolve Selected with confirmation (Keep Both Where Possible leaves fields without it undecided) |
-| Duplicates    | `duplicate cluster`, `copied note`, `merge records` items; contact details from the dry run              | Open in Contacts to Link, Sync Only *card*, Not Duplicates (confirmed), Ignore for Now (until the next sync), Keep This One |
+| Duplicates    | `duplicate cluster`, `copied note`, `merge records` items; contact details from the dry run              | Open in Contacts to Link, Sync Only *card*, Not Duplicates (confirmed), Ignore for Now (until the next sync), Keep This One, Keep This File (merge records, confirmed: `keep:N` → `merge-keep`) |
 | Markdown Only | contact notes without a sync id, plus notes named by `possible match` items                             | per row: Add to Contacts (default when nothing matches), Link to "X" (default at ≥ 0.5), Not "X", Ignore; toolbar Add to Contacts for the selection; tick rows, Apply N Changes (⌘↩); Show Ignored |
 | Deletions     | Deleted in Contacts (`appleDeleted`), Deleted in Markdown (`markdownDeleted`); notes a one-way export found missing are listed read-only until the next sync | Keep File, Unlink (default) · Delete File · Restore Contact; Restore File (default) · Unlink, Keep Contact · Delete Apple Contact…; Apply N Changes; destructive alert naming each file and contact (with its accounts) |
 | All Contacts  | record map + note titles; search by name, file, account                                                  | Open in Contacts, Reveal in Finder                                                                       |
-| Activity      | sessions with trigger (Manual, CLI, …), Contacts C/U/D, Markdown C/U/D, Held; previews behind Show Previews; unreadable contact notes with Reveal | —                                                                                                        |
-| Settings      | device name, folders, accounts from the dry run, notes availability, lease holder                       | Choose root, folder for new notes, "Write changes back to Apple Contacts" (`apple_writes`) and "Add sync IDs to contacts" (`stamp_contacts`), Show backups |
+| Activity      | sessions with trigger (Live, Launch, Wake, Sweep, Manual, CLI, Rescan), Contacts C/U/D, Markdown C/U/D, Held, how Contacts was read (Trigger tooltip); previews behind Show Previews; unreadable contact notes with Reveal | —                                                                                                        |
+| Settings      | device name, live sync, safety check, background sync, menu bar, launch at login, folders, accounts from the dry run, notes availability, lease holder | General (below); choose root, folder for new notes, "Write changes back to Apple Contacts" (`apple_writes`) and "Add sync IDs to contacts" (`stamp_contacts`), Show backups |
+| Menu bar      | status line, live sync line, Needs review total and per queue                                             | each count opens the main window at that screen; Sync Now, Open App…, Pause Live Sync ▸ For 1 Hour · Until Tomorrow (or Resume Live Sync), Settings…, Quit |
 
 Every review answer is a decision appended to `.c2mdsync/devices/<device>/decisions.jsonl`, with the same choices as `contacts2md review decide` (conflicts `apple | markdown | both`, Deleted in Contacts `keep | trash | restore`, Deleted in Markdown `restore | unlink | delete-contact`, Add to Contacts `create-contact`). The next sync applies them; answered items leave the queue at once, and the affected Markdown Only rows say "Will be … on the next sync". A conflict answer applies only while both sides still hold the values it was made against; otherwise the conflict comes back.
 
@@ -366,13 +376,24 @@ Every review answer is a decision appended to `.c2mdsync/devices/<device>/decisi
 | Another sync is running on this Mac (gray) | the local lock was busy | — |
 | Several devices … no sync IDs (orange) | identity warning | Open Settings… |
 
-**Activity details.** `SessionRecord` stores Apple and markdown changes combined and has no held count. For syncs started from the app, `UIVaultReader.sync` keeps the split (and held count and reason) in the device state's metadata (`ui_sync_sessions`, last 200, matched by start time and trigger). Syncs from the CLI or a schedule show "—" in both C/U/D columns with the combined total in the tooltip.
+**Settings ▸ General** (`GeneralSettingsView`).
+
+- *Live sync* and *Safety check* (Every hour / 2 / 4 / 6 hours / Off) are this Mac's `triggers.json`: `TriggerSettingsStore.save`, then `coordinator.update` with the effective settings. They can be changed before live sync is hosted (the footer says it starts after the first sync on this Mac). A hand-edited interval outside the list is shown as an extra choice.
+- *Background sync when the app is closed*: launchd runs the app binary headless (`sync --quiet`, architecture §15) on a schedule. nix installs (bundle in `/nix/store/` or a nix-darwin app folder) get the toggle disabled and a `programs.contacts2mdsync.schedule` snippet instead. Other installs register a bundled agent with `SMAppService.agent(plistName:)`: `App/LaunchAgents/com.zmre.contacts2mdsync.sync-{1,2,4,6}h.plist`, copied to `Contents/Library/LaunchAgents` by `project.yml` (`BundleProgram` `Contents/MacOS/Contacts2MdSync`, `StartInterval`, background priority, `AssociatedBundleIdentifiers`). One plist per interval because `StartInterval` is fixed; choosing another interval unregisters the old agent. The status row shows On / Off / waiting for approval (with Open Login Items…) / registration errors. Runs appear in Activity as `CLI`.
+- *Show in menu bar* (`showInMenuBar` in UserDefaults, default on): inserts the `MenuBarExtra`; while it is shown, closing the window keeps the app and live sync running (`applicationShouldTerminateAfterLastWindowClosed`).
+- *Launch at login*: `SMAppService.mainApp.register()` / `unregister()`, with approval state and errors.
+
+**Pause Live Sync** (menu bar): live triggers off until the end (an hour, or the start of the next day), stored in UserDefaults (`livePausedUntil`) so it survives a relaunch; the sweep and Sync Now keep working. The coordinator gets `liveSync = false` through `update`, and a timer restores the saved settings and submits a catch-up run.
+
+**Activity details.** M5 sessions carry `SessionRecord.sides` (Apple and markdown created / updated / deleted, held count and reason, `full` / `incremental` read) for every sync: from the app, live triggers, the CLI and schedules. Adoptions are left out of Markdown "updated" (This Session lists them separately). The app no longer writes its own split; for syncs started from the app before M5 it still reads the one kept in the device state's metadata (`ui_sync_sessions`, matched by start time and trigger), and older CLI syncs show "—" with the combined total in the tooltip.
+
+**Keep This File** (merge records: one linked contact carrying several sync ids). The answer is the item's `keep:N` choice, recorded as a `merge-keep` decision. The confirmation names the note that stays synced and the others, which the next sync detaches (`c2mdsync.status: detached`, left in place, nothing deleted), and says their sync ids are removed from the contact's cards, or that the removal is held while Apple writes are off.
 
 **Still pending.**
 
-- Keep This File (merge records): the M3 decision log has no kind for it and `mergeRecords` items have no choices, so the button stays disabled ("Not supported by the sync engine yet").
 - Rescan Everything / Reset Sync State, the per-change Activity inspector, Export Log.
-- M5/M6: Live toggle, background sync, safety check, menu bar, launch at login.
+- M6: following another device's lease in the app (the coordinator's `LeaseKeeper`, `takeOver()`), shown so far only as "Waiting for *device*" from `.following` and the stored lease.
+- Verify with a real build: the menu bar window, closing the main window with the menu bar shown, quitting during a run, and the background agent's Contacts permission when launchd starts the app binary (architecture §15, spike S11; `SMAppService` agents are attributed to the app, which should carry its grant).
 
 **Deviations.**
 
@@ -383,4 +404,7 @@ Every review answer is a decision appended to `.c2mdsync/devices/<device>/decisi
 - Deletions: Delete Apple Contact deletes every card of the contact that this Mac can write to (the engine's `delete-contact`), not only the iCloud card; the alert says so and lists the contact's accounts.
 - Activity shows this Mac's sessions only (sessions live in the per-device database). Dry runs are recorded as previews and hidden by default.
 - Device name is read-only: it follows the computer name.
-- A two-way dry run takes a second Contacts snapshot only when review items name contacts (duplicates, possible matches), for their card details; `PreparedSync` does not expose its snapshot. Account counts in Settings come from the synced records otherwise.
+- Dry runs take review details and account counts from the plan's own snapshot (`PreparedSync.snapshot`): no second Contacts read. After a live run the app still runs one dry run (an incremental read with a valid history token) to refresh Since Last Sync and Review; it is recorded as a preview.
+- Menu bar: the icon is `person.2.circle`, filled while something needs review and arrows while syncing, instead of an orange dot (menu bar icons are template images). The panel adds Settings… and Quit. Pause offers For 1 Hour and Until Tomorrow (the start of the next day).
+- Onboarding step 5 has no Live sync / Show in menu bar switches: both default on and live in Settings ▸ General.
+- The Dock icon stays while the app runs in the menu bar only.

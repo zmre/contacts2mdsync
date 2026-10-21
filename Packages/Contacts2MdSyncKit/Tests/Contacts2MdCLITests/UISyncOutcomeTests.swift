@@ -177,7 +177,7 @@ extension UISyncTests {
             ).isEmpty)
     }
 
-    @Test("Activity and This Session: app syncs split Apple / markdown with held counts; CLI syncs only total")
+    @Test("Activity and This Session: app and CLI syncs split Apple / markdown with held counts")
     func activity() throws {
         let harness = CLIHarness.exported()
         let reader = reader(harness)
@@ -193,8 +193,11 @@ extension UISyncTests {
         #expect(syncs.count == 2)
         let cli = try #require(syncs.first)
         #expect(cli.trigger == "CLI")
-        #expect(cli.contacts == nil && cli.markdown == nil)
-        #expect(cli.combined == UIChangeCounts(updated: 1))
+        // M5 sessions record the split (`SessionRecord.sides`), whoever ran them.
+        #expect(cli.contacts == UIChangeCounts())
+        #expect(cli.markdown == UIChangeCounts(updated: 1))
+        #expect(cli.combined == nil)
+        #expect(cli.held == 1)
         let app = try #require(syncs.last)
         #expect(app.trigger == "Manual")
         #expect(app.markdown == UIChangeCounts(updated: 1))
@@ -202,7 +205,7 @@ extension UISyncTests {
         #expect(app.held == 1)
         #expect(app.holdReason == "Apple writes off")
         let overview = UIOverview(data: data, plan: nil, counts: UIReviewCounts(), sessionStart: .distantPast)
-        #expect(overview.session?.held == 1)
+        #expect(overview.session?.held == 2)
         #expect(overview.session?.markdown.updated ?? 0 >= 1)
         let last = UIOverview(data: data, plan: nil, counts: UIReviewCounts(), sessionStart: .distantFuture)
         #expect(last.session?.heading == "Last Sync")

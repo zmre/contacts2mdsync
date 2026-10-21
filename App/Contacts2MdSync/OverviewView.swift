@@ -27,15 +27,16 @@ struct OverviewView: View {
             VStack(alignment: .leading, spacing: 4) {
                 headline(overview.health).font(.title3.weight(.semibold))
                 Text(lastSyncedLine(overview)).foregroundStyle(.secondary).monospacedDigit()
+                Text(model.live.liveLine).font(.caption).foregroundStyle(.secondary).monospacedDigit()
             }
             .padding(.vertical, 2)
-            if let summary = model.lastSync, !summary.failures.isEmpty {
-                let count = summary.failures.count
+            if !model.lastFailures.isEmpty {
+                let count = model.lastFailures.count
                 Label(
                     "\(count) \(count == 1 ? "change" : "changes") could not be written", systemImage: "xmark.octagon"
                 )
                 .foregroundStyle(.red)
-                .help(summary.failures.joined(separator: "\n"))
+                .help(model.lastFailures.joined(separator: "\n"))
             }
         }
     }
@@ -127,7 +128,7 @@ struct OverviewView: View {
                 }
                 Spacer()
                 Button("Check Again") { Task { await model.check() } }
-                    .disabled(model.phase != .idle)
+                    .disabled(!model.canSync)
             }
             .foregroundStyle(.secondary)
         }

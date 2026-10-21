@@ -183,8 +183,7 @@ public struct UIPlanSummary: Sendable {
     public var excludedByDecision: Int
     public var skipped: Int
     public var warnings: [String]
-    /// Whether the Contacts notes field was readable (`false` when this run
-    /// took no snapshot, as a two-way dry run without review details).
+    /// Whether the Contacts notes field was readable.
     public var notesAvailable: Bool
     public var reviews: [ReviewItem]
     /// Contacts named by review items, by underlying card id.
@@ -199,15 +198,14 @@ public struct UIPlanSummary: Sendable {
             contacts: prepared.snapshot.contacts, notesAvailable: prepared.snapshot.notesAvailable)
     }
 
-    /// Creates a summary of a two-way plan. `snapshot` supplies account
-    /// counts and contact details for review items; without it, accounts are
-    /// counted from the synced records.
-    public init(_ prepared: PreparedSync, snapshot: AppleSnapshot?, computedAt: Date) {
-        let records = (try? prepared.state.load())?.records.values.flatMap(\.cards) ?? []
-        let cards = snapshot?.contacts.flatMap(\.cards).map(\.accountKind) ?? records.map(\.accountKind)
+    /// Creates a summary of a two-way plan. Account counts and contact
+    /// details for review items come from the snapshot the plan was made
+    /// from (`PreparedSync.snapshot`), so Contacts is read only once.
+    public init(_ prepared: PreparedSync, computedAt: Date) {
+        let snapshot = prepared.snapshot
         self.init(
-            prepared.plan.markdown, computedAt: computedAt, accountKinds: cards, contacts: snapshot?.contacts ?? [],
-            notesAvailable: snapshot?.notesAvailable ?? false)
+            prepared.plan.markdown, computedAt: computedAt, cards: snapshot.contacts.flatMap(\.cards),
+            contacts: snapshot.contacts, notesAvailable: snapshot.notesAvailable)
         sync = UISyncPlanSummary(prepared.plan)
     }
 

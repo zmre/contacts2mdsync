@@ -2,7 +2,7 @@ import Contacts2MdCLI
 import SwiftUI
 
 /// Settings (docs/ui.md §9). Controls for features that are not built yet
-/// are shown disabled with the milestone that brings them.
+/// are shown disabled.
 struct SettingsView: View {
     let model: AppModel
 
@@ -16,42 +16,6 @@ struct SettingsView: View {
         }
         .frame(width: 540)
         .frame(minHeight: 340)
-    }
-}
-
-private struct GeneralSettings: View {
-    let model: AppModel
-
-    var body: some View {
-        Form {
-            LabeledContent("Device name") {
-                Text(model.data?.device.name ?? DeviceIdentityFile.computerName)
-            }
-            .help("This Mac's name from System Settings ▸ General ▸ Sharing")
-            Section {
-                Toggle("Sync every hour, even when the app is closed", isOn: .constant(false))
-                    .disabled(true)
-                Text("Or run `contacts2md sync` from launchd or cron. Arrives in M5.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Toggle("Live sync: watch Contacts and the folder for changes", isOn: .constant(false))
-                    .disabled(true)
-                    .help("Arrives in M5")
-                Picker("Safety check", selection: .constant(2)) {
-                    Text("Every hour").tag(1)
-                    Text("Every 2 hours").tag(2)
-                    Text("Every 6 hours").tag(6)
-                }
-                .disabled(true)
-                .help("A full compare in case a change was missed. Arrives in M5.")
-                Toggle("Show in menu bar", isOn: .constant(false)).disabled(true).help("Arrives in M5")
-                Toggle("Launch at login", isOn: .constant(false)).disabled(true).help("Arrives in M5")
-            } footer: {
-                Text("Live sync, background sync and the menu bar arrive in M5.")
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .formStyle(.grouped)
     }
 }
 

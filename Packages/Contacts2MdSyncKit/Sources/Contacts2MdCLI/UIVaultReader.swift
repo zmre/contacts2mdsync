@@ -69,7 +69,7 @@ public struct UIVaultReader: Sendable {
         }
         let prepared = try session.prepareSync(SyncRequest(policy: .gui))
         try session.recordSyncPlan(prepared, command: "plan", startedAt: startedAt)
-        return UIPlanSummary(prepared, snapshot: try detailsSnapshot(prepared), computedAt: environment.clock.now)
+        return UIPlanSummary(prepared, computedAt: environment.clock.now)
     }
 
     /// Sync Now: local lock and vault lease, plan, then the vCard backup (only
@@ -95,15 +95,9 @@ public struct UIVaultReader: Sendable {
             try session.recordSyncPlan(prepared, command: "sync", startedAt: startedAt)
             return .breaker(trip)
         }
+        // The session records its Apple / markdown split itself (`SessionRecord.sides`).
         let result = try session.executeSync(prepared, command: "sync", startedAt: startedAt)
-        let summary = UISyncSummary(result, plan: prepared.plan)
-        try? UISessionDetail.append(
-            UISessionDetail(
-                startedAt: startedAt, trigger: environment.trigger, apple: summary.apple, markdown: summary.markdown,
-                held: summary.held,
-                holdReason: summary.hold.map(Self.holdReason)),
-            to: prepared.state)
-        return .synced(summary)
+        return .synced(UISyncSummary(result, plan: prepared.plan))
     }
 
     /// Changes `apple_writes` / `stamp_contacts` in `.c2mdsync/config.yaml`
@@ -117,23 +111,8 @@ public struct UIVaultReader: Sendable {
         return UIVaultOptions(config)
     }
 
-    /// Short reason for Activity.
-    static func holdReason(_ hold: AppleHold) -> String {
-        switch hold {
-        case .appleWritesDisabled: "Apple writes off"
-        case .blastRadius(let count, let limit): "\(count) changes over the limit of \(limit)"
-        }
-    }
-
     private func hasSynced(_ session: VaultSession) throws -> Bool {
         try session.storedStatus()?.lastExport != nil
-    }
-
-    /// A Contacts snapshot for review-item details, taken only when review
-    /// items name contacts (`PreparedSync` does not carry its snapshot).
-    private func detailsSnapshot(_ prepared: PreparedSync) throws -> AppleSnapshot? {
-        let wanted = prepared.plan.markdown.reviews.contains { !$0.referencedCardIDs.isEmpty }
-        return wanted ? try prepared.store.snapshot() : nil
     }
 
     /// Exports (vCard backup first, never stamps), like the app's first export.

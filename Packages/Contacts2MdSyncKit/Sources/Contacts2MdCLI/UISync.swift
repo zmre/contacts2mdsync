@@ -296,9 +296,11 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
 
 // MARK: - Activity details
 
-/// Per-side counts of a sync started from the app. `SessionRecord` stores
-/// Apple and markdown changes combined, so the app keeps this split (and the
-/// held count) in the device state's metadata, keyed by start time.
+/// Per-side counts of a sync started from the app before M5. `SessionRecord`
+/// stored Apple and markdown changes combined then, so the app kept this
+/// split (and the held count) in the device state's metadata, keyed by
+/// start time. M5 sessions carry `SessionRecord.sides` instead; these are
+/// still read for older sessions and never written any more.
 public struct UISessionDetail: Codable, Hashable, Sendable {
     public var startedAt: Date
     /// The session's trigger (`GUI`, …), so a detail never attaches to a
@@ -325,8 +327,6 @@ public struct UISessionDetail: Codable, Hashable, Sendable {
 
     /// Metadata key in the device state.
     static let metadataKey = "ui_sync_sessions"
-    /// Details kept (newest).
-    static let limit = 200
 
     /// Whether this detail belongs to `session`.
     func matches(_ session: SessionRecord) -> Bool {
@@ -336,18 +336,6 @@ public struct UISessionDetail: Codable, Hashable, Sendable {
     static func load(_ state: any SyncStateStore) -> [UISessionDetail] {
         guard let data = try? state.metadata(metadataKey) else { return [] }
         return (try? decoder.decode([UISessionDetail].self, from: data)) ?? []
-    }
-
-    static func append(_ detail: UISessionDetail, to state: any SyncStateStore) throws {
-        let kept = (load(state) + [detail]).suffix(limit)
-        try state.setMetadata(metadataKey, try encoder.encode(Array(kept)))
-    }
-
-    private static var encoder: JSONEncoder {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .secondsSince1970
-        encoder.outputFormatting = .sortedKeys
-        return encoder
     }
 
     private static var decoder: JSONDecoder {

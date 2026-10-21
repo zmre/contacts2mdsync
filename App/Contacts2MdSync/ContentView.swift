@@ -2,6 +2,7 @@ import AppKit
 import Contacts2MdCLI
 import SwiftUI
 import SyncEngine
+import SyncTriggers
 
 /// Onboarding until the folder is configured, then the main window.
 struct ContentView: View {
@@ -29,7 +30,7 @@ struct ContentView: View {
                     .frame(minWidth: 560, minHeight: 520)
             }
         }
-        .task { await model.setup.load() }
+        .task { await model.launch() }
     }
 }
 
@@ -121,7 +122,7 @@ struct MainView: View {
 
     /// Every override is confirmed first (docs/ui.md §3, §12).
     @ViewBuilder private func bannerActions(_ banner: UIBanner) -> some View {
-        let busy = model.phase != .idle || !model.setup.isAuthorized
+        let busy = !model.canSync
         switch banner {
         case .breaker(let trip):
             Button("Check Again") { Task { await model.check() } }
@@ -141,23 +142,44 @@ struct MainView: View {
         }
     }
 
+    /// On: live sync on and not paused. Turning it on also ends a pause.
+    private var liveBinding: Binding<Bool> {
+        Binding(
+            get: { model.live.settings.liveSync && !model.live.isPaused },
+            set: { enabled in
+                Task {
+                    if enabled, model.live.settings.liveSync {
+                        await model.live.resume()
+                    } else {
+                        await model.live.setLiveSync(enabled)
+                    }
+                }
+            })
+    }
+
+    private var liveHelp: String {
+        let line = model.live.liveLine
+        return model.live.isHosting
+            ? "\(line): watch Contacts and the notes folder and sync on changes"
+            : "\(line). Starts after the first sync on this Mac."
+    }
+
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .status) {
             StatusIndicator(model: model)
         }
         ToolbarItemGroup(placement: .primaryAction) {
-            Toggle(isOn: .constant(false)) {
+            Toggle(isOn: liveBinding) {
                 Label("Live", systemImage: "dot.radiowaves.left.and.right")
             }
-            .disabled(true)
-            .help("Live sync arrives in M5")
+            .help(liveHelp)
             Button {
                 Task { await model.syncNow() }
             } label: {
                 Label(model.syncTitle, systemImage: "arrow.triangle.2.circlepath")
             }
             .help("\(model.syncTitle) (⌘R)")
-            .disabled(model.phase != .idle || !model.setup.isAuthorized)
+            .disabled(!model.canSync)
             Button {
                 model.isInspectorPresented.toggle()
             } label: {
@@ -197,28 +219,40 @@ private struct Sidebar: View {
     }
 }
 
-/// Toolbar status: idle / checking / syncing, orange when review waits.
+/// Toolbar status: the coordinator's status (Scheduled, Syncing… phase,
+/// Waiting for *device*, Paused: safety breaker, Failed), else reading /
+/// checking, else Idle or the review count (orange).
 private struct StatusIndicator: View {
     let model: AppModel
 
     var body: some View {
         HStack(spacing: 6) {
-            switch model.phase {
-            case .loading, .checking:
-                ProgressView().controlSize(.small)
-                Text(model.phase == .loading ? "Reading…" : "Checking…")
-            case .syncing:
-                ProgressView().controlSize(.small)
-                Text(model.data?.hasSynced == false ? "Exporting…" : "Syncing…")
-            case .idle:
-                MeaningDot(color: color)
-                Text(text)
+            if let live = model.live.state.display() {
+                if live.tone == .busy {
+                    ProgressView().controlSize(.small)
+                } else {
+                    MeaningDot(color: live.tone == .error ? .red : .gray)
+                }
+                Text(live.text)
+            } else {
+                switch model.phase {
+                case .loading, .checking:
+                    ProgressView().controlSize(.small)
+                    Text(model.phase == .loading ? "Reading…" : "Checking…")
+                case .syncing:
+                    ProgressView().controlSize(.small)
+                    Text(model.data?.hasSynced == false ? "Exporting…" : "Syncing…")
+                case .idle:
+                    MeaningDot(color: color)
+                    Text(text)
+                }
             }
         }
         .font(.callout)
         .foregroundStyle(.secondary)
         .monospacedDigit()
         .fixedSize()
+        .help(model.live.state.display()?.detail ?? "")
     }
 
     private var color: Color {

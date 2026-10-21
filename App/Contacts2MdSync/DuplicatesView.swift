@@ -90,6 +90,14 @@ private struct DuplicateDetail: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                } else if group.kind == .mergeRecords {
+                    Text(
+                        "These cards were linked in Contacts after each had its own note. Choose Keep This File "
+                            + "on the note that should stay synced; the other notes are detached, not deleted."
+                    )
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(20)
@@ -99,7 +107,7 @@ private struct DuplicateDetail: View {
         .confirmationDialog(
             confirmTitle, isPresented: isConfirming, titleVisibility: .visible, presenting: confirming
         ) { action in
-            Button(confirmButton(action), role: isDestructive(action) ? .destructive : nil) {
+            Button(confirmButton(action)) {
                 Task { await run(action) }
             }
             Button("Cancel", role: .cancel) {}
@@ -160,7 +168,7 @@ private struct DuplicateDetail: View {
         case .notDuplicates: "Remember that these are different people?"
         case .syncOnly(let member): "Sync only \(memberCard(member)?.heading ?? "this contact")?"
         case .keepSyncID: "Keep the sync id on this file?"
-        case .pickSurvivingFile: "Keep this file?"
+        case .pickSurvivingFile(_, let path): "Keep \(path)?"
         case .ignoreForNow, nil: ""
         }
     }
@@ -187,16 +195,11 @@ private struct DuplicateDetail: View {
             let others = group.cards.indices.filter { $0 != index }.compactMap { group.cards[$0].path }
             return "The other \(others.count == 1 ? "file" : "files") (\(others.joined(separator: ", "))) "
                 + "will be treated as a copy and not synced."
-        case .pickSurvivingFile(let path):
-            return "\(path) stays. The other files move to the Trash when this is applied."
+        case .pickSurvivingFile(_, let path):
+            return group.keepFileMessage(keeping: path, appleWrites: model.vaultOptions?.appleWrites ?? false)
         case .ignoreForNow:
             return ""
         }
-    }
-
-    private func isDestructive(_ action: UIDuplicateAction) -> Bool {
-        if case .pickSurvivingFile = action { return true }
-        return false
     }
 
     private func memberCard(_ member: Int) -> UIDuplicateCard? {
@@ -206,9 +209,7 @@ private struct DuplicateDetail: View {
     private func run(_ action: UIDuplicateAction) async {
         isWorking = true
         defer { isWorking = false }
-        if case .pickSurvivingFile(let path) = action {
-            await model.pickSurvivingFile(itemID: group.id, path: path)
-        } else if let answer = action.decision(itemID: group.id) {
+        if let answer = action.decision(itemID: group.id) {
             await model.decide([answer])
         }
     }
@@ -260,8 +261,7 @@ private struct DuplicateCardView: View {
                     Button("Keep This One") { choose(action) }
                 case .pickSurvivingFile:
                     Button("Keep This File") { choose(action) }
-                        .disabled(!model.capabilities.pickSurvivingFile)
-                        .help(model.capabilities.pickSurvivingFile ? "" : ReviewCapabilities.unsupportedHelp)
+                        .help("Keep this note synced with the contact; the others are detached")
                 case .syncOnly, .notDuplicates, .ignoreForNow:
                     EmptyView()
                 }

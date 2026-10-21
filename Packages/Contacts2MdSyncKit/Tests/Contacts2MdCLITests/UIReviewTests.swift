@@ -94,7 +94,7 @@ struct UIReviewTests {
         #expect(try reader.plan().reviews.isEmpty)
     }
 
-    @Test("Sync Only and Keep This One map to the CLI's choices")
+    @Test("Sync Only, Keep This One and Keep This File map to the CLI's choices")
     func actionChoices() {
         #expect(
             UIDuplicateAction.syncOnly(member: 1).decision(itemID: "dup-1")
@@ -103,7 +103,9 @@ struct UIReviewTests {
             UIDuplicateAction.keepSyncID(path: 0).decision(itemID: "copy-1")
                 == .choice(itemID: "copy-1", choice: "keep:1"))
         #expect(UIDuplicateAction.ignoreForNow.decision(itemID: "dup-1") == nil)
-        #expect(UIDuplicateAction.pickSurvivingFile(path: "a.md").decision(itemID: "merge-1") == nil)
+        #expect(
+            UIDuplicateAction.pickSurvivingFile(index: 1, path: "b.md").decision(itemID: "merge-1")
+                == .choice(itemID: "merge-1", choice: "keep:2"))
     }
 
     @Test("Ignore for Now hides a group until the snooze is cleared")

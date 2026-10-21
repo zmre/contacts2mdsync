@@ -48,6 +48,13 @@ targets:
       - path: Contacts2MdSync
         excludes:
           - "*.entitlements"
+      # Background sync agents (Settings ▸ General), registered with
+      # SMAppService.agent(plistName:); one per interval (UIBackgroundSync).
+      - path: LaunchAgents
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
     dependencies:
       - package: Contacts2MdSyncKit
         product: ContactModel
@@ -59,6 +66,8 @@ targets:
         product: ContactsAdapter
       - package: Contacts2MdSyncKit
         product: VaultIndex
+      - package: Contacts2MdSyncKit
+        product: SyncTriggers
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zmre.contacts2mdsync

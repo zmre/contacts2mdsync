@@ -2,6 +2,7 @@ import AppKit
 import Contacts2MdCLI
 import Foundation
 import Observation
+import SyncTriggers
 
 /// The main window's state: stored data, the latest dry run, review queues
 /// and every user action. Engine work runs off the main actor in the data source.
@@ -15,12 +16,15 @@ final class AppModel {
         case loading
         /// A dry run (reads Contacts).
         case checking
-        /// Sync Now (or the first export on this Mac).
+        /// Sync Now with overrides, or the first export on this Mac (runs
+        /// through the coordinator are `live.state.isRunning`).
         case syncing
     }
 
     let setup = SetupModel()
     let source: any ReviewDataSource
+    /// The live-sync coordinator for the open folder (after the first sync).
+    let live: LiveSyncController
     /// Start of "This Session" on the Overview.
     let sessionStart = Date()
 
@@ -31,6 +35,8 @@ final class AppModel {
     private(set) var phase = Phase.idle
     /// What the last finished Sync Now did.
     private(set) var lastSync: UISyncSummary?
+    /// Changes the last run (Sync Now or a live run) could not write.
+    private(set) var lastFailures: [String] = []
     /// How the last Sync Now ended (lease, lock and breaker banners).
     private(set) var lastOutcome: UISyncOutcome?
     private(set) var snoozed: Set<String> = []
@@ -40,11 +46,18 @@ final class AppModel {
     var isInspectorPresented = false
 
     @ObservationIgnored private var loadedRoot: URL?
+    /// `start()` in progress for this folder (the window and launch both call it).
+    @ObservationIgnored private var startingRoot: URL?
+    @ObservationIgnored private var launched = false
+    /// The coordinator run `liveRunEnded` last handled.
+    @ObservationIgnored private var handledSummary: SyncRunSummary?
     /// Rescan when the app becomes active again (after Open in Contacts to Link).
     @ObservationIgnored private var rescanOnActivate = false
 
-    init(source: any ReviewDataSource = LiveReviewDataSource()) {
+    init(source: any ReviewDataSource = LiveReviewDataSource(), live: LiveSyncController = LiveSyncController()) {
         self.source = source
+        self.live = live
+        live.onRunEnded = { [weak self] in await self?.liveRunEnded() }
     }
 
     var rootURL: URL? { setup.rootURL }
@@ -55,6 +68,12 @@ final class AppModel {
     var syncTitle: String { capabilities.twoWaySync ? "Sync Now" : "Export Now" }
 
     var counts: UIReviewCounts { queues?.counts ?? UIReviewCounts() }
+
+    /// A sync is in progress (Sync Now with overrides, first export, or a coordinator run).
+    var isSyncing: Bool { phase == .syncing || live.state.isRunning }
+
+    /// Sync Now / Check for Changes can start.
+    var canSync: Bool { isConfigured && setup.isAuthorized && phase == .idle && !live.state.isRunning }
 
     var overview: UIOverview? {
         data.map { UIOverview(data: $0, plan: plan, counts: counts, sessionStart: sessionStart) }
@@ -85,19 +104,66 @@ final class AppModel {
 
     // MARK: - Loading
 
-    /// Loads stored data, then runs a dry run (when Contacts access is granted).
+    /// App launch (also when only the menu bar is shown): access, the saved
+    /// folder, then `start()`.
+    func launch() async {
+        guard !launched else {
+            await setup.refreshAccess()
+            return
+        }
+        launched = true
+        await setup.load()
+        await start()
+    }
+
+    /// Loads stored data, hosts live sync once this Mac has synced, then
+    /// runs a dry run (when Contacts access is granted). With live sync on,
+    /// a newly started coordinator runs the launch catch-up instead; the
+    /// dry run follows when it finishes.
     func start() async {
-        guard let root = rootURL, isConfigured else { return }
+        guard let root = rootURL, isConfigured, startingRoot != root else { return }
+        startingRoot = root
+        defer { startingRoot = nil }
         if loadedRoot != root {
+            if loadedRoot != nil { await live.shutdown() }
             loadedRoot = root
             data = nil
             plan = nil
             queues = nil
             lastSync = nil
             lastOutcome = nil
+            lastFailures = []
             libraryRows = []
             snoozed = []
             inspected = nil
+        }
+        await reload()
+        let catchingUp = await hostLiveSync() && live.effectiveSettings.liveSync
+        if !catchingUp { await check() }
+    }
+
+    /// Starts the coordinator once the folder is configured, Contacts access
+    /// is granted and this Mac has synced (a two-way run needs a merge base).
+    /// Returns `true` when it was started now.
+    @discardableResult
+    private func hostLiveSync() async -> Bool {
+        guard let root = rootURL, root == loadedRoot, setup.isAuthorized, data?.hasSynced == true else { return false }
+        return await live.start(root: root)
+    }
+
+    /// Stops live sync (quit).
+    func shutdown() async { await live.shutdown() }
+
+    /// A coordinator run finished or was blocked: fresh stored data, then a dry run.
+    private func liveRunEnded() async {
+        if let summary = live.state.lastSummary, summary != handledSummary {
+            // A run finished (not just blocked): Ignore for Now lasts until the next sync.
+            handledSummary = summary
+            lastFailures = summary.failures
+            snoozed = []
+            if summary.kind == .manual, !summary.failures.isEmpty {
+                errorMessage = "Some changes could not be written:\n" + summary.failures.joined(separator: "\n")
+            }
         }
         await reload()
         await check()
@@ -121,7 +187,8 @@ final class AppModel {
 
     /// Dry run: what the next sync would do; refreshes the review queue.
     func check() async {
-        guard let root = rootURL, setup.isAuthorized, phase == .idle else { return }
+        // Never next to a coordinator run: it re-checks when the run ends.
+        guard let root = rootURL, setup.isAuthorized, phase == .idle, !live.state.isRunning else { return }
         phase = .checking
         do {
             let result = try await source.plan(root: root)
@@ -136,11 +203,19 @@ final class AppModel {
     }
 
     /// Sync Now (⌘R): local lock and lease, plan, vCard backup before any
-    /// Apple write, then Contacts and notes. `request` carries the overrides
-    /// the banners offer (Apply Anyway, Resume Anyway, Take Over), each
-    /// confirmed by the user first.
+    /// Apple write, then Contacts and notes. Once live sync is hosted, plain
+    /// Sync Now goes through the coordinator (`syncNow()`: full, never
+    /// debounced, serialized with live runs). `request` carries the
+    /// overrides the banners offer (Apply Anyway, Resume Anyway, Take
+    /// Over), each confirmed by the user first; those, and the first export
+    /// on this Mac, run directly.
     func syncNow(_ request: UISyncRequest = UISyncRequest()) async {
         guard let root = rootURL, setup.isAuthorized, phase == .idle else { return }
+        if request == UISyncRequest(), live.isHosting {
+            lastOutcome = nil
+            await live.syncNow()
+            return
+        }
         phase = .syncing
         snoozed = []
         do {
@@ -150,12 +225,15 @@ final class AppModel {
             lastOutcome = outcome
             if let summary = outcome.summary {
                 lastSync = summary
+                lastFailures = summary.failures
                 if !summary.failures.isEmpty {
                     errorMessage = "Some changes could not be written:\n" + summary.failures.joined(separator: "\n")
                 }
             }
             await reload()
-            await check()
+            // The first export makes this Mac ready for live sync.
+            let catchingUp = await hostLiveSync() && live.effectiveSettings.liveSync
+            if !catchingUp { await check() }
         } catch {
             phase = .idle
             errorMessage = Self.describe(error)
@@ -204,10 +282,6 @@ final class AppModel {
         await decide(paths.map { .addContact(path: $0) })
     }
 
-    func pickSurvivingFile(itemID: String, path: String) async {
-        await perform { try await self.source.pickSurvivingFile(itemID: itemID, path: path, root: $0) }
-    }
-
     /// Writes the vault's sync switches, then re-checks (held counts change).
     func setVaultOptions(_ options: UIVaultOptions) async {
         await perform { try await self.source.setVaultOptions(options, root: $0) }
@@ -240,8 +314,19 @@ final class AppModel {
         queues = data.map { UIReviewQueues(data: $0, plan: plan, snoozed: snoozed) }
     }
 
-    // MARK: - Finder and Contacts
+    /// Engine errors describe themselves; Cocoa errors use their localized text.
+    static func describe(_ error: any Error) -> String {
+        let domain = (error as NSError).domain
+        if domain == NSCocoaErrorDomain || domain == NSPOSIXErrorDomain || domain == NSURLErrorDomain {
+            return error.localizedDescription
+        }
+        return String(describing: error)
+    }
+}
 
+// MARK: - Finder and Contacts
+
+extension AppModel {
     /// Opens each card in Contacts.app; rescans when the app is active again.
     func openInContacts(cardIDs: [String]) {
         let urls = UIFormat.contactsURLs(cardIDs: cardIDs)
@@ -278,14 +363,5 @@ final class AppModel {
     func inspect(_ item: InspectorItem?, open: Bool = false) {
         inspected = item
         if open, item != nil { isInspectorPresented = true }
-    }
-
-    /// Engine errors describe themselves; Cocoa errors use their localized text.
-    static func describe(_ error: any Error) -> String {
-        let domain = (error as NSError).domain
-        if domain == NSCocoaErrorDomain || domain == NSPOSIXErrorDomain || domain == NSURLErrorDomain {
-            return error.localizedDescription
-        }
-        return String(describing: error)
     }
 }

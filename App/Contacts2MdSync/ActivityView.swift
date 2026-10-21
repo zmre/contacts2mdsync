@@ -2,8 +2,9 @@ import Contacts2MdCLI
 import SwiftUI
 
 /// Activity (docs/ui.md §8): runs from this Mac's state (syncs and exports
-/// from the app, the command line and schedules; previews on request), plus
-/// contact notes that could not be read.
+/// from the app, live sync — Live, Launch, Wake, Sweep, Rescan — the command
+/// line and schedules; previews on request), plus contact notes that could
+/// not be read.
 struct ActivityView: View {
     let model: AppModel
     @State private var showPreviews = false
@@ -20,7 +21,7 @@ struct ActivityView: View {
             if rows.isEmpty {
                 ContentUnavailableView(
                     "No Activity Yet", systemImage: "clock.arrow.circlepath",
-                    description: Text("Syncs from this Mac, the app and the command line, appear here."))
+                    description: Text("Syncs from this Mac, the app, live sync and the command line, appear here."))
             } else {
                 table
             }
@@ -45,6 +46,7 @@ struct ActivityView: View {
             TableColumn("Device") { row in Text(row.deviceName).lineLimit(1) }
             TableColumn("Trigger") { row in
                 Text(row.isPreview ? "\(row.trigger) · Preview" : row.trigger).foregroundStyle(.secondary)
+                    .help(readHelp(row))
             }
             TableColumn("Contacts C/U/D") { row in counts(row.contacts, combined: row.combined) }
                 .width(min: 90, ideal: 100)
@@ -66,8 +68,14 @@ struct ActivityView: View {
         }
     }
 
-    /// Runs recorded without the Apple / markdown split (command line,
-    /// schedules) show "—" with both sides' total in the tooltip.
+    /// How the run read Contacts (M5 syncs record it).
+    private func readHelp(_ row: UIActivityRow) -> String {
+        guard let read = row.appleRead else { return "" }
+        return "Contacts read: " + (read == "full" ? "full snapshot" : "changes only")
+    }
+
+    /// Runs recorded without the Apple / markdown split (command-line syncs
+    /// from before M5) show "—" with both sides' total in the tooltip.
     private func counts(_ counts: UIChangeCounts?, combined: UIChangeCounts?) -> some View {
         Text(counts?.text ?? "—")
             .monospacedDigit()
