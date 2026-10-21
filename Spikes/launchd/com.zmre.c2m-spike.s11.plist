@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  S11 sample LaunchAgent. Runs `c2m-spike s11-headless` at load and every 5 minutes.
+  Install:   cp Spikes/launchd/com.zmre.c2m-spike.s11.plist ~/Library/LaunchAgents/
+             launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.zmre.c2m-spike.s11.plist
+  Run now:   launchctl kickstart -k gui/$(id -u)/com.zmre.c2m-spike.s11
+  Remove:    launchctl bootout gui/$(id -u)/com.zmre.c2m-spike.s11 && rm ~/Library/LaunchAgents/com.zmre.c2m-spike.s11.plist
+  Edit the binary path if your checkout lives elsewhere. Add <string>- -request</string> (no space) to test prompting.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.zmre.c2m-spike.s11</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/pwalsh/src/sideprojects/mbr-apple-contact-sync/Spikes/.build/debug/c2m-spike</string>
+		<string>s11-headless</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>StandardOutPath</key>
+	<string>/tmp/c2m-spike-s11-launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/tmp/c2m-spike-s11-launchd.log</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

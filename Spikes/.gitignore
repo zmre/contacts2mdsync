@@ -1,0 +1,6 @@
+.build/
+.swiftpm/
+# Local, machine-specific spike outputs (identifiers, tokens, hashes).
+results/*.json
+results/*.bin
+# results/s5-*.md tables are meant to be kept and turned into fixtures.
