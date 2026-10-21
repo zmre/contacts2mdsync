@@ -160,6 +160,38 @@ extension GRDBSyncStateStore {
         }
     }
 
+    // MARK: - Unapplyable writes
+
+    public func loadUnapplyable() throws -> [UnapplyableEntry] {
+        try queue.read { database in
+            let rows = try Row.fetchAll(database, sql: "SELECT * FROM unapplyable ORDER BY record_id, card_id, field")
+            return rows.compactMap { row in
+                let record: String = row["record_id"]
+                guard let id = UUID(uuidString: record) else { return nil }
+                return UnapplyableEntry(
+                    recordID: id, cardID: row["card_id"], field: row["field"], attempted: row["attempted"],
+                    observed: row["observed"])
+            }
+        }
+    }
+
+    public func saveUnapplyable(_ entries: [UnapplyableEntry]) throws {
+        try queue.write { database in
+            try database.execute(sql: "DELETE FROM unapplyable")
+            for entry in entries {
+                try database.execute(
+                    sql: """
+                        INSERT OR REPLACE INTO unapplyable
+                        (record_id, card_id, field, value_hash, attempted, observed) VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                    arguments: [
+                        entry.recordID.uuidString.lowercased(), entry.cardID, entry.field,
+                        FieldHash.of([entry.attempted]), entry.attempted, entry.observed,
+                    ])
+            }
+        }
+    }
+
     // MARK: - Sessions
 
     public func appendSession(_ session: SessionRecord) throws {

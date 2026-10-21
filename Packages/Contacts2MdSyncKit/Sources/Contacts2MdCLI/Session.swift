@@ -10,6 +10,8 @@ struct Session {
     let environment: CLIEnvironment
     let command: String
     let startedAt: Date
+    /// `--json` collector.
+    let json: JSONReport?
 
     init(options: RootOptions, environment: CLIEnvironment, command: String) {
         var environment = environment
@@ -20,12 +22,13 @@ struct Session {
         self.environment = environment
         self.command = command
         self.startedAt = environment.clock.now
+        self.json = options.json ? JSONReport(command: command, startedAt: environment.clock.now) : nil
     }
 
     var report: Reporter {
         Reporter(
             output: environment.output, quiet: options.quiet, verbose: options.verbose,
-            timeZone: environment.timeZone)
+            timeZone: environment.timeZone, json: json)
     }
 
     /// The run cannot start (exit 3).
@@ -33,8 +36,15 @@ struct Session {
         let message: String
     }
 
-    /// Opens the root, prints the header, runs `body`, maps errors to exit codes.
+    /// Opens the root, prints the header, runs `body`, maps errors to exit
+    /// codes; with `--json`, prints the collected document last.
     func run(_ body: (ResolvedRoot) throws -> CLIExitCode) -> CLIExitCode {
+        let code = runBody(body)
+        if let json { environment.output.line(json.render(exitCode: code.rawValue)) }
+        return code
+    }
+
+    private func runBody(_ body: (ResolvedRoot) throws -> CLIExitCode) -> CLIExitCode {
         let root: ResolvedRoot
         do {
             root = try environment.rootAccess.resolve(options.rootPath)
@@ -46,6 +56,7 @@ struct Session {
         defer { root.close() }
         let device = (try? environment.device())?.name ?? "?"
         let shownRoot = options.rootPath ?? root.path
+        json?.header(device: device, root: shownRoot)
         report.info("contacts2md \(command)  \(report.timestamp(startedAt))  device=\(device)  root=\(shownRoot)")
         do {
             guard environment.isDirectory(root.url) else {
@@ -58,6 +69,12 @@ struct Session {
         } catch let error as RootAccessError {
             report.error(error.message)
             return .notRunnable
+        } catch let error as VaultNotReady {
+            report.error(error.description)
+            return .notRunnable
+        } catch let error as SyncError {
+            report.error(error.description)
+            return .breaker
         } catch ContactStoreError.accessDenied {
             report.error(ContactStoreError.accessDenied.description)
             return .notRunnable
@@ -96,10 +113,27 @@ struct Session {
                         + "  default_folder=\(config.defaultFolder)  region=\(config.defaultRegion ?? "-")")
                 let last = records.lastExport.map(report.timestamp) ?? "never"
                 report.info("export   last \(last)  records=\(records.records.count)")
+                let stored = try VaultSession(root: root.url, environment: environment).storedStatus()
+                if let stored {
+                    report.info(
+                        "sync     apple_writes=\(stored.appleWritesEnabled ? "enabled" : "disabled")"
+                            + "  stamp_contacts=\(stored.stampContacts)  devices=\(stored.deviceCount)")
+                    if let lease = stored.lease {
+                        report.info(
+                            "lease    \(lease.deviceName) until \(report.timestamp(lease.expiresAt))"
+                                + (lease.expiresAt < environment.clock.now ? " (expired)" : ""))
+                    }
+                    if let warning = stored.identityWarning { report.warning("identity", warning) }
+                }
                 let pending = try opened.loadPending()
-                pendingCount = pending.items.count
+                pendingCount = pending.items.filter(\.item.needsDecision).count
                 let asOf = pending.computedAt.map(report.timestamp) ?? "never"
-                report.info("review   \(pendingCount) pending (as of \(asOf); `contacts2md review list`)")
+                let breakdown =
+                    stored.map {
+                        " — \($0.conflicts) conflicts, \($0.pendingDeletes) deletions, \($0.markdownOnly) markdown-only"
+                    } ?? ""
+                report.info(
+                    "review   \(pendingCount) pending (as of \(asOf); `contacts2md review list`)\(breakdown)")
             } else {
                 report.info("vault    not configured (run `contacts2md export --yes` or the app's first export)")
             }

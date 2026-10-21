@@ -123,6 +123,43 @@ public protocol SyncStateStore: RecordMapStore {
     func recentSessions(limit: Int) throws -> [SessionRecord]
     func metadata(_ key: String) throws -> Data?
     func setMetadata(_ key: String, _ value: Data?) throws
+    /// Writes cards refused (M3 sync).
+    func loadUnapplyable() throws -> [UnapplyableEntry]
+    func saveUnapplyable(_ entries: [UnapplyableEntry]) throws
+}
+
+extension SyncStateStore {
+    /// Records whose Apple contact went missing, with when that was first
+    /// seen (the Apple delete rail's two-snapshot rule), in `meta`.
+    public func loadVanished() throws -> [UUID: Date] {
+        guard let data = try metadata("vanished_records"),
+            let raw = try? JSONDecoder().decode([String: Double].self, from: data)
+        else { return [:] }
+        return Dictionary(
+            raw.compactMap { key, value in UUID(uuidString: key).map { ($0, Date(timeIntervalSince1970: value)) } },
+            uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Cached image hashes (`meta`), so unchanged images are not re-read.
+    public func loadImageHashes() throws -> [String: ImageHashEntry] {
+        guard let data = try metadata("image_hashes") else { return [:] }
+        return (try? JSONDecoder().decode([String: ImageHashEntry].self, from: data)) ?? [:]
+    }
+
+    public func saveImageHashes(_ hashes: [String: ImageHashEntry]) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        try setMetadata("image_hashes", hashes.isEmpty ? nil : try encoder.encode(hashes))
+    }
+
+    public func saveVanished(_ vanished: [UUID: Date]) throws {
+        let raw = Dictionary(
+            vanished.map { ($0.key.uuidString.lowercased(), $0.value.timeIntervalSince1970) },
+            uniquingKeysWith: { first, _ in first })
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        try setMetadata("vanished_records", raw.isEmpty ? nil : try encoder.encode(raw))
+    }
 }
 
 /// In-memory `SyncStateStore` (tests, dry runs).
@@ -136,6 +173,7 @@ public final class InMemorySyncStateStore: SyncStateStore {
         var problems: [String: String] = [:]
         var sessions: [SessionRecord] = []
         var metadata: [String: Data] = [:]
+        var unapplyable: [UnapplyableEntry] = []
         var saves = 0
     }
 
@@ -183,4 +221,10 @@ public final class InMemorySyncStateStore: SyncStateStore {
     public func metadata(_ key: String) throws -> Data? { state.withLock { $0.metadata[key] } }
 
     public func setMetadata(_ key: String, _ value: Data?) throws { state.withLock { $0.metadata[key] = value } }
+
+    public func loadUnapplyable() throws -> [UnapplyableEntry] { state.withLock { $0.unapplyable } }
+
+    public func saveUnapplyable(_ entries: [UnapplyableEntry]) throws {
+        state.withLock { $0.unapplyable = entries }
+    }
 }

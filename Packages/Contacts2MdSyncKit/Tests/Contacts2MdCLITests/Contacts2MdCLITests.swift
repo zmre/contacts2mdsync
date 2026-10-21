@@ -20,10 +20,16 @@ final class CLIHarness: Sendable {
     let vault: InMemoryVault
     let stateDirectory: URL
     let ids = SequentialIDGenerator()
+    let device: DeviceIdentity
+    let clock = TestClock(start: Date(timeIntervalSince1970: 1_800_000_000))
 
-    init(store: FakeContactStore = Fixtures.store(), vault: InMemoryVault = InMemoryVault()) {
+    init(
+        store: FakeContactStore = Fixtures.store(), vault: InMemoryVault = InMemoryVault(),
+        device: DeviceIdentity = DeviceIdentity(id: "00000000-0000-4000-8000-00000000d001", name: "Test Mac")
+    ) {
         self.store = store
         self.vault = vault
+        self.device = device
         stateDirectory = FileManager.default.temporaryDirectory.appending(path: "c2m-cli-\(UUID().uuidString)")
     }
 
@@ -34,6 +40,7 @@ final class CLIHarness: Sendable {
     ) -> CLIEnvironment {
         let store = self.store
         let vault = self.vault
+        let device = self.device
         return CLIEnvironment(
             makeStore: { store },
             makeVault: { _ in vault },
@@ -41,11 +48,15 @@ final class CLIHarness: Sendable {
             stateDirectory: stateDirectory,
             makeKeyer: { PhoneNumberKitKeyer(defaultRegion: $0) },
             ids: ids,
-            clock: FixedClock(Date(timeIntervalSince1970: 1_800_000_000)),
+            clock: clock,
             timeZone: TimeZone(identifier: "UTC") ?? .current,
             fallbackRegion: "US",
             output: output,
-            rootAccess: rootAccess
+            device: { device },
+            rootAccess: rootAccess,
+            lockWait: 0,
+            leaseSettle: 0,
+            sleep: { _ in }
         )
     }
 
@@ -77,7 +88,8 @@ struct CLITests {
         #expect(Contacts2MdCLI.isCLIInvocation(["--help"]))
         #expect(!Contacts2MdCLI.isCLIInvocation([]))
         #expect(!Contacts2MdCLI.isCLIInvocation(["-NSDocumentRevisionsDebugMode", "YES"]))
-        #expect(!Contacts2MdCLI.isCLIInvocation(["sync"]))  // M3
+        #expect(Contacts2MdCLI.isCLIInvocation(["sync"]))
+        #expect(Contacts2MdCLI.isCLIInvocation(["config"]))
         #expect(Contacts2MdCLI.isCLIInvocation(["review", "list"]))
     }
 

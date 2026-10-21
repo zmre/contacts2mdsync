@@ -10,6 +10,7 @@ extension Session {
             let session = VaultSession(root: root.url, environment: environment)
             let prepared = try session.prepare(request, forWriting: write)
             let plan = prepared.plan
+            json?.reviews(plan.reviews)
             for problem in prepared.decisionProblems { report.warning("decision", problem) }
             guard write else {
                 report.plan(plan, stamping: stamp)

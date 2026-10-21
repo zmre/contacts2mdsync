@@ -42,38 +42,53 @@ public struct CNContactStoreAdapter: ContactStore {
         return try snapshot().contacts.filter { wanted.contains($0.unifiedID) }
     }
 
+    /// Saves `batch` card by card (never a unified contact, architecture §6)
+    /// in one `CNSaveRequest` tagged with `author`. If that request fails,
+    /// each card's operations (and each create) are retried in their own
+    /// request, so one rejected card does not sink the rest.
     public func apply(_ batch: AppleWriteBatch, author: String) throws -> AppleWriteResult {
         try Self.ensureAccess()
         let store = CNContactStore()
-        let request = CNSaveRequest()
-        request.transactionAuthor = author
-        var staged: [AppleWriteOperation] = []
-        var failed: [AppleWriteFailure] = []
-        for operation in batch.operations {
-            switch operation {
-            case .stamp(let cardID, let id):
-                do {
-                    let card = try Self.card(cardID, in: store)
-                    let mutable = card.mutableCopy() as! CNMutableContact  // swiftlint:disable:this force_cast
-                    var urls = mutable.urlAddresses.filter { !SyncStamp.isStamp($0.value as String) }
-                    urls.append(CNLabeledValue(label: SyncStamp.label, value: SyncStamp.url(for: id) as NSString))
-                    mutable.urlAddresses = urls
-                    request.update(mutable)
-                    staged.append(operation)
-                } catch {
-                    failed.append(AppleWriteFailure(operation: operation, message: String(describing: error)))
-                }
+        let writer = CardWriter(store: store, includeNote: Self.notesAvailable(in: store))
+        guard !batch.operations.isEmpty else { return AppleWriteResult(applied: []) }
+        do {
+            let saved = try writer.save(batch.operations, author: author)
+            return AppleWriteResult(applied: batch.operations, createdCardIDs: saved.created)
+        } catch {
+            guard Self.units(of: batch.operations).count > 1 else {
+                let message = String(describing: error)
+                return AppleWriteResult(
+                    applied: [], failed: batch.operations.map { AppleWriteFailure(operation: $0, message: message) })
             }
         }
-        guard !staged.isEmpty else { return AppleWriteResult(applied: [], failed: failed) }
-        do {
-            try store.execute(request)
-        } catch {
-            let message = String(describing: error)
-            return AppleWriteResult(
-                applied: [], failed: failed + staged.map { AppleWriteFailure(operation: $0, message: message) })
+        var result = AppleWriteResult(applied: [])
+        for unit in Self.units(of: batch.operations) {
+            do {
+                let saved = try writer.save(unit, author: author)
+                result.applied += unit
+                result.createdCardIDs.merge(saved.created) { _, new in new }
+            } catch {
+                let message = String(describing: error)
+                result.failed += unit.map { AppleWriteFailure(operation: $0, message: message) }
+            }
         }
-        return AppleWriteResult(applied: staged, failed: failed)
+        return result
+    }
+
+    /// Operations grouped by target card (in first-seen order); each create alone.
+    static func units(of operations: [AppleWriteOperation]) -> [[AppleWriteOperation]] {
+        var order: [String] = []
+        var byCard: [String: [AppleWriteOperation]] = [:]
+        var creates: [[AppleWriteOperation]] = []
+        for operation in operations {
+            guard let cardID = operation.cardID else {
+                creates.append([operation])
+                continue
+            }
+            if byCard[cardID] == nil { order.append(cardID) }
+            byCard[cardID, default: []].append(operation)
+        }
+        return order.compactMap { byCard[$0] } + creates
     }
 
     public func changes(since token: Data?, excluding authors: [String]) throws -> HistoryResult {

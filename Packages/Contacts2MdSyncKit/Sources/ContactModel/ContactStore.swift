@@ -224,10 +224,34 @@ public enum SyncStamp {
     }
 }
 
-/// One Apple-side write. M1 implements only `.stamp`.
+/// One Apple-side write. Every write targets an underlying card fetched
+/// with `unifyResults = false`, never a unified contact: saving a unified
+/// mutable copy writes to every linked card (spike S4).
 public enum AppleWriteOperation: Hashable, Sendable {
     /// Add `x-c2mdsync:<id>` (label `c2mdsync`) to `cardID`, replacing any other stamp.
     case stamp(cardID: String, id: UUID)
+    /// Remove every `x-c2mdsync:` stamp from `cardID` (unlink).
+    case removeStamp(cardID: String)
+    /// Field edits on one card (all edits for a card in one operation).
+    case update(cardID: String, edits: [CardEdit])
+    /// Create a contact (a single card) in a container.
+    case create(NewAppleContact)
+    /// Delete one card (confirmed deletes only).
+    case delete(cardID: String)
+    /// Add a card to a group (same container).
+    case addMember(cardID: String, groupID: String)
+    /// Remove a card from a group (no-op when it is not a member).
+    case removeMember(cardID: String, groupID: String)
+
+    /// The card the operation targets (`nil` for creates).
+    public var cardID: String? {
+        switch self {
+        case .stamp(let id, _), .removeStamp(let id), .update(let id, _), .delete(let id), .addMember(let id, _),
+            .removeMember(let id, _):
+            id
+        case .create: nil
+        }
+    }
 }
 
 /// A batch of Apple writes saved together.
@@ -244,11 +268,16 @@ public struct AppleWriteResult: Hashable, Sendable {
     public var applied: [AppleWriteOperation]
     /// Operations that failed, with a message each.
     public var failed: [AppleWriteFailure]
+    /// Card ids of created contacts, by `NewAppleContact.recordID`.
+    public var createdCardIDs: [UUID: String]
 
     /// Creates a result.
-    public init(applied: [AppleWriteOperation], failed: [AppleWriteFailure] = []) {
+    public init(
+        applied: [AppleWriteOperation], failed: [AppleWriteFailure] = [], createdCardIDs: [UUID: String] = [:]
+    ) {
         self.applied = applied
         self.failed = failed
+        self.createdCardIDs = createdCardIDs
     }
 }
 

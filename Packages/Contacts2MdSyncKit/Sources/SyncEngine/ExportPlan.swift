@@ -42,6 +42,10 @@ public enum FileChangeKind: String, Hashable, Sendable {
     case adopt
     /// Only the relative `image:` path changed because the note moved.
     case pathFixup
+    /// `c2mdsync.status: detached` is set: the note is no longer synced.
+    case detach
+    /// The note gains its `c2mdsync.id` after its Apple contact is created.
+    case link
 }
 
 /// One markdown file to create or update. The bytes are final: already
@@ -59,6 +63,8 @@ public struct FileChange: Hashable, Sendable {
     public var kind: FileChangeKind
     /// Why (adoptions: the match reasons).
     public var detail: String?
+    /// Written only if the Apple contact for `recordID` was created (opt-ins).
+    public var requiresCreatedContact = false
 }
 
 /// A contact photo sidecar to write.
@@ -120,9 +126,21 @@ public enum ReviewItem: Codable, Hashable, Sendable {
     case unreadableFile(path: String, problem: String)
     /// iCloud placeholders with unknown content: new notes held back.
     case undownloaded(paths: [String])
+    /// A field changed differently on both sides (sync): both keep their value.
+    case conflict(SyncConflict)
+    /// The contact of a synced note is gone from Contacts (two snapshots at
+    /// least 10 minutes apart, no re-match). The note is kept until decided.
+    case appleDeleted(id: UUID, title: String, path: String)
+    /// A synced note was deleted (sync): the contact is kept until decided.
+    /// Same id as `missingFile` for the same record.
+    case markdownDeleted(contact: ContactRef, id: UUID, title: String, lastPath: String?)
+    /// A contact note without `c2mdsync.id` that matches no contact. Never
+    /// acted on unless the user opts it in (`add`); informational only.
+    case markdownOnly(path: String, title: String)
 
     /// Stable id: `<kind>-<10 hex>`.
     public var id: String {
+        if case .conflict(let conflict) = self { return conflict.id }
         let (prefix, basis): (String, String) =
             switch self {
             case .duplicateCluster(let members, _):
@@ -134,6 +152,10 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             case .missingFile(_, let id, _): ("missing", id.uuidString.lowercased())
             case .unreadableFile(let path, _): ("invalid", path)
             case .undownloaded: ("icloud", "undownloaded")
+            case .conflict(let conflict): ("conflict", conflict.id)
+            case .appleDeleted(let id, _, _): ("deleted", id.uuidString.lowercased())
+            case .markdownDeleted(_, let id, _, _): ("missing", id.uuidString.lowercased())
+            case .markdownOnly(let path, _): ("mdonly", path)
             }
         return prefix + "-" + String(hexSHA256(Data(basis.utf8)).prefix(10))
     }
@@ -145,7 +167,18 @@ public enum ReviewItem: Codable, Hashable, Sendable {
         case .possibleMatch: ["adopt", "distinct", "ignore"]
         case .duplicateSyncID(_, let paths): paths.indices.map { "keep:\($0 + 1)" }
         case .mergeRecords, .missingFile, .unreadableFile, .undownloaded: []
+        case .conflict(let conflict): conflict.options.map(\.rawValue)
+        case .appleDeleted: ["trash", "keep", "restore"]
+        case .markdownDeleted: ["restore", "unlink", "delete-contact"]
+        case .markdownOnly: ["add", "ignore"]
         }
+    }
+
+    /// `false` for informational items (markdown-only notes) that never make
+    /// a run "need review" (exit code 1).
+    public var needsDecision: Bool {
+        if case .markdownOnly = self { return false }
+        return true
     }
 
     /// Errors turning a choice into decisions.
@@ -185,16 +218,41 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             return make(
                 .syncOnly, contacts: [keep] + members.enumerated().filter { $0.offset != number }.map(\.element.ref))
         case .possibleMatch(let contact, let path, _, _):
-            switch choice {
-            case "adopt": return make(.adopt, contacts: [contact], path: path)
-            case "distinct": return make(.distinctPeople, contacts: [contact], path: path)
-            default: return make(.ignoreCandidate, path: path)
-            }
+            let kind: Decision.Kind =
+                choice == "adopt" ? .adopt : choice == "distinct" ? .distinctPeople : .ignoreCandidate
+            return make(kind, contacts: kind == .ignoreCandidate ? [] : [contact], path: path)
         case .duplicateSyncID(let id, let paths):
             return make(.duplicateIDKeep, path: paths[number ?? 0], syncID: id)
-        case .mergeRecords, .missingFile, .unreadableFile, .undownloaded:
-            throw ChoiceError.notDecidable(id)
+        default:
+            // Undecidable items have no choices and were rejected above.
+            return syncDecisions(for: choice, device: device, at: date)
         }
+    }
+
+    /// Decisions for the two-way sync items (conflicts, delete queues, opt-ins).
+    private func syncDecisions(for choice: String, device: DeviceIdentity, at date: Date) -> [Decision] {
+        let decision: Decision
+        switch self {
+        case .conflict(let conflict):
+            decision = Decision(
+                kind: .resolveConflict, createdAt: date, device: device, syncID: conflict.recordID, itemID: id,
+                choice: choice, appleHash: conflict.appleHash, markdownHash: conflict.markdownHash)
+        case .appleDeleted(let recordID, _, let path):
+            decision = Decision(
+                kind: .appleDelete, createdAt: date, device: device, path: path, syncID: recordID, itemID: id,
+                choice: choice)
+        case .markdownDeleted(let contact, let recordID, _, let path):
+            decision = Decision(
+                kind: .markdownDelete, createdAt: date, device: device, contacts: [contact], path: path,
+                syncID: recordID, itemID: id, choice: choice)
+        case .markdownOnly(let path, _):
+            decision = Decision(
+                kind: choice == "add" ? .createContact : .ignoreCandidate, createdAt: date, device: device,
+                path: path, itemID: id)
+        default:
+            return []
+        }
+        return [decision]
     }
 
     /// One-line description for lists.
@@ -218,6 +276,14 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             return "\(path): \(problem)"
         case .undownloaded(let paths):
             return "\(paths.count) notes are iCloud placeholders not downloaded yet"
+        case .conflict(let conflict):
+            return conflict.summary
+        case .appleDeleted(_, let title, let path):
+            return "\"\(title)\" was deleted in Contacts; \(path) kept"
+        case .markdownDeleted(_, _, let title, let lastPath):
+            return "\"\(title)\": note \(lastPath ?? "") was deleted; the contact is kept"
+        case .markdownOnly(let path, let title):
+            return "\(path) (\"\(title)\") is not in Contacts"
         }
     }
 }
@@ -303,5 +369,7 @@ public struct ExportPlan: Sendable {
 
     /// Whether anything contact-related was skipped or needs a decision
     /// (exit code 1). Invalid non-contact notes never count.
-    public var needsReview: Bool { !reviews.isEmpty || skipped.contains(where: \.needsReview) }
+    public var needsReview: Bool {
+        reviews.contains(where: \.needsDecision) || skipped.contains(where: \.needsReview)
+    }
 }

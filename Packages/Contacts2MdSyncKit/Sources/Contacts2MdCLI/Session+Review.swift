@@ -26,7 +26,7 @@ extension Session {
                 report.info(
                     "note     \(pending.items.count - open.count) decided items take effect on the next plan/export")
             }
-            return open.isEmpty ? .success : .needsReview
+            return open.contains(where: \.item.needsDecision) ? .needsReview : .success
         }
     }
 

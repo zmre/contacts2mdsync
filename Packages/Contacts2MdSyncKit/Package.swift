@@ -10,7 +10,7 @@
 //                                       -> ContactsAdapter -> ContactModel, ContactsShim
 //                                       -> PhoneNumberKeys -> ContactModel, PhoneNumberKit
 //                                       -> ArgumentParser
-//   SyncTestSupport -> SyncEngine
+//   SyncTestSupport -> SyncEngine, PhoneNumberKeys
 //
 // The engine never imports Contacts.framework: it sees Apple Contacts only
 // through the `ContactStore` protocol (ContactModel), implemented by
@@ -123,7 +123,7 @@ let package = Package(
         ),
         .target(
             name: "SyncTestSupport",
-            dependencies: ["ContactModel", "SyncEngine", "VaultIndex"],
+            dependencies: ["ContactModel", "MarkdownCodec", "PhoneNumberKeys", "SyncEngine", "VaultIndex"],
             swiftSettings: swiftSettings
         ),
         .testTarget(

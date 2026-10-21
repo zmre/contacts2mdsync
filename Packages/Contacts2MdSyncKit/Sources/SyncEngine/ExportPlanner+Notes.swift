@@ -33,7 +33,7 @@ extension PlanningRun {
             pathsByTitle[ComparisonKeys.name(entry.title), default: []].insert(entry.path)
         }
         for candidate in candidates {
-            let note = MarkdownCodec.normalize(projection.project(inputs(for: candidate, resolver: resolver)))
+            let note = MarkdownCodec.normalize(projection.project(exportInputs(for: candidate, resolver: resolver)))
             pathsByTitle[ComparisonKeys.name(note.title), default: []].insert(candidate.path)
             do {
                 let data = Data(try MarkdownCodec.encode(note, patching: candidate.existing?.note).utf8)
@@ -52,7 +52,7 @@ extension PlanningRun {
         }
     }
 
-    private func inputs(for candidate: Candidate, resolver: NameResolver) -> ExportProjection.Inputs {
+    func exportInputs(for candidate: Candidate, resolver: NameResolver) -> ExportProjection.Inputs {
         let contact = candidate.apple
         let contactValues = values(contact)
         let groupNames = Dictionary(
@@ -75,20 +75,20 @@ extension PlanningRun {
 
     /// The `image:` path for the candidate's photo. The sidecar write is
     /// queued by `record` unless identical bytes are already there.
-    private func imageReference(for candidate: Candidate) -> ImageRef? {
+    func imageReference(for candidate: Candidate) -> ImageRef? {
         guard let path = imagePath(for: candidate) else { return nil }
         return ImageRef(path: VaultPath.relative(path, fromDirectory: VaultPath.directory(of: candidate.path)))
     }
 
-    private func imagePath(for candidate: Candidate) -> String? {
+    func imagePath(for candidate: Candidate) -> String? {
         guard let data = candidate.apple.imageData else { return nil }
         let name = "\(candidate.recordID.uuidString.lowercased()).\(ImageFormat.fileExtension(for: data))"
         return VaultPath.join(plan.config.imagesFolder, name)
     }
 
-    private mutating func record(_ candidate: Candidate, note: CanonicalContact, data: Data) {
+    mutating func record(_ candidate: Candidate, note: CanonicalContact, data: Data, writeImage: Bool = true) {
         let contact = candidate.apple
-        if let imagePath = imagePath(for: candidate), let imageData = contact.imageData,
+        if writeImage, let imagePath = imagePath(for: candidate), let imageData = contact.imageData,
             (try? planner.fs.read(imagePath).1.sha256) != FileStamp.hash(imageData)
         {
             plan.images.append(ImageWrite(path: imagePath, recordID: candidate.recordID, data: imageData))
@@ -124,11 +124,15 @@ extension PlanningRun {
         let contact = candidate.apple
         let previous = Dictionary(
             (records[candidate.recordID]?.cards ?? []).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let corroborated = self.corroborated.contains(candidate.recordID)
         let cards = contact.cards.map { card in
-            BoundCard(
+            let known = previous[card.id]
+            let settled = known.map { inputs.now.timeIntervalSince($0.firstSeen) >= BoundCard.settleInterval } ?? false
+            return BoundCard(
                 id: card.id, containerID: card.containerID, accountKind: card.accountKind,
-                firstSeen: previous[card.id]?.firstSeen ?? inputs.now,
-                stampSeen: card.stampID == candidate.recordID || (previous[card.id]?.stampSeen ?? false))
+                firstSeen: known?.firstSeen ?? inputs.now,
+                stampSeen: card.stampID == candidate.recordID || (known?.stampSeen ?? false),
+                confirmed: (known?.confirmed ?? false) || (corroborated && settled))
         }
         return RecordBinding(
             unifiedID: contact.unifiedID, cards: cards, path: path,

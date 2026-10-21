@@ -8,17 +8,26 @@ internal import Synchronization
 /// relations, and a switchable notes entitlement (no entitlement → no notes,
 /// `notesAvailable == false`, like the silently unavailable key on a real store).
 ///
-/// Spike behaviours (S4/S9) on demand:
+/// Spike behaviours (S4/S5/S9) on demand:
 /// - `synthesizeLinkedIDs`: a contact with several cards gets a synthesized
 ///   unified id that is neither card's id and changes on every snapshot;
 /// - `link(_:)`: Contacts auto-linking two contacts (cards keep their own
-///   values; unified single-valued fields follow the last card, like
-///   "most recently saved wins");
-/// - `churnGoogleCardIDs()`: Google replacing new cards, so their ids change once.
+///   values; unified single-valued fields follow the most recently saved card);
+/// - `churnGoogleCardIDs()`: Google replacing new cards, so their ids change once;
+/// - `normalizePhonesOnSave`: server-normalization echo (`4155550100` →
+///   `(415) 555-0100`) on every phone we write;
+/// - `dropWrites(_:field:)`: a container that silently ignores writes to a
+///   field (the card keeps its old value; the engine must mark it unapplyable);
+/// - unified-save fan-out: an operation addressed to a linked contact's
+///   unified id (never a card id) writes to **every** linked card, as saving a
+///   unified mutable copy does; `unifiedSaveCount` counts such misuse.
 ///
-/// Never touches Contacts.framework.
+/// Writes go to card values; the unified view is recomputed from the cards
+/// (multi-valued fields: union; single-valued: the most recently saved card
+/// first). Contacts that were never written keep the unified view they were
+/// created with. Never touches Contacts.framework.
 public final class FakeContactStore: ContactStore {
-    private struct State {
+    struct State {
         var contacts: [AppleContact]
         var containers: [AppleContainer]
         var groups: [AppleGroup]
@@ -29,9 +38,17 @@ public final class FakeContactStore: ContactStore {
         var synthesizeLinkedIDs = false
         var snapshots = 0
         var churned = Set<String>()
+        var normalizePhones = false
+        var dropped = Set<String>()
+        var saveSequence = 0
+        /// Card id → save sequence (most recent save wins single-valued display).
+        var lastSaved: [String: Int] = [:]
+        var unifiedSaves = 0
+        var created = 0
+        var failNextApply = false
     }
 
-    private let state: Mutex<State>
+    let state: Mutex<State>
 
     /// Creates a store.
     public init(
@@ -44,72 +61,25 @@ public final class FakeContactStore: ContactStore {
             State(contacts: contacts, containers: containers, groups: groups, notesEntitled: notesEntitled))
     }
 
+    // MARK: - Behaviour switches
+
     /// Linked contacts get a fresh synthesized unified id on every snapshot.
     public func setSynthesizeLinkedIDs(_ enabled: Bool) { state.withLock { $0.synthesizeLinkedIDs = enabled } }
 
-    /// Links the contacts with these (stored) unified ids into one, as
-    /// Contacts does on its own for same-name iCloud + Google cards. Each card
-    /// keeps its own values; the unified view takes single-valued fields from
-    /// the last contact and the union of multi-valued ones.
-    public func link(_ unifiedIDs: [String]) {
-        state.withLock { state in
-            let members = unifiedIDs.compactMap { id in state.contacts.first { $0.unifiedID == id } }
-            guard members.count > 1 else { return }
-            state.contacts.removeAll { unifiedIDs.contains($0.unifiedID) }
-            var cards: [AppleCard] = []
-            for member in members {
-                for var card in member.cards {
-                    if card.values == nil { card.values = member.contact }
-                    cards.append(card)
-                }
-            }
-            var unified = members.last?.contact ?? members[0].contact
-            for member in members.dropLast() {
-                unified.emails += member.contact.emails.filter { !unified.emails.contains($0) }
-                unified.phones += member.contact.phones.filter { !unified.phones.contains($0) }
-            }
-            state.contacts.append(
-                AppleContact(
-                    unifiedID: members[0].unifiedID, cards: cards, contact: unified,
-                    imageData: members.compactMap(\.imageData).last,
-                    groupIDs: Array(Set(members.flatMap(\.groupIDs))).sorted()))
-        }
+    /// Phones we write come back reformatted (server-normalization echo).
+    public func setNormalizePhonesOnSave(_ enabled: Bool) { state.withLock { $0.normalizePhones = enabled } }
+
+    /// Writes to `field` (an `AppleScalarField` or `AppleListField` raw value,
+    /// or `note`/`image`/`groups`) on cards of `kind` are silently ignored.
+    public func dropWrites(_ kind: AccountKind, field: String) {
+        state.withLock { _ = $0.dropped.insert("\(kind.rawValue):\(field)") }
     }
 
-    /// Changes every Google card id once (`x` → `x~google-sync`), like Google
-    /// sync replacing a newly created card. Single-card contacts' unified ids
-    /// change with them; stamps and values are kept.
-    public func churnGoogleCardIDs() {
-        state.withLock { state in
-            for contactIndex in state.contacts.indices {
-                var contact = state.contacts[contactIndex]
-                for cardIndex in contact.cards.indices where contact.cards[cardIndex].accountKind == .google {
-                    let old = contact.cards[cardIndex].id
-                    guard !state.churned.contains(old) else { continue }
-                    let new = old + "~google-sync"
-                    state.churned.insert(new)
-                    contact.cards[cardIndex].id = new
-                    if contact.unifiedID == old { contact.unifiedID = new }
-                }
-                state.contacts[contactIndex] = contact
-            }
-        }
-    }
+    /// The next `apply` throws (a failed save request).
+    public func failNextApply() { state.withLock { $0.failNextApply = true } }
 
     /// Simulates Contacts access being denied.
     public func denyAccess() { state.withLock { $0.accessGranted = false } }
-
-    /// Batches applied so far, with their transaction authors.
-    public var appliedBatches: [(batch: AppleWriteBatch, author: String)] { state.withLock { $0.batches } }
-
-    /// Number of vCard exports (backups) taken.
-    public var vCardExportCount: Int { state.withLock { $0.vCardExports } }
-
-    /// Replaces the contacts (simulate edits made in Contacts.app).
-    public func replaceContacts(_ contacts: [AppleContact]) { state.withLock { $0.contacts = contacts } }
-
-    /// Current contacts (including stamps applied so far).
-    public var contacts: [AppleContact] { state.withLock { $0.contacts } }
 
     // MARK: - ContactStore
 
@@ -156,24 +126,21 @@ public final class FakeContactStore: ContactStore {
     public func apply(_ batch: AppleWriteBatch, author: String) throws -> AppleWriteResult {
         try state.withLock { state in
             guard state.accessGranted else { throw ContactStoreError.accessDenied }
-            var applied: [AppleWriteOperation] = []
-            var failed: [AppleWriteFailure] = []
+            if state.failNextApply {
+                state.failNextApply = false
+                throw ContactStoreError.notImplemented("simulated save failure")
+            }
+            var result = AppleWriteResult(applied: [])
             for operation in batch.operations {
-                switch operation {
-                case .stamp(let cardID, let id):
-                    guard
-                        let contactIndex = state.contacts.firstIndex(where: { $0.cards.contains { $0.id == cardID } }),
-                        let cardIndex = state.contacts[contactIndex].cards.firstIndex(where: { $0.id == cardID })
-                    else {
-                        failed.append(AppleWriteFailure(operation: operation, message: "card not found"))
-                        continue
-                    }
-                    state.contacts[contactIndex].cards[cardIndex].stampID = id
-                    applied.append(operation)
+                do {
+                    try Self.apply(operation, to: &state, result: &result)
+                    result.applied.append(operation)
+                } catch {
+                    result.failed.append(AppleWriteFailure(operation: operation, message: String(describing: error)))
                 }
             }
             state.batches.append((batch, author))
-            return AppleWriteResult(applied: applied, failed: failed)
+            return result
         }
     }
 
@@ -188,5 +155,127 @@ public final class FakeContactStore: ContactStore {
             }
             return Data(cards.joined().utf8)
         }
+    }
+
+    // MARK: - Writes
+
+    private struct FakeError: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    private static func apply(
+        _ operation: AppleWriteOperation, to state: inout State, result: inout AppleWriteResult
+    ) throws {
+        if case .create(let new) = operation {
+            try create(new, in: &state, result: &result)
+            return
+        }
+        guard let cardID = operation.cardID else { return }
+        for (index, ids) in try targets(cardID, in: &state) {
+            FakeCardValues.materialize(&state.contacts[index])
+            for id in ids { try apply(operation, card: id, contact: index, state: &state) }
+            FakeCardValues.recomputeUnified(&state.contacts[index], lastSaved: state.lastSaved)
+            if state.contacts[index].cards.isEmpty { state.contacts.remove(at: index) }
+        }
+    }
+
+    /// The contact index and card ids an operation addressed to `id` reaches.
+    /// A linked contact's unified id fans out to every card (misuse, counted).
+    private static func targets(_ id: String, in state: inout State) throws -> [(Int, [String])] {
+        if let index = state.contacts.firstIndex(where: { $0.cards.contains { $0.id == id } }) {
+            return [(index, [id])]
+        }
+        var index = state.contacts.firstIndex { $0.unifiedID == id && $0.cards.count > 1 }
+        if index == nil, id.hasPrefix("SYNTH-"), let offset = id.split(separator: "-").last.flatMap({ Int($0) }),
+            state.contacts.indices.contains(offset)
+        {
+            index = offset
+        }
+        guard let index else { throw ContactStoreError.cardNotFound(id) }
+        state.unifiedSaves += 1
+        return [(index, state.contacts[index].cards.map(\.id))]
+    }
+
+    // swiftlint:disable:next cyclomatic_complexity
+    private static func apply(
+        _ operation: AppleWriteOperation, card cardID: String, contact index: Int, state: inout State
+    ) throws {
+        guard let cardIndex = state.contacts[index].cards.firstIndex(where: { $0.id == cardID }) else {
+            throw ContactStoreError.cardNotFound(cardID)
+        }
+        let card = state.contacts[index].cards[cardIndex]
+        switch operation {
+        case .stamp(_, let id):
+            state.contacts[index].cards[cardIndex].stampID = id
+        case .removeStamp:
+            state.contacts[index].cards[cardIndex].stampID = nil
+        case .update(_, let edits):
+            var values = card.values ?? state.contacts[index].contact
+            var image = state.contacts[index].imageData
+            for edit in edits where !isDropped(edit, kind: card.accountKind, state: state) {
+                guard state.notesEntitled || !isNote(edit) else { throw FakeError(description: "notes unavailable") }
+                FakeCardValues.apply(edit, to: &values, image: &image, normalizePhones: state.normalizePhones)
+            }
+            state.contacts[index].cards[cardIndex].values = values
+            if image != state.contacts[index].imageData {
+                state.contacts[index].imageData = image
+                state.contacts[index].imageUnavailable = false
+            }
+        case .delete:
+            state.contacts[index].cards.remove(at: cardIndex)
+            return
+        case .addMember(_, let groupID):
+            guard let group = state.groups.first(where: { $0.id == groupID }) else {
+                throw FakeError(description: "group not found")
+            }
+            guard group.containerID == card.containerID else {
+                throw FakeError(description: "card and group are in different containers")
+            }
+            if !state.contacts[index].groupIDs.contains(groupID) { state.contacts[index].groupIDs.append(groupID) }
+        case .removeMember(_, let groupID):
+            state.contacts[index].groupIDs.removeAll { $0 == groupID }
+        case .create:
+            return
+        }
+        state.saveSequence += 1
+        state.lastSaved[cardID] = state.saveSequence
+    }
+
+    private static func create(_ new: NewAppleContact, in state: inout State, result: inout AppleWriteResult) throws {
+        guard let container = state.containers.first(where: { $0.id == new.containerID }) else {
+            throw FakeError(description: "container not found")
+        }
+        state.created += 1
+        let cardID = "new-\(state.created):\(container.kind.rawValue)"
+        var values = CanonicalContact(kind: new.kind, title: "")
+        var image: Data?
+        for edit in new.edits {
+            FakeCardValues.apply(edit, to: &values, image: &image, normalizePhones: state.normalizePhones)
+        }
+        if !state.notesEntitled { values.body = nil }
+        let card = AppleCard(
+            id: cardID, containerID: container.id, accountKind: container.kind, stampID: new.stamp, values: values)
+        state.contacts.append(
+            AppleContact(unifiedID: cardID, cards: [card], contact: values, imageData: image, groupIDs: new.groupIDs))
+        state.saveSequence += 1
+        state.lastSaved[cardID] = state.saveSequence
+        result.createdCardIDs[new.recordID] = cardID
+    }
+
+    private static func isNote(_ edit: CardEdit) -> Bool {
+        if case .note = edit { return true }
+        return false
+    }
+
+    private static func isDropped(_ edit: CardEdit, kind: AccountKind, state: State) -> Bool {
+        let field: String =
+            switch edit {
+            case .scalar(let field, _): field.rawValue
+            case .birthday: "birthday"
+            case .list(let field, _): field.rawValue
+            case .note: "note"
+            case .image: "image"
+            }
+        return state.dropped.contains("\(kind.rawValue):\(field)")
     }
 }

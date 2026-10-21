@@ -65,3 +65,21 @@ struct NameResolver {
         return company
     }
 }
+
+extension ExportPlanner {
+    /// The member that gets the cluster's one note: iCloud-backed first, then
+    /// local, then lowest card id.
+    static func primary(of members: [AppleContact]) -> AppleContact? {
+        func rank(_ contact: AppleContact) -> Int {
+            if contact.isICloudBacked { return 0 }
+            if contact.cards.contains(where: { $0.accountKind == .local }) { return 1 }
+            return 2
+        }
+        return members.min { (rank($0), $0.sortKey) < (rank($1), $1.sortKey) }
+    }
+}
+
+extension AppleContact {
+    /// Deterministic order that does not depend on the volatile unified id.
+    var sortKey: String { cardsByPrecedence.first?.id ?? unifiedID }
+}

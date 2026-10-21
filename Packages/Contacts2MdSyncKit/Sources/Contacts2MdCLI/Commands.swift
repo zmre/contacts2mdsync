@@ -17,6 +17,9 @@ struct RootOptions: ParsableArguments {
     @Flag(name: .long, help: "Also list unchanged notes and informational lines.")
     var verbose = false
 
+    @Flag(name: .long, help: "Print one JSON document on stdout instead of lines (errors still go to stderr).")
+    var json = false
+
     @Option(name: .long, help: ArgumentHelp("Per-device state folder (testing).", visibility: .hidden))
     var stateDir: String?
 
@@ -86,14 +89,101 @@ struct StatusCommand: ParsableCommand, EnvironmentCommand {
 
 struct PlanCommand: ParsableCommand, EnvironmentCommand {
     static let configuration = CommandConfiguration(
-        commandName: "plan", abstract: "Dry run: show what `export` would write. Writes no notes.")
+        commandName: "plan",
+        abstract: "Dry run: show what `sync` would change on both sides (or, before the first export, what "
+            + "`export` would write). Writes no notes and nothing to Contacts.")
 
     @OptionGroup var options: RootOptions
     @OptionGroup var export: ExportOptionGroup
 
+    @Flag(name: .long, help: "Show the one-way export plan even after the first export.")
+    var oneWay = false
+
+    @Option(name: .long, help: "Approve up to N Apple changes (default: limits.max_apple_changes_without_approval).")
+    var maxAppleChanges: Int?
+
     func run(in environment: CLIEnvironment) -> CLIExitCode {
-        Session(options: options, environment: environment, command: "plan")
-            .export(export.request, write: false, stamp: false, backup: false)
+        let session = Session(options: options, environment: environment, command: "plan")
+        let resolved = oneWay ? nil : try? environment.rootAccess.resolve(options.rootPath)
+        let twoWay = resolved.map { session.hasSynced($0.url) } ?? false
+        resolved?.close()
+        guard twoWay else { return session.export(export.request, write: false, stamp: false, backup: false) }
+        return session.sync(
+            SyncRequest(maxAppleChanges: maxAppleChanges, allowUndownloaded: export.allowUndownloaded), write: false)
+    }
+}
+
+struct SyncCommand: ParsableCommand, EnvironmentCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "sync",
+        abstract: "Run one two-way sync unattended (cron/launchd).",
+        discussion: """
+            Anything that needs a decision is skipped, queued for the app (or `contacts2md review`), and \
+            printed as a WARNING. Apple Contacts is written only when the vault's config has \
+            `apple_writes: enabled` (see `contacts2md config`); otherwise Contacts-side changes are \
+            reported as `held`. Every run that writes to Contacts saves a vCard backup first.
+            """)
+
+    @OptionGroup var options: RootOptions
+
+    @Option(
+        name: .long,
+        help: "Approve up to N Apple changes this run (default 25: limits.max_apple_changes_without_approval).")
+    var maxAppleChanges: Int?
+
+    @Flag(name: .long, help: "Run even if many records vanished at once (deletions are still only queued).")
+    var allowMassVanish = false
+
+    @Flag(name: .long, help: "Create new notes even while some notes are iCloud placeholders not downloaded yet.")
+    var allowUndownloaded = false
+
+    @Flag(name: .long, help: "Take the sync lease from another device.")
+    var takeOver = false
+
+    func run(in environment: CLIEnvironment) -> CLIExitCode {
+        Session(options: options, environment: environment, command: "sync").sync(
+            SyncRequest(
+                maxAppleChanges: maxAppleChanges, allowMassVanish: allowMassVanish,
+                allowUndownloaded: allowUndownloaded, takeOverLease: takeOver,
+                policy: environment.trigger == "GUI" ? .gui : .headless),
+            write: true)
+    }
+}
+
+/// `enabled|disabled`, `true|false`, `yes|no`, `on|off`.
+struct Switch: ExpressibleByArgument {
+    let value: Bool
+
+    init?(argument: String) {
+        switch argument.lowercased() {
+        case "enabled", "enable", "true", "yes", "on": value = true
+        case "disabled", "disable", "false", "no", "off": value = false
+        default: return nil
+        }
+    }
+}
+
+struct ConfigCommand: ParsableCommand, EnvironmentCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "config",
+        abstract: "Show or change the vault's sync switches in .c2mdsync/config.yaml.",
+        discussion: """
+            apple_writes: lets `sync` write to Apple Contacts (default disabled). \
+            stamp_contacts: stamps each synced contact with its record id (default false; needed only when \
+            several devices sync one vault).
+            """)
+
+    @OptionGroup var options: RootOptions
+
+    @Option(name: .long, help: "enabled | disabled")
+    var appleWrites: Switch?
+
+    @Option(name: .long, help: "true | false")
+    var stampContacts: Switch?
+
+    func run(in environment: CLIEnvironment) -> CLIExitCode {
+        Session(options: options, environment: environment, command: "config")
+            .config(appleWrites: appleWrites, stampContacts: stampContacts)
     }
 }
 
@@ -134,10 +224,10 @@ struct ExportCommand: ParsableCommand, EnvironmentCommand {
 struct ReviewCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "review",
-        abstract: "List items that need a decision, and record decisions (until the app's review screens exist).",
+        abstract: "List items that need a decision, and record decisions.",
         discussion: """
-            Items come from the last `plan` or `export`. Decisions are appended to \
-            .c2mdsync/devices/<device>/decisions.jsonl and take effect on the next plan or export.
+            Items come from the last `plan`, `sync` or `export`. Decisions are appended to \
+            .c2mdsync/devices/<device>/decisions.jsonl and take effect on the next run.
             """,
         subcommands: [ReviewListCommand.self, ReviewDecideCommand.self, ReviewAdoptAllCommand.self],
         defaultSubcommand: ReviewListCommand.self
@@ -161,7 +251,9 @@ struct ReviewDecideCommand: ParsableCommand, EnvironmentCommand {
         abstract: "Record a decision for one review item.",
         discussion: """
             Choices: duplicates → distinct | only:N (sync only member N); possible matches → \
-            adopt | distinct | ignore; copied notes → keep:N.
+            adopt | distinct | ignore; copied notes → keep:N; conflicts → apple | markdown | both; \
+            deleted in Contacts → trash | keep | restore; note deleted → restore | unlink | delete-contact; \
+            markdown-only notes → add | ignore.
             """)
 
     @OptionGroup var options: RootOptions

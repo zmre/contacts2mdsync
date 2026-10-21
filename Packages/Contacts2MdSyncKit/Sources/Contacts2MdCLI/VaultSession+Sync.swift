@@ -1,0 +1,211 @@
+public import ContactModel
+public import Foundation
+public import SyncEngine
+public import VaultIndex
+
+/// What to sync.
+public struct SyncRequest: Hashable, Sendable {
+    /// Overrides `limits.max_apple_changes_without_approval` for this run.
+    public var maxAppleChanges: Int?
+    /// Proceed although the mass-vanish breaker would trip (deletes are still only queued).
+    public var allowMassVanish: Bool
+    /// Create new notes although some notes are undownloaded iCloud placeholders.
+    public var allowUndownloaded: Bool
+    /// Take the vault lease from another device.
+    public var takeOverLease: Bool
+    public var policy: DecisionPolicy
+
+    /// Creates a request.
+    public init(
+        maxAppleChanges: Int? = nil, allowMassVanish: Bool = false, allowUndownloaded: Bool = false,
+        takeOverLease: Bool = false, policy: DecisionPolicy = .headless
+    ) {
+        self.maxAppleChanges = maxAppleChanges
+        self.allowMassVanish = allowMassVanish
+        self.allowUndownloaded = allowUndownloaded
+        self.takeOverLease = takeOverLease
+        self.policy = policy
+    }
+}
+
+/// A two-way plan plus everything needed to execute it.
+public struct PreparedSync: Sendable {
+    public let fs: any VaultFS
+    public let store: any ContactStore
+    public let state: any SyncStateStore
+    public let stateDirectory: URL
+    public let index: VaultIndex
+    public let decisions: [Decision]
+    public let decisionProblems: [String]
+    public let config: VaultConfig
+    public let plan: SyncPlan
+}
+
+/// Why a sync did not start.
+public enum SyncGate: Sendable {
+    /// Lock and lease are ours; call `release()` on the lock when done.
+    case ready(LocalLock, VaultLease)
+    /// Another run on this Mac holds the local lock (waited `lockWait`).
+    case localRunInProgress
+    /// Another device leads this vault.
+    case leaseHeldElsewhere(VaultLease)
+}
+
+/// The vault has not been exported/synced on this device yet (exit 3).
+public struct VaultNotReady: Error, CustomStringConvertible {
+    public let description: String
+}
+
+extension VaultSession {
+    /// The vault's config and this device's state folder (throws `VaultNotReady`).
+    struct ConfiguredVault {
+        var config: VaultConfig
+        var text: String
+        var directory: URL
+    }
+
+    func configured(_ fs: any VaultFS) throws -> ConfiguredVault {
+        guard let (config, text) = try VaultConfig.load(from: fs) else {
+            throw VaultNotReady(
+                description:
+                    "not configured: run the first sync in Contacts2MdSync (or `contacts2md export --yes`) once")
+        }
+        let directory = environment.stateDirectory.appending(path: config.vaultID.uuidString.lowercased())
+        return ConfiguredVault(config: config, text: text, directory: directory)
+    }
+
+    /// Takes the local run lock (waiting up to `environment.lockWait`) and
+    /// the vault lease (architecture §11, §15).
+    public func beginSync(takeOver: Bool = false) throws -> SyncGate {
+        let fs = environment.makeVault(root)
+        let directory = try configured(fs).directory
+        guard
+            let lock = try LocalLock.acquire(
+                at: directory.appending(path: "sync.lock"), wait: environment.lockWait, sleep: environment.sleep)
+        else { return .localRunInProgress }
+        let device = try environment.device()
+        let others = DeviceRecord.deviceIDs(fs: fs).contains { $0 != device.id }
+        let leases = LeaseManager(
+            fs: fs, device: device, clock: environment.clock, settle: environment.leaseSettle,
+            sleep: environment.sleep)
+        switch try leases.acquire(takeOver: takeOver, otherDevicesKnown: others) {
+        case .acquired(let lease): return .ready(lock, lease)
+        case .heldElsewhere(let lease):
+            lock.release()
+            return .leaseHeldElsewhere(lease)
+        }
+    }
+
+    /// Scans, snapshots and plans a two-way sync. Requires a vault exported
+    /// or synced on this device before (`VaultNotReady` otherwise).
+    public func prepareSync(_ request: SyncRequest) throws -> PreparedSync {
+        let fs = environment.makeVault(root)
+        let vault = try configured(fs)
+        let (config, text, directory) = (vault.config, vault.text, vault.directory)
+        guard FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)) else {
+            throw VaultNotReady(
+                description:
+                    "first sync not done on this Mac: run it in Contacts2MdSync (or `contacts2md export --yes`) once")
+        }
+        let store = try environment.makeStore()
+        let state = try environment.makeStateStore(directory)
+        guard try state.load().lastExport != nil else {
+            throw VaultNotReady(
+                description:
+                    "first sync not done on this Mac: run it in Contacts2MdSync (or `contacts2md export --yes`) once")
+        }
+        let gathered = try SyncPlanner.gather(
+            fs: fs, store: store, state: state, config: (config, text), now: environment.clock.now)
+        try state.saveDecisionMirror(gathered.decisions)
+        let keyer = environment.makeKeyer(config.defaultRegion ?? environment.fallbackRegion)
+        let options = SyncOptions(
+            export: ExportOptions(autoAdopt: .never, allowUndownloaded: request.allowUndownloaded),
+            policy: request.policy, maxAppleChanges: request.maxAppleChanges,
+            allowMassVanish: request.allowMassVanish)
+        let plan = try SyncPlanner(fs: fs, keyer: keyer, ids: environment.ids, options: options).plan(
+            gathered.including(try environment.device()).inputs)
+        return PreparedSync(
+            fs: fs, store: store, state: state, stateDirectory: directory, index: gathered.index,
+            decisions: gathered.decisions, decisionProblems: gathered.decisionProblems, config: config, plan: plan)
+    }
+
+    /// Records what a dry run found (review queue, file cache).
+    public func recordSyncPlan(_ prepared: PreparedSync, command: String, startedAt: Date) throws {
+        try SyncPlanner.recordObservations(
+            prepared.plan, index: prepared.index, state: prepared.state, now: environment.clock.now)
+        try prepared.state.appendSession(
+            syncSession(prepared, command: command, startedAt: startedAt, result: nil))
+    }
+
+    /// Executes a prepared sync: vCard backup (only when Apple writes
+    /// happen), Apple batch, markdown writes, state. Throws
+    /// `SyncError.breakerTripped` (nothing written) or `BackupFailed`.
+    public func executeSync(
+        _ prepared: PreparedSync, command: String, startedAt: Date, onBackup: (BackupReceipt) -> Void = { _ in }
+    ) throws -> SyncResult {
+        let device = try environment.device()
+        let backups = prepared.stateDirectory.appending(path: "backups")
+        let executor = SyncExecutor(
+            fs: prepared.fs, store: prepared.store, state: prepared.state, clock: environment.clock,
+            noteBackups: NoteBackup(directory: backups, clock: environment.clock),
+            author: SyncEngine.transactionAuthor(deviceID: device.id))
+        let result = try executor.execute(prepared.plan) {
+            let receipt: BackupReceipt
+            do {
+                receipt = try VCardBackup(directory: backups, clock: environment.clock).backup(prepared.store)
+            } catch {
+                throw BackupFailed(underlying: error)
+            }
+            onBackup(receipt)
+            return receipt
+        }
+        try SyncPlanner.recordObservations(
+            prepared.plan, index: prepared.index, state: prepared.state, now: environment.clock.now,
+            written: result.markdown.writtenCache)
+        try prepared.state.appendSession(
+            syncSession(prepared, command: command, startedAt: startedAt, result: result))
+        let summary =
+            "apple \(result.apple.count) changes, md \(result.markdown.created.count + result.markdown.updated.count) "
+            + "writes, \(prepared.plan.markdown.reviews.filter(\.needsDecision).count) pending review"
+        try? DeviceRecord.write(
+            DeviceRecord(
+                deviceID: device.id, deviceName: device.name, lastSync: environment.clock.now, summary: summary),
+            fs: prepared.fs)
+        try? LeaseManager(fs: prepared.fs, device: device, clock: environment.clock).heartbeat()
+        return result
+    }
+
+    private func syncSession(
+        _ prepared: PreparedSync, command: String, startedAt: Date, result: SyncResult?
+    ) -> SessionRecord {
+        let plan = prepared.plan
+        return SessionRecord(
+            startedAt: startedAt, finishedAt: environment.clock.now, command: command, trigger: environment.trigger,
+            deviceID: (try? environment.device().id) ?? "",
+            created: (result?.markdown.created.count ?? 0) + (result?.apple.filter { $0.kind == .create }.count ?? 0),
+            updated: (result?.markdown.updated.count ?? 0) + (result?.apple.filter { $0.kind == .update }.count ?? 0),
+            adopted: result?.markdown.updated.filter { $0.kind == .adopt }.count ?? 0,
+            unchanged: plan.markdown.unchanged, skipped: plan.markdown.skipped.count,
+            pendingReview: plan.markdown.reviews.filter(\.needsDecision).count,
+            stamped: result?.apple.filter { $0.kind == .stamp }.count ?? 0,
+            failures: (result?.markdown.failures.count ?? 0) + (result?.appleFailures.count ?? 0))
+    }
+
+    // MARK: - Settings the app and `contacts2md config` change
+
+    /// Changes the vault's sync switches (`apple_writes`, `stamp_contacts`)
+    /// in `.c2mdsync/config.yaml`; every other key stays byte-for-byte.
+    ///
+    ///     try session.updateSettings { $0.appleWrites = true }
+    @discardableResult
+    public func updateSettings(_ change: (inout VaultConfig) -> Void) throws -> VaultConfig {
+        let fs = environment.makeVault(root)
+        let vault = try configured(fs)
+        var config = vault.config
+        change(&config)
+        let rendered = config.render(patching: vault.text)
+        let text = vault.text
+        if rendered != text { _ = try fs.write(Data(rendered.utf8), to: VaultConfig.path, expecting: .any) }
+        return config
+    }
+}

@@ -47,6 +47,17 @@ public struct Decision: Codable, Hashable, Sendable {
         case adopt
         /// Of the notes sharing `sync_id`, the one at `path` keeps it.
         case duplicateIDKeep = "dup-id-keep"
+        /// Resolve the field conflict `item` of record `sync_id` with `choice`
+        /// (`apple`, `markdown`, `both`), only while both side hashes match.
+        case resolveConflict = "resolve-conflict"
+        /// Record `sync_id` was deleted in Contacts: `choice` `trash` (move
+        /// the note at `path` to the Trash) or `keep` (detach the note).
+        case appleDelete = "apple-delete"
+        /// The note of record `sync_id` was deleted: `choice` `restore`,
+        /// `unlink` (keep `contacts[0]`, stop syncing it) or `delete-contact`.
+        case markdownDelete = "markdown-delete"
+        /// Create an Apple contact from the markdown-only note at `path`.
+        case createContact = "create-contact"
     }
 
     public var id: UUID
@@ -60,12 +71,21 @@ public struct Decision: Codable, Hashable, Sendable {
     public var syncID: UUID?
     /// The review item this answers, for display.
     public var itemID: String?
+    /// The option chosen (conflicts, deletes).
+    public var choice: String?
+    /// Conflict side hashes the choice was made against.
+    public var appleHash: String?
+    public var markdownHash: String?
 
     /// Creates a decision.
     public init(
         id: UUID = UUID(), kind: Kind, createdAt: Date, device: DeviceIdentity, contacts: [ContactRef] = [],
-        path: String? = nil, syncID: UUID? = nil, itemID: String? = nil
+        path: String? = nil, syncID: UUID? = nil, itemID: String? = nil, choice: String? = nil,
+        appleHash: String? = nil, markdownHash: String? = nil
     ) {
+        self.choice = choice
+        self.appleHash = appleHash
+        self.markdownHash = markdownHash
         self.id = id
         self.kindName = kind.rawValue
         self.createdAt = createdAt
@@ -90,6 +110,9 @@ public struct Decision: Codable, Hashable, Sendable {
         case path
         case syncID = "sync_id"
         case itemID = "item"
+        case choice
+        case appleHash = "apple_hash"
+        case markdownHash = "markdown_hash"
     }
 
     public init(from decoder: any Decoder) throws {
@@ -103,6 +126,9 @@ public struct Decision: Codable, Hashable, Sendable {
         path = try container.decodeIfPresent(String.self, forKey: .path)
         syncID = try container.decodeIfPresent(UUID.self, forKey: .syncID)
         itemID = try container.decodeIfPresent(String.self, forKey: .itemID)
+        choice = try container.decodeIfPresent(String.self, forKey: .choice)
+        appleHash = try container.decodeIfPresent(String.self, forKey: .appleHash)
+        markdownHash = try container.decodeIfPresent(String.self, forKey: .markdownHash)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -116,6 +142,9 @@ public struct Decision: Codable, Hashable, Sendable {
         try container.encodeIfPresent(path, forKey: .path)
         try container.encodeIfPresent(syncID, forKey: .syncID)
         try container.encodeIfPresent(itemID, forKey: .itemID)
+        try container.encodeIfPresent(choice, forKey: .choice)
+        try container.encodeIfPresent(appleHash, forKey: .appleHash)
+        try container.encodeIfPresent(markdownHash, forKey: .markdownHash)
     }
 }
 
@@ -258,9 +287,54 @@ public struct DecisionSet: Sendable {
         all.last { $0.kind == .duplicateIDKeep && $0.syncID == syncID }?.path
     }
 
+    /// The latest resolution of conflict `id`: its choice and side hashes.
+    public func resolution(ofConflict id: String) -> ConflictDecision? {
+        guard let decision = all.last(where: { $0.kind == .resolveConflict && $0.itemID == id }),
+            let choice = decision.choice
+        else { return nil }
+        return ConflictDecision(choice: choice, appleHash: decision.appleHash, markdownHash: decision.markdownHash)
+    }
+
+    /// The latest choice for record `id` deleted in Contacts.
+    public func appleDeleteChoice(for id: UUID) -> String? {
+        all.last { $0.kind == .appleDelete && $0.syncID == id }?.choice
+    }
+
+    /// The latest choice for record `id` whose note was deleted.
+    public func markdownDeleteChoice(for id: UUID) -> String? {
+        all.last { $0.kind == .markdownDelete && $0.syncID == id }?.choice
+    }
+
+    /// `contact` was unlinked after its note was deleted: never synced again.
+    public func isUnlinked(_ contact: AppleContact) -> Bool {
+        all.contains { decision in
+            decision.kind == .markdownDelete && decision.choice == "unlink"
+                && decision.contacts.contains { $0.matches(contact) }
+        }
+    }
+
+    /// The user asked to create an Apple contact from the note at `path`.
+    public func wantsContact(forNoteAt path: String) -> Bool {
+        all.contains { $0.kind == .createContact && $0.path == path }
+    }
+
     /// Role of a contact in a sync-only decision.
     public enum SyncOnlyRole: Hashable, Sendable {
         case keep
         case exclude
+    }
+}
+
+/// A recorded conflict resolution and the side hashes it was made against.
+public struct ConflictDecision: Hashable, Sendable {
+    public var choice: String
+    public var appleHash: String?
+    public var markdownHash: String?
+
+    /// Creates a resolution.
+    public init(choice: String, appleHash: String?, markdownHash: String?) {
+        self.choice = choice
+        self.appleHash = appleHash
+        self.markdownHash = markdownHash
     }
 }

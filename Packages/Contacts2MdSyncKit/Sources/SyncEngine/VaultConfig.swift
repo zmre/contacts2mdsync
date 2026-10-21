@@ -37,6 +37,19 @@ public struct VaultConfig: Hashable, Sendable {
     /// `scope.markdown.exclude_paths` globs: notes there are never scanned.
     /// Read-only here (the `scope:` block is preserved verbatim).
     public var excludePaths: [String] = []
+    /// `apple_writes: enabled` — the master switch for every write to Apple
+    /// Contacts during `sync` (field edits, groups, creates, deletes, stamps).
+    /// Default disabled: sync then only writes markdown and reports Apple-side
+    /// changes as held.
+    public var appleWrites = false
+    /// `stamp_contacts: true` — stamp each synced contact's card with its
+    /// record id (`x-c2mdsync:<uuid>`). Optional: a single device identifies
+    /// contacts by cached card ids. Needs `apple_writes` too. Default false.
+    public var stampContacts = false
+    /// `limits:` (read-only here).
+    public var limits = SyncLimits()
+    /// `scope:` and `on_leave_scope` (read-only here).
+    public var scope = SyncScope()
 
     /// Creates a configuration.
     public init(
@@ -86,6 +99,7 @@ public struct VaultConfig: Hashable, Sendable {
             throw ConfigError.invalid("not a mapping")
         }
         let value = { (key: String) in fields.first { $0.key == key }?.value.scalarText }
+        let flag = { (text: String?) in Self.flag(text, default: false) }
         guard let idText = value("vault_id"), let id = UUID(uuidString: idText) else {
             throw ConfigError.invalid("missing or invalid vault_id")
         }
@@ -100,6 +114,15 @@ public struct VaultConfig: Hashable, Sendable {
         {
             config.excludePaths = paths.compactMap(\.scalarText).filter { !$0.isEmpty }
         }
+        config.appleWrites = flag(value("apple_writes"))
+        config.stampContacts = flag(value("stamp_contacts"))
+        if case .mapping(let limits)? = fields.first(where: { $0.key == "limits" })?.value {
+            config.limits = SyncLimits(limits)
+        }
+        if case .mapping(let scope)? = fields.first(where: { $0.key == "scope" })?.value {
+            config.scope = SyncScope(scope)
+        }
+        if let onLeave = value("on_leave_scope") { config.scope.onLeaveScope = onLeave }
         if case .mapping(let groups)? = fields.first(where: { $0.key == "groups" })?.value {
             config.groups = groups.compactMap { entry in
                 entry.value.scalarText.map { GroupTag(group: entry.key, tag: $0) }
@@ -126,7 +149,12 @@ public struct VaultConfig: Hashable, Sendable {
                     continue
                 }
                 guard let value = remaining.remove(at: index).value else { continue }
-                out += old.fieldValue(key) == value.normalizedForComparison ? text : YAMLWriter.entry(key, value)
+                let same =
+                    old.fieldValue(key) == value.normalizedForComparison
+                    || (["apple_writes", "stamp_contacts"].contains(key)
+                        && Self.flag(old.fieldValue(key)?.scalarText, default: false)
+                            == Self.flag(value.scalarText, default: false))
+                out += same ? text : YAMLWriter.entry(key, value)
             }
         }
         // Keys missing from the file are added only when they differ from the
@@ -146,6 +174,8 @@ public struct VaultConfig: Hashable, Sendable {
             ("images_folder", YAMLWriter.scalar(imagesFolder)),
             ("default_region", defaultRegion.map { YAMLWriter.scalar($0) }),
             ("groups", .mapping(groups.map { YAMLField(key: $0.group, value: YAMLWriter.scalar($0.tag)) })),
+            ("apple_writes", .scalar(appleWrites ? "enabled" : "disabled", plain: true)),
+            ("stamp_contacts", .scalar(stampContacts ? "true" : "false", plain: true)),
         ]
     }
 
@@ -156,7 +186,19 @@ public struct VaultConfig: Hashable, Sendable {
         case "default_folder": return defaultFolder == defaults.defaultFolder
         case "images_folder": return imagesFolder == defaults.imagesFolder
         case "groups": return groups.isEmpty
+        case "apple_writes": return !appleWrites
+        case "stamp_contacts": return !stampContacts
         default: return false
+        }
+    }
+
+    /// `true`/`false` for the boolean spellings YAML and humans use;
+    /// `fallback` for anything else (absent, misspelled).
+    static func flag(_ text: String?, default fallback: Bool) -> Bool {
+        switch text?.lowercased() {
+        case "enabled", "enable", "true", "yes", "on": true
+        case "disabled", "disable", "false", "no", "off": false
+        default: fallback
         }
     }
 

@@ -114,7 +114,7 @@ public enum AppleContactMapper {
 
     // MARK: - Fields
 
-    private static func clean(_ text: String?) -> String? {
+    static func clean(_ text: String?) -> String? {
         guard let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
         return trimmed
     }
@@ -123,7 +123,7 @@ public enum AppleContactMapper {
         clean(value).map { Labeled(LabelMap.markdownLabel(fromApple: label), $0) }
     }
 
-    private static func social(_ entry: CNLabeledValue<CNSocialProfile>) -> Labeled<SocialHandle>? {
+    static func social(_ entry: CNLabeledValue<CNSocialProfile>) -> Labeled<SocialHandle>? {
         let profile = entry.value
         let username = clean(profile.username)
         var url = clean(profile.urlString)
@@ -155,13 +155,13 @@ public enum AppleContactMapper {
         }
     }
 
-    private static func im(_ entry: CNLabeledValue<CNInstantMessageAddress>) -> Labeled<IMHandle>? {
+    static func im(_ entry: CNLabeledValue<CNInstantMessageAddress>) -> Labeled<IMHandle>? {
         let address = entry.value
         guard let value = clean(address.username) else { return nil }
         return Labeled(LabelMap.serviceLabel(service: address.service, label: entry.label), IMHandle(value))
     }
 
-    private static func address(_ entry: CNLabeledValue<CNPostalAddress>) -> Labeled<PostalAddress>? {
+    static func address(_ entry: CNLabeledValue<CNPostalAddress>) -> Labeled<PostalAddress>? {
         let postal = entry.value
         let address = PostalAddress(
             street: clean(postal.street),
@@ -204,7 +204,7 @@ public enum AppleContactMapper {
         return .monthDay(month: month, day: day)
     }
 
-    private static func relation(_ entry: CNLabeledValue<CNContactRelation>) -> RelationshipRef? {
+    static func relation(_ entry: CNLabeledValue<CNContactRelation>) -> RelationshipRef? {
         guard let name = clean(entry.value.name) else { return nil }
         let mapped = RelationLabelMap.mbr(fromApple: entry.label)
         return RelationshipRef(type: mapped.type, label: mapped.label, target: .name(name))

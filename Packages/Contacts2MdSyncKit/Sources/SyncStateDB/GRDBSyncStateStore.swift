@@ -127,6 +127,16 @@ public final class GRDBSyncStateStore: SyncStateStore {
                     );
                     """)
         }
+        migrator.registerMigration("v2") { database in
+            // M3: unapplyable writes keep what the card showed afterwards;
+            // Google card ids can be confirmed without stamps.
+            try database.execute(
+                sql: """
+                    ALTER TABLE unapplyable ADD COLUMN attempted TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE unapplyable ADD COLUMN observed TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE record_cards ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0;
+                    """)
+        }
         return migrator
     }
 
@@ -140,7 +150,8 @@ public final class GRDBSyncStateStore: SyncStateStore {
                 let card = BoundCard(
                     id: row["card_id"], containerID: row["container_id"],
                     accountKind: AccountKind(rawValue: row["account_kind"]) ?? .unknown,
-                    firstSeen: Date(timeIntervalSince1970: row["first_seen"]), stampSeen: row["stamp_seen"])
+                    firstSeen: Date(timeIntervalSince1970: row["first_seen"]), stampSeen: row["stamp_seen"],
+                    confirmed: row["confirmed"])
                 cardsByRecord[row["record_id"], default: []].append(card)
             }
             var map = RecordMap()
@@ -173,12 +184,13 @@ public final class GRDBSyncStateStore: SyncStateStore {
                     try database.execute(
                         sql: """
                             INSERT OR REPLACE INTO record_cards
-                            (record_id, card_id, container_id, account_kind, first_seen, stamp_seen, position)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            (record_id, card_id, container_id, account_kind, first_seen, stamp_seen, position,
+                             confirmed)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                         arguments: [
                             key, card.id, card.containerID, card.accountKind.rawValue,
-                            card.firstSeen.timeIntervalSince1970, card.stampSeen, position,
+                            card.firstSeen.timeIntervalSince1970, card.stampSeen, position, card.confirmed,
                         ])
                 }
                 for (field, hash) in binding.base?.fieldHashes ?? [:] {

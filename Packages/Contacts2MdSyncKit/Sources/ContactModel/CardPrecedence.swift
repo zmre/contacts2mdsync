@@ -87,3 +87,12 @@ enum CardPrecedence {
         }
     }
 }
+
+extension AppleContact {
+    /// The values of one underlying card: its own values, or the unified view
+    /// for a single-card contact whose card values were not read. `nil` when
+    /// unknown.
+    public func values(of card: AppleCard) -> CanonicalContact? {
+        card.values ?? (cards.count == 1 ? contact : nil)
+    }
+}

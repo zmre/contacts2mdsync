@@ -60,11 +60,29 @@ public struct ExportOutcome: Sendable {
 
 /// What this device's state says about a configured vault (no Contacts access needed).
 public struct StoredStatus: Hashable, Sendable {
+    /// Last export or sync on this device.
     public var lastExport: Date?
     public var records: Int
+    /// Pending items that need a decision (markdown-only notes excluded).
     public var pendingReview: Int
     /// When the pending queue was computed.
     public var pendingAsOf: Date?
+    /// `apple_writes: enabled` in the vault config.
+    public var appleWritesEnabled = false
+    /// `stamp_contacts: true` in the vault config.
+    public var stampContacts = false
+    /// Devices that ever synced this vault.
+    public var deviceCount = 1
+    /// Set when several devices share the vault without stamps.
+    public var identityWarning: String?
+    /// Open field conflicts.
+    public var conflicts = 0
+    /// Queued deletions (deleted in Contacts + notes deleted).
+    public var pendingDeletes = 0
+    /// Markdown-only notes awaiting review (informational).
+    public var markdownOnly = 0
+    /// The current vault lease, if any.
+    public var lease: VaultLease?
 }
 
 /// One planning/export run against a notes root, shared by the CLI and the
@@ -131,9 +149,29 @@ public struct VaultSession: Sendable {
         let state = try environment.makeStateStore(directory)
         let records = try state.load()
         let pending = try state.loadPending()
-        return StoredStatus(
-            lastExport: records.lastExport, records: records.records.count, pendingReview: pending.items.count,
-            pendingAsOf: pending.computedAt)
+        var status = StoredStatus(
+            lastExport: records.lastExport, records: records.records.count,
+            pendingReview: pending.items.filter(\.item.needsDecision).count, pendingAsOf: pending.computedAt)
+        status.appleWritesEnabled = config.appleWrites
+        status.stampContacts = config.stampContacts
+        let devices = DeviceRecord.deviceIDs(fs: fs)
+        status.deviceCount = max(devices.count, 1)
+        if devices.count > 1, !config.stampContacts {
+            status.identityWarning =
+                "\(devices.count) devices share this vault; enable stamp_contacts so devices agree on identity"
+        }
+        for entry in pending.items {
+            switch entry.item {
+            case .conflict: status.conflicts += 1
+            case .appleDeleted, .markdownDeleted, .missingFile: status.pendingDeletes += 1
+            case .markdownOnly: status.markdownOnly += 1
+            default: break
+            }
+        }
+        if let device = try? environment.device() {
+            status.lease = LeaseManager(fs: fs, device: device, clock: environment.clock).read()
+        }
+        return status
     }
 
     /// Records what a dry run found: pending review queue, file cache, and

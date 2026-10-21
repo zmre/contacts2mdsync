@@ -357,6 +357,9 @@ public struct SyncMetadata: Hashable, Sendable {
 
     /// `true` when nothing would be written.
     public var isEmpty: Bool { id == nil && status == nil && other.isEmpty }
+
+    /// `status` of a note that is no longer synced (out of scope, delete kept).
+    public static let detached = "detached"
 }
 
 extension Optional where Wrapped == String {

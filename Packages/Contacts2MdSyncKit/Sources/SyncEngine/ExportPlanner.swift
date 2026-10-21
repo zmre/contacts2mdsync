@@ -83,6 +83,7 @@ public struct ExportPlanner: Sendable {
         var run = PlanningRun(planner: self, inputs: inputs)
         run.reportVaultProblems()
         run.resolveIdentities()
+        run.blockDetached()
         run.applyExclusions()
         run.limitClustersToOneNote()
         run.matchUnboundContacts()
@@ -91,22 +92,6 @@ public struct ExportPlanner: Sendable {
         run.buildNotes()
         return run.plan
     }
-
-    /// The member that gets the cluster's one note: iCloud-backed first, then
-    /// local, then lowest card id.
-    static func primary(of members: [AppleContact]) -> AppleContact? {
-        func rank(_ contact: AppleContact) -> Int {
-            if contact.isICloudBacked { return 0 }
-            if contact.cards.contains(where: { $0.accountKind == .local }) { return 1 }
-            return 2
-        }
-        return members.min { (rank($0), $0.sortKey) < (rank($1), $1.sortKey) }
-    }
-}
-
-extension AppleContact {
-    /// Deterministic order that does not depend on the volatile unified id.
-    var sortKey: String { cardsByPrecedence.first?.id ?? unifiedID }
 }
 
 /// The working state of one planning run, phase by phase.
@@ -143,6 +128,17 @@ struct PlanningRun {
     var holdCreates = false
     var candidates: [Candidate] = []
     var plannedStems = Set<String>()
+    /// Records whose contact was bound by stamp, trusted id or corroboration.
+    var corroborated = Set<UUID>()
+    /// Records some contact still points at (stamp or card id), bound or not:
+    /// never "deleted in Contacts" (Google churn, ambiguity, review).
+    var claimedRecords = Set<UUID>()
+    /// Ids of notes marked `c2mdsync.status: detached` (not synced).
+    var detachedIDs = Set<UUID>()
+    /// Note paths proposed as possible matches this run.
+    var proposedPaths = Set<String>()
+    /// Two-way sync state (`nil` for a one-way export).
+    var sync: SyncRun?
 
     var index: VaultIndex { inputs.index }
     var records: RecordMap { inputs.records }
@@ -179,6 +175,9 @@ struct PlanningRun {
     // MARK: Phase 1: vault problems
 
     mutating func reportVaultProblems() {
+        for entry in index.contacts where entry.contact?.sync.status == SyncMetadata.detached {
+            if let id = entry.syncID { detachedIDs.insert(id) }
+        }
         for entry in index.problems {
             if entry.problemIsContactRelated {
                 plan.reviews.append(.unreadableFile(path: entry.path, problem: entry.problem ?? "unreadable"))
@@ -228,19 +227,24 @@ struct PlanningRun {
             } else if let id = stamps.first {
                 boundIDs[contact.unifiedID] = id
                 claimedByStamp.insert(id)
+                corroborated.insert(id)
             } else {
                 unstamped.append(contact)
             }
         }
+        claimedRecords.formUnion(claimedByStamp)
         // Cached card ids: each record goes to its strongest claimant.
         let lookup = RecordMap.Lookup(records)
         var claims: [UUID: [(contact: AppleContact, hit: RecordMap.CardHit)]] = [:]
         for contact in unstamped {
-            let hits = lookup.hits(cardIDs: contact.cardIDs).filter { !claimedByStamp.contains($0.recordID) }
+            let allHits = lookup.hits(cardIDs: contact.cardIDs)
+            claimedRecords.formUnion(allHits.map(\.recordID))
+            let hits = allHits.filter { !claimedByStamp.contains($0.recordID) }
             let trusted = hits.filter(\.trusted)
             if trusted.count > 1 { continue }  // ambiguous: let the cascade decide
-            guard let hit = trusted.first ?? hits.first(where: { corroborates(contact, record: $0.recordID) })
-            else { continue }
+            let corroboratedHit = hits.first { corroborates(contact, record: $0.recordID) }
+            guard let hit = trusted.first ?? corroboratedHit else { continue }
+            if hit.trusted || corroboratedHit?.recordID == hit.recordID { corroborated.insert(hit.recordID) }
             claims[hit.recordID, default: []].append((contact, hit))
         }
         for (recordID, claimants) in claims {
@@ -348,6 +352,8 @@ struct PlanningRun {
             // Not found, but some notes are placeholders we cannot read:
             // never conclude "deleted" (architecture §9).
             skip(contact, "note not found; it may be one of the notes not downloaded from iCloud", needsReview: false)
+        } else if records[id] != nil, !planner.options.restoreMissing, sync != nil {
+            markdownDeleted(contact, id: id)
         } else if records[id] != nil, !planner.options.restoreMissing {
             // Missing only if *this* vault had it: a stamp from another
             // vault, or a fresh root, just means "not exported here yet".

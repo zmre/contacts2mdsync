@@ -39,6 +39,12 @@ public struct CLIEnvironment: Sendable {
     public var rootAccess: RootAccess
     /// `CLI` or `GUI`, recorded with each session.
     public var trigger: String
+    /// How long `sync` waits for another run on this Mac (local lock).
+    public var lockWait: TimeInterval
+    /// Write-wait-reread delay when taking the vault lease (§11).
+    public var leaseSettle: TimeInterval
+    /// Sleeps (lock polling, lease settle); injectable so tests never wait.
+    public var sleep: @Sendable (TimeInterval) -> Void
 
     /// Creates an environment.
     public init(
@@ -57,8 +63,14 @@ public struct CLIEnvironment: Sendable {
             DeviceIdentity(id: "00000000-0000-4000-8000-00000000d001", name: "Test Mac")
         },
         rootAccess: RootAccess = .explicitOnly,
-        trigger: String = "CLI"
+        trigger: String = "CLI",
+        lockWait: TimeInterval = 60,
+        leaseSettle: TimeInterval = 60,
+        sleep: @escaping @Sendable (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
     ) {
+        self.lockWait = lockWait
+        self.leaseSettle = leaseSettle
+        self.sleep = sleep
         self.makeStore = makeStore
         self.makeVault = makeVault
         self.isDirectory = isDirectory

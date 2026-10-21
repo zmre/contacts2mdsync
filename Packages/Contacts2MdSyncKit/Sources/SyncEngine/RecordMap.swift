@@ -10,44 +10,81 @@ public struct BoundCard: Hashable, Sendable {
     public var firstSeen: Date
     /// A snapshot found this card carrying the record's stamp.
     public var stampSeen: Bool
+    /// Without stamps: the card was corroborated by the record's strong keys
+    /// or name in a snapshot at least `BoundCard.settleInterval` after it was
+    /// first seen (Google's id churn after create has settled).
+    public var confirmed: Bool
+
+    /// How long a Google card id must survive before corroboration confirms it.
+    public static let settleInterval: TimeInterval = 10 * 60
 
     /// Creates a bound card.
-    public init(id: String, containerID: String, accountKind: AccountKind, firstSeen: Date, stampSeen: Bool = false) {
+    public init(
+        id: String, containerID: String, accountKind: AccountKind, firstSeen: Date, stampSeen: Bool = false,
+        confirmed: Bool = false
+    ) {
         self.id = id
         self.containerID = containerID
         self.accountKind = accountKind
         self.firstSeen = firstSeen
         self.stampSeen = stampSeen
+        self.confirmed = confirmed
     }
 
     /// Whether the cached id alone identifies the record (architecture §6,
     /// cascade step 2). iCloud and other ids are stable; a Google card's id
     /// changes once after Google sync replaces a new card (spike S9), so a
-    /// Google id counts only after a snapshot found the card by its stamp.
+    /// Google id counts only after a snapshot found the card by its stamp or,
+    /// without stamps, confirmed it by strong keys once churn had settled.
     /// Untrusted ids are kept as hints that need corroboration.
-    public var isTrusted: Bool { accountKind != .google || stampSeen }
+    public var isTrusted: Bool { accountKind != .google || stampSeen || confirmed }
 }
 
-/// What the Apple side looked like at the last export, per markdown field, as
-/// comparison keys (the per-device merge base, architecture §4 `base_json`).
+/// The per-device merge base (architecture §4 `base_json`, §7).
 ///
-/// M2 uses it so one-way export never drops markdown-only additions: a
-/// markdown value Apple lacks is kept unless Apple had it at the last export
-/// (then Apple deleted it). M3's three-way merge builds on the same data.
+/// M2 (version `nil`) stored only what the Apple side looked like at the
+/// last export, as comparison keys per markdown field (`fields`); one-way
+/// export uses it so a markdown value Apple lacks is kept unless Apple had it.
+///
+/// From M3 (version 2) the base is what both sides **agreed on** after the
+/// last sync, field by field: a field (or list element) where Apple and the
+/// markdown note still differ after a run — a held Apple write, an unresolved
+/// conflict, a failed write — keeps its previous base, so the pending change
+/// is found again next run. Absent keys mean "known empty"; `unknown` lists
+/// fields with no base yet (merged with the first-bind rule).
 public struct RecordBase: Codable, Hashable, Sendable {
     /// Field name → comparison keys (one for scalars, sorted for lists).
     public var fields: [String: [String]]
+    /// `2` for an M3 merge base; `nil` for an M2 export base.
+    public var version: Int?
+    /// Fields without a base (first-bind rule), version 2 only.
+    public var unknown: [String]?
+    /// List field → element key → markdown label (`""` = no label).
+    public var labels: [String: [String: String]]?
+    /// Field → element key (`""` for scalars) → display text, for conflict views.
+    public var displays: [String: [String: String]]?
+    /// The note body (comparison form), when notes are synced.
+    public var body: String?
+    /// Managed tags (comparison keys).
+    public var tags: [String]?
+    /// SHA-256 of the contact image (`nil` = none).
+    public var imageHash: String?
+    /// The title generated from Apple's name at the last sync (title rule).
+    public var generatedTitle: String?
 
-    /// Creates a base.
+    /// Creates an (M2-style) base.
     public init(fields: [String: [String]] = [:]) { self.fields = fields }
 
     /// Keys of `field` (empty when absent).
     public func keys(_ field: String) -> [String] { fields[field] ?? [] }
 
-    /// Lowercase hex SHA-256 per field, for change detection (M3).
+    /// Lowercase hex SHA-256 per field, for change detection.
     public var fieldHashes: [String: String] {
         fields.mapValues { FieldHash.of($0) }
     }
+
+    /// `true` for an M3 merge base.
+    public var isMergeBase: Bool { (version ?? 0) >= 2 }
 }
 
 /// Field-hash helper shared with the state store.

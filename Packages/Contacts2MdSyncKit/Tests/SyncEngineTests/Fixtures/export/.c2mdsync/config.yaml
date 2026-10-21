@@ -7,3 +7,5 @@ groups:
   Close Friends: close_friends
   Family: family
   Work: work
+apple_writes: disabled
+stamp_contacts: false

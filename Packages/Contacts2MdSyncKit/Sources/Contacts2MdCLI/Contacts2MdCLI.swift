@@ -23,7 +23,7 @@ public enum CLIExitCode: Int32, Sendable {
 /// (`contacts2md`) and the app binary (`Contacts2MdSync <subcommand>`) run it.
 public enum Contacts2MdCLI {
     /// First arguments that select the CLI in the app binary.
-    public static let subcommandNames: Set<String> = ["status", "plan", "export", "review", "help"]
+    public static let subcommandNames: Set<String> = ["status", "plan", "sync", "export", "review", "config", "help"]
 
     /// `true` when `arguments` (without the executable path) ask for the CLI.
     /// Unknown flags such as `-NSDocumentRevisionsDebugMode` (Xcode) do not.
@@ -67,12 +67,17 @@ protocol EnvironmentCommand {
 struct RootCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "contacts2md",
-        abstract: "Export Apple Contacts to mbr-format markdown notes.",
+        abstract: "Sync Apple Contacts with mbr-format markdown notes.",
         discussion: """
             Without --root, the notes folder chosen in the Contacts2MdSync app is used.
             Warnings go to stdout with stable prefixes; errors go to stderr.
-            Exit codes: 0 ok, 1 review needed, 3 not runnable, 5 error, 64 usage.
+            Exit codes: 0 ok (also: another device or run holds the lease/lock), 1 review needed, \
+            2 Apple writes held by the change limit, 3 not runnable, 4 safety breaker (nothing written), \
+            5 error, 64 usage.
             """,
-        subcommands: [StatusCommand.self, PlanCommand.self, ExportCommand.self, ReviewCommand.self]
+        subcommands: [
+            StatusCommand.self, PlanCommand.self, SyncCommand.self, ExportCommand.self, ReviewCommand.self,
+            ConfigCommand.self,
+        ]
     )
 }

@@ -137,7 +137,9 @@ c2mdsync:
 ```
 
 - Contains nothing device-specific and no timestamps, so files stay git-diff-clean and identical across devices (no iCloud conflict copies from metadata churn).
-- `id` is also stamped on the Apple contact as a URL: label `c2mdsync`, value `x-c2mdsync:<uuid>`. The stamp goes on the iCloud underlying card. A Google-only contact gets it on its Google card (survival on Google is still being verified, spike S1). The stamp survived iCloud.com and iPhone edits.
+- `id` can also be stamped on the Apple contact as a URL: label `c2mdsync`, value `x-c2mdsync:<uuid>`. The stamp goes on the iCloud underlying card. A Google-only contact gets it on its Google card (survival on Google is still being verified, spike S1). The stamp survived iCloud.com and iPhone edits.
+- Stamping is optional and off by default (`stamp_contacts: true` turns it on, and it needs `apple_writes: enabled`). One device identifies contacts by the card ids in its own state. Several devices sharing a vault need stamps to agree on identity, and `sync` warns when more than one device appears without them. Turning stamping off never removes stamps.
+- `status: detached` marks a note that is no longer synced: its contact left the sync scope, or the user kept the note after the contact was deleted in Contacts. The engine never writes to a detached note and never adopts it automatically.
 - A note with `type: person|organization` and **no** `c2mdsync.id` is a *markdown-only candidate*. It is never pushed to Contacts unless the user opts it in from the UI.
 - Two files with the same `c2mdsync.id` (copied file) pause sync for that record until the user picks one.
 
@@ -191,6 +193,23 @@ c2mdsync:
 
 **Adoption (M2).** A hand-written contact note (`type: person|organization`, no `c2mdsync.id`) that matches an Apple contact is *adopted*: it keeps its path, filename, `title`, body, comments and unknown keys, gains `c2mdsync.id`, and receives Apple's values by the rules above (with no base, so its own values all stay). Adoption happens automatically only on a device's first import into the vault and only for an unambiguous match on email/phone **and** name; otherwise it is proposed for review (`contacts2md review`). A copy of every note rewritten by an export is saved first (architecture §6, "What M2 implements").
 
+## 4b. Two-way sync (M3)
+
+`contacts2md sync` merges each field three ways: the Apple side (by card precedence), the note, and what both agreed on at the last sync (architecture §7).
+
+| Data | Two-way rule |
+|---|---|
+| name parts, `aliases` nickname/maiden name, `company`, `department`, `job_title`, `apple.phonetic_*`, `dates.birthday` | The side that changed wins. If both changed to different values, both keep theirs and a conflict is queued. |
+| `emails`, `phones`, `urls`, `social`, `im`, `addresses`, `dates` (except birthday, `death` and free-text dates) | Element by element. Additions from either side are kept, deletions from one side apply, the note keeps its order and display text, and Contacts additions are appended. A label changed on one side applies. |
+| `relationships` | Element by element, keyed by type and target record. Attributes, `from:` edges and mbr-only types stay markdown-only. |
+| `tags` | Managed tags follow Apple group membership both ways; unmanaged tags never touch Apple. |
+| body | With the notes entitlement: line-based three-way merge with the Apple note. Without it: markdown-only. |
+| `image` | By hash; the sidecar file is the markdown side. |
+| `title` | Markdown-owned (§5). |
+| unknown keys, `apple:`/`c2mdsync:` extras, plain aliases | Never touched. |
+
+Contacts is written only when `.c2mdsync/config.yaml` has `apple_writes: enabled`. Without it, `sync` updates notes and reports the Contacts-side changes as held. A markdown-only note (no `c2mdsync.id`) reaches Contacts only after the user opts it in (`review decide <mdonly-…> add`), and only when no contact matches it.
+
 ## 6. Relationships
 
 mbr resolves `to: "[[X]]"` by **global name** (title → alias → filename stem, case-insensitive), so links survive moves. Path-style links (`[[people/jane]]`) do not resolve inside `relationships:` and are never emitted.
@@ -217,6 +236,7 @@ mbr resolves `to: "[[X]]"` by **global name** (title → alias → filename stem
 - Tags follow mbr normalization: lowercase, spaces → `_`.
 - New Apple groups appear as new managed tags. New groups from markdown are created only via the UI ("Create Apple group from tag").
 - Contacts with no iCloud/Local card can't join groups; the tag stays in markdown and the UI shows a warning (no flapping).
+- A tag added in markdown adds the contact's iCloud (or On My Mac) card to the group with that name; a removed tag removes the contact from it.
 
 ## 8. Vault layout
 
@@ -243,11 +263,13 @@ default_region: US
 groups:
   "Close Friends": close_friends
   "Family": family
+apple_writes: disabled     # enabled: `sync` may write to Apple Contacts (backed up first)
+stamp_contacts: false      # true: stamp synced contacts with their id (needs apple_writes)
 limits:
   max_apple_changes_without_approval: 25
   mass_vanish_count: 10
   mass_vanish_percent: 5
-scope:                     # shape defined now; enforced from M3
+scope:                     # enforced by `sync` (architecture §12)
   containers: [icloud, google]
   include_groups: []
   exclude_groups: []

@@ -28,7 +28,8 @@ extension PlanningRun {
             let strongRivals = matches.dropFirst().filter { $0.score.confidence >= MatchScore.gateThreshold }
             let unique = strongRivals.isEmpty && (scored.byNote[best.index] ?? []) == [contact.unifiedID]
             let isRelocation = entry.syncID.map { records[$0] != nil } ?? false
-            if !taken.contains(best.index), best.score.confidence >= MatchScore.adoptThreshold, unique,
+            let isDetached = entry.syncID.map(detachedIDs.contains) ?? false
+            if !taken.contains(best.index), best.score.confidence >= MatchScore.adoptThreshold, unique, !isDetached,
                 isRelocation || plan.autoAdopt
             {
                 let reasons = best.score.reasons.joined(separator: ", ")
@@ -99,6 +100,7 @@ extension PlanningRun {
         _ contact: AppleContact, _ match: (index: Int, score: MatchScore), _ candidates: CandidateIndex
     ) {
         let entry = candidates.candidates[match.index].entry
+        proposedPaths.insert(entry.path)
         plan.reviews.append(
             .possibleMatch(
                 contact: ref(contact), path: entry.path, confidence: match.score.confidence,

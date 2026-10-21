@@ -30,11 +30,12 @@ Packages/Contacts2MdSyncKit/
   ContactsShim/     Objective-C: @try/@catch wrappers (change history, notes probe, vCard) → NSError
   ContactsAdapter/  CNContactStore ⇄ ContactModel, snapshot, groups, stamp, history
   VaultIndex/       VaultFS seam + LocalVaultFS, incremental scan (file cache), id/title/alias/stem indexes
-  SyncEngine/       Planner, Matching, Clustering, Executor, RecordMap, SyncStateStore, DecisionLog (M1–M2);
-                    Merger, Lease (M3+)
+  SyncEngine/       ExportPlanner/Executor, Matching, Clustering, RecordMap, SyncStateStore, DecisionLog (M1–M2);
+                    SyncPlanner, RecordMerger, Diff3, AppleWritePlanner, SyncExecutor, LeaseManager,
+                    LocalLock, SyncScope (M3)
   SyncStateDB/      SyncStateStore on SQLite (GRDB), M1 records.json import
   Contacts2MdCLI/   CLI library + VaultSession (shared with the app): status / plan / export / review (M1–M2),
-                    sync (M3) — see §15
+                    sync / config (M3), see §15
   contacts2md/      dev executable wrapping Contacts2MdCLI (the app binary runs the same CLI)
   SyncTestSupport/  FakeContactStore, InMemoryVault, fixtures (~60 contacts), golden-file helper
 ```
@@ -61,7 +62,9 @@ protocol ContactStore: Sendable {                      // ContactModel
   var capabilities: StoreCapabilities { get throws }   // notesAvailable, iCloudContainerID, writableContainers
   func snapshot() throws -> AppleSnapshot              // unified contacts + underlying cards + containers + groups
   func fetch(unifiedIDs: [String]) throws -> [AppleContact]
-  func apply(_ batch: AppleWriteBatch, author: String) throws -> AppleWriteResult   // M1: .stamp only
+  func apply(_ batch: AppleWriteBatch, author: String) throws -> AppleWriteResult
+                                                       // card-level ops: stamp, removeStamp, update, create,
+                                                       // delete, addMember, removeMember (M3)
   func changes(since token: Data?, excluding authors: [String]) throws -> HistoryResult
   func exportVCards() throws -> Data                   // vCard backup before Apple writes
 }
@@ -87,7 +90,7 @@ struct DeviceIdentity             // M2: stable id + computer name (`<state>/dev
 
 Paths in `VaultFS` are root-relative strings (`Inbox/Jane Doe.md`), never URLs: identity is never a path, and relative strings make fakes and goldens trivial.
 
-`FakeContactStore` has switchable misbehaviours that mirror real-world bugs: unified contacts across iCloud/Google/read-only containers, identifier churn, server-normalization echo (`4155550100` → `(415) 555-0100`), linked-card display precedence, missing notes entitlement (the key silently unavailable, as observed in spike S2, or error 102), per-container groups. (M1 implements unified multi-account contacts, groups, images, relations, the notes switch, denied access, and stamping; churn, echo and display precedence arrive with the merge work in M3.)
+`FakeContactStore` has switchable misbehaviours that mirror real-world bugs: unified contacts across iCloud/Google/read-only containers, identifier churn, server-normalization echo (`4155550100` → `(415) 555-0100`), linked-card display precedence, missing notes entitlement (the key silently unavailable, as observed in spike S2, or error 102), per-container groups. Since M3 the fake writes to card values and recomputes the unified view from the cards (the most recently saved card wins single-valued display). It also models phone normalization on save (`setNormalizePhonesOnSave`), a container that silently ignores writes to a field (`dropWrites`), a failed save request, and the unified-save fan-out: an operation addressed to a linked contact's unified id writes to every card and increments `unifiedSaveCount`, which every scenario test expects to stay 0.
 
 The app target holds only SwiftUI, an `@Observable AppModel`, FSEvents + `CNContactStoreDidChange` watchers, security-scoped bookmarks, and a `SyncCoordinator` actor that serializes runs.
 
@@ -129,6 +132,10 @@ Every value carries a **display form** (exactly as written) and a **comparison k
 | body         | `\r\n`→`\n`, trailing whitespace trimmed                                         |
 | tag          | mbr normalization: trim, lowercase, spaces → `_`                                 |
 | image        | sha256 of `imageData`; unavailable data with a thumbnail = *unknown*             |
+| merge scalar | trimmed NFC text, case kept (a capitalization fix is a change); birthday as ISO   |
+| relationship | `type` + `r:<record id>` when the name resolves to exactly one record, else `type` + `n:<name key>` |
+
+Social and IM keys include the service (the markdown label), so the same handle on two services is two elements. `company` merges on the organization name, so `[[Acme Corp]]` in markdown and `Acme Corp` in Contacts are equal.
 
 Observed rewrites behind these keys ([spike S5](spikes.md#s5-normalization-catalog), iCloud only so far; Google pending):
 
@@ -151,9 +158,11 @@ Observed rewrites behind these keys ([spike S5](spikes.md#s5-normalization-catal
 
 Device-state tables (M2 schema `v1`, `SyncStateDB`): `records` (id, unified id *cache*, last path, `base_json`), `record_cards` (record id, card id, container, account kind, first seen, `stamp_seen`), `field_hashes` (record id, field, sha256 of the base keys), `file_cache` (path, mtime, size, sha256, kind contact/other/problem, sync id, title, aliases, problem, contact-related flag), `groups` (CN group id, container, name, tag), `pending` (review item id, kind, JSON, first seen), `decisions` (mirror of the vault logs), `reported_problems` (sha256 of non-contact files with invalid YAML already reported), `unapplyable` (M3, empty), `sessions` (one JSON row per run, last 500), `meta` (`last_export`, `pending_computed_at`; `history_token` from M5).
 
-`base_json` is the Apple side at the last export as comparison keys per markdown field (`emails`, `job_title`, …, plus `name`: the person-name and title keys). M2 already uses it in the one-way export (markdown-schema §4a) and to corroborate untrusted card ids; M3 merges against it.
+`base_json` held the Apple side at the last export in M2 (comparison keys per markdown field, plus `name`). From M3 it is the merge base: what Apple and the note agreed on after the last sync (`RecordBase` version 2, see §7). M3 schema `v2` adds `unapplyable.attempted` / `observed` and `record_cards.confirmed`, and uses these `meta` keys: `vanished_records` (record id → first time its contact was missing), `image_hashes` (note images by path, mtime and size, so unchanged images are not re-read).
 
-The vault-side decision log is `.c2mdsync/devices/<device-id>/decisions.jsonl`, one JSON object per line: `{"id", "kind", "at", "device_id", "device_name", "contacts": [{"card_ids", "title"}], "path", "sync_id", "item"}`. Kinds: `distinct-people` (contacts pairwise distinct; with `path`: the contact is not the person in that note), `sync-only` (keep `contacts[0]`, exclude the rest), `ignore-candidate` (`path` or `sync_id`), `adopt` (`path` → `contacts[0]`), `dup-id-keep` (`path` keeps `sync_id`). Contacts are referenced by underlying card ids, never the unified id. Every device reads the union; unknown kinds are ignored, unreadable lines reported as warnings.
+The vault holds `.c2mdsync/lease.json` (§11) and `.c2mdsync/devices/<id>.json` (`device_id`, `device_name`, `last_sync`, `summary`), written after every sync. The device records let a device see that others use the vault.
+
+The vault-side decision log is `.c2mdsync/devices/<device-id>/decisions.jsonl`, one JSON object per line: `{"id", "kind", "at", "device_id", "device_name", "contacts": [{"card_ids", "title"}], "path", "sync_id", "item"}`. Kinds: `distinct-people` (contacts pairwise distinct; with `path`: the contact is not the person in that note), `sync-only` (keep `contacts[0]`, exclude the rest), `ignore-candidate` (`path` or `sync_id`), `adopt` (`path` → `contacts[0]`), `dup-id-keep` (`path` keeps `sync_id`). M3 adds `resolve-conflict` (`item` = conflict id, `choice`, `apple_hash`, `markdown_hash`), `apple-delete` (`sync_id`, `choice` trash/keep/restore), `markdown-delete` (`sync_id`, `contacts`, `choice` restore/unlink/delete-contact) and `create-contact` (`path`). Contacts are referenced by underlying card ids, never the unified id. Every device reads the union; unknown kinds are ignored, unreadable lines reported as warnings.
 
 ## 5. Sync cycle
 
@@ -178,6 +187,8 @@ acquire lease ──► scan vault ──► snapshot Apple ──► match/bind
 6. **Safety rails** — §9.
 7. **Execute** — Apple writes first (one `CNSaveRequest` per batch, `transactionAuthor = com.zmre.contacts2mdsync.<deviceID>`), then re-fetch the touched contacts, then markdown writes.
 8. **Refresh base** from the post-write re-fetch so that server normalization becomes the new base and never echoes back. A card we just created in a Google container is re-fetched by its stamp, not by identifier: Google sync replaces it with a new identifier shortly after the first save ([spike S9](spikes.md#s9-identifier-stability)).
+
+As implemented in M3 (`SyncPlanner` → `SyncPlan` → `SyncExecutor`): the run takes the local lock and the lease, scans the vault, takes a full snapshot, reuses the M2 identity phases (stamp, cached card ids, adoption, clusters, decisions), then applies unlink decisions and scope, detects deletions, plans opted-in creates, and merges every bound record. The executor saves a vCard backup, applies all Apple operations as one batch tagged `com.zmre.contacts2mdsync.<deviceID>`, takes a second full snapshot, records writes a card did not keep, writes notes (compare-and-swap), and stores the agreed base. If the batch fails, the adapter retries each card's operations in its own save request. The post-write re-fetch is a full snapshot that finds each record again by its card ids or its stamp. We never create cards in Google, so the Google create churn does not arise from our own writes.
 
 ## 6. Identity and duplicate prevention
 
@@ -227,12 +238,26 @@ The Apple-side value of a field is computed from the underlying cards, not read 
 
 Write targets:
 
-- Stamp lives on the iCloud underlying card; if none, the first writable card. Google-only contacts get the stamp on the Google card (stamp survival on Google is still being verified, [spike S1](spikes.md#s1-stamp-survival)).
+- Stamp lives on the iCloud underlying card; if none, the first writable card. Google-only contacts get the stamp on the Google card (stamp survival on Google is still being verified, [spike S1](spikes.md#s1-stamp-survival)). Stamping is optional (see *Stamping is optional* below).
 - **Additions** go to the iCloud card (for Google-only contacts, the Google card).
 - **Edits/deletes of existing values** go to **every** writable underlying card that holds a value with that comparison key. A value often exists on both linked cards (the shared email case), and editing only one card would let the other copy come back through the union.
 - **Single-valued fields** are written to the iCloud card and to every other writable card that has a non-empty value for the field, all in one `CNSaveRequest`, so the cards agree whichever one wins the unified display. After save, each written card is re-fetched and checked. A card that doesn't keep the value (server rejection or rewrite outside its comparison key) gets the field marked `unapplyable` for that card and is not retried: the main Apple-side anti-ping-pong guard.
 - **Never save a mutable copy of a unified contact.** Spike S4 showed that it writes the change to every linked card (the same new email, with the same labeled-value id, appeared on both cards, and the Google card's own job title was overwritten). All saves target underlying cards fetched with `unifyResults = false`.
 - **New contacts** (opted in from markdown) are created in the iCloud container.
+
+### Stamping is optional
+
+`stamp_contacts: true` in `.c2mdsync/config.yaml` turns stamping on. The default is off, because a single device does not need stamps. Stamps are Apple writes, so they also need `apple_writes: enabled` (§9). Without them they are reported as held.
+
+Without stamps, identity rests on this device's state and on matching:
+
+- Cached underlying card ids (cascade step 2). iCloud ids were stable in every spike run. A Google id is trusted once a snapshot found it with the stamp or, without stamps, once the contact still matched the record's base (a strong key or the name) in a snapshot at least 10 minutes after the id was first seen (`BoundCard.confirmed`). Before that, a Google id binds only with that corroboration.
+- Strong keys and names (steps 3–6) re-find a contact whose cards all changed (relocation, §6 "What M2 implements").
+- A vanished card id is re-matched through the cascade before anything counts as deleted (§9).
+
+Stamps matter when several devices share a vault, because each device's cached card ids are its own. When `.c2mdsync/devices/` lists more than one device and stamping is off, every sync prints one `WARNING identity` line ("2 devices share this vault; enable stamp_contacts so devices agree on identity"), and `StoredStatus.identityWarning` carries the same text for the app. Nothing turns stamping on by itself.
+
+Turning `stamp_contacts` on stamps every bound record on the next sync. That sync takes a vCard backup first, and each stamp counts toward the blast-radius limit, so a large address book needs `--max-apple-changes` once. Turning it off never removes stamps. Stamps already on cards still identify contacts when they are read. `contacts2md export --stamp` remains as the M1 one-shot.
 
 ### Linking/unlinking after the fact
 
@@ -318,11 +343,35 @@ struct SyncConflict: Identifiable, Codable {
 
 A conflict never blocks the record's other fields. Resolutions are applied on the next run only if both side hashes still match; otherwise the conflict is regenerated.
 
+### What M3 implements
+
+`RecordMerger` merges one record from three field views: the Apple side by card precedence, the note, and the base.
+
+- **Scalars** (name parts, nickname, maiden name, company, department, job title, phonetics, birthday) follow the table. Without a base, an empty side takes the other side's value and two different values conflict.
+- **Lists** are merged in slots. Each base element is one slot. For each side the merger notes whether the element was kept, relabeled, edited or removed. A removed element and an added element with the same label on one side count as an edit. With an M2 base, whose labels are unknown, the only removed/added pair on a side also counts as an edit. Elements added on either side get their own slots. The note keeps its order, and Apple additions are appended. A Contacts-side edit replaces the markdown element in place.
+- **Label conflicts** offer Keep Contacts and Keep Markdown only. Keep Both would need the same value twice under one comparison key. A delete against an edit, or two different edits, offer Keep Both where both sides still have a value.
+- **Tags** use a three-way set merge over managed tags. Without a base the result is the union.
+- **Body** is merged only when notes are available. The merger runs a line diff3 against the base body. Overlapping hunks conflict, and Keep Both writes the markdown text, a `---` line, then the Contacts text.
+- **Image** compares hashes. A thumbnail-only Apple image, a URL, a missing file or an evicted iCloud file is unknown and never compared.
+- **Title** is regenerated only when Apple's name changed this run and the title still equals the title generated at the last sync (`RecordBase.generatedTitle`; for M2 bases the folded name keys). The old title becomes a plain alias, and `to: "[[Old]]"` links in other synced notes that resolve to the record are rewritten.
+
+`SyncConflict.id` is a stable string (`conflict-<10 hex>` from record, field and element), not a random UUID, so a decision made in one run finds the same conflict in the next. Resolutions are `resolve-conflict` decisions carrying both side hashes. A side hash covers the comparison key and label of that side.
+
+**The agreed base.** After a run the base of each field or element is what Apple (from the post-write snapshot) and the note (as written) agree on. A held write, a failed write, an unresolved conflict or a refused value keeps the previous base for that field, so the same change is found again next run. It is never mistaken for a change on the other side. An M2 base (`version` nil) is read as follows. Emails, phones, URLs, addresses and the plain scalars keep their keys with unknown labels. Company, social, IM, dates, birthday, relationships, tags, body and image have no base, and the first-bind rule applies once.
+
+**Unapplyable values.** After the Apple batch, the executor re-reads each written card. A scalar it did not keep becomes an alias: while the card still shows the observed value, the merge treats it as the value we wrote, so it is neither rewritten nor raised as a conflict. A list write it did not keep (add, remove, replace, relabel) is skipped for that card from then on. A managed tag that no iCloud or On My Mac card can carry is recorded the same way and reported once. An entry expires as soon as either side changes the value.
+
+**Apple write targets** follow *Stamping and write targets* (§6): additions go to the target card, edits and deletes go to every writable card holding the key, and single values go to the target card plus every writable card that has the field. A list edit names the card's current value, so the adapter changes that `CNLabeledValue` with `settingLabel(_:value:)` and keeps its identifier. When the markdown label still maps to the card's label, the card's label is kept, so labels do not flap. Values the canonical model cannot represent, and the stamp URL, are always kept.
+
 ## 8. Relationships, groups, notes
 
 **Relationships** — see [markdown-schema.md §6](markdown-schema.md#6-relationships). On a title rename: old title appended as plain alias; `to:` references in managed records rewritten; Apple relation names on other cards updated. Non-contact notes linking `[[Old]]` are reported in the UI with a one-click update; the alias and filename stem keep them resolving meanwhile.
 
+In M3 both sides' targets resolve to record ids through note titles, aliases and the Apple contacts' name variants, so "Jane Q. Doe" in Contacts and `[[Jane Doe]]` in markdown are the same element. A relation written to Apple carries the target contact's Apple display name, not the note title. Markdown-only types (`employer`, `employee`, `manages`, `assists`), `from:` edges and edges without `to:` never reach Apple. M3 does not yet rewrite Apple relation names on other cards after a rename. Those relations still resolve by record id, so nothing churns.
+
 **Groups** — see [markdown-schema.md §7](markdown-schema.md#7-tags-and-groups). Tracked by CN group id per device; shared config keyed by group name. Apple-side group rename updates the map and renames the tag in managed files. Groups in non-iCloud/Local containers are ignored.
+
+In M3 a managed tag added in markdown adds the contact's first iCloud or On My Mac card to a group with that name in the same container. A removed tag removes every card of the contact in that group's container. A tag that no card can carry stays in markdown and is reported once (`WARNING blocked`). Group renames in Apple are not followed yet: a renamed group appears as a new group with a new tag.
 
 **Notes** — feature-detected at runtime (`capabilities.notesAvailable`): probe-fetch one card with `CNContactNoteKey`, then check `isKeyAvailable(CNContactNoteKey)`. An un-entitled build gets no error: the fetch succeeds and the key is silently missing (spike S2, macOS 27). Error 102 is still treated as unavailable in case an entitled-but-revoked build reports it. Never read `.note` without the `isKeyAvailable` check: an unfetched key raises `CNContactPropertyNotFetchedException`. When unavailable, the body is markdown-only and the body field is excluded from merge. Ad-hoc/Nix-built binaries will never have it; the notarized Developer ID release will once Apple approves the request.
 
@@ -342,8 +391,18 @@ A conflict never blocks the record's other fields. Resolutions are applied on th
 
 A card id that vanishes while its stamp shows up on another card is identifier churn, not a delete (Google replaces cards we create, spike S9): the record is rebound silently. Only a card that is gone by id, stamp and cascade counts toward the Apple delete rail.
 
+### As implemented (M3)
+
+- **Gating.** `sync` writes to Apple Contacts only with `apple_writes: enabled` in `.c2mdsync/config.yaml` (default disabled). Without it the run writes markdown and reports every Apple change as `held … apple writes disabled`. Held changes are not errors, and the agreed base keeps them pending. Stamps are Apple changes too.
+- **Backups.** An Apple write needs a `BackupReceipt`, which only `VCardBackup.backup` creates. No receipt means no write at all.
+- **Apple delete.** A record that no contact references by stamp or card id, and whose note matches no unbound contact at 0.5 or more, is recorded in `vanished_records`. It is queued only when it is still missing at least 10 minutes after it was first seen. A contact that reappears clears it. The queue choices are `trash` (move the note to the Trash), `keep` (set `c2mdsync.status: detached`) and `restore` (create the contact again from the note, after the create gate).
+- **Markdown delete.** The `missing-…` item offers `restore` (write the note again), `unlink` (forget the record, remove its stamps, never export the contact again) and `delete-contact` (delete every writable card of the contact).
+- **Mass-vanish breaker.** It counts records newly missing on one side in this run. More than `mass_vanish_count` (10), or more than `mass_vanish_percent` (5 %) when at least 3 records vanished, stops the run before anything is written (exit 4). `--allow-mass-vanish` overrides it. Deletions are still only queued.
+- **Blast radius.** Each record with Apple writes counts once (an update, create, delete, stamp or unstamp). More than the limit holds all Apple writes, the markdown writes still run, and the exit code is 2. `--max-apple-changes N` approves up to N.
+
 ## 10. Change detection and echo suppression
 
+- M3 compares a full snapshot with the merge base on every run. The history-token hook (`ContactStore.changes(since:excluding:)`, the `history_token` meta key) is left for M5.
 - **Markdown**: canonical-model hash vs base (bytes never compared directly). FSEvents (file-level) triggers a debounced run. Own writes are remembered as (path, sha) for 30 s and ignored.
 - **Apple**: full snapshot diff through M4 (thousands of contacts ≈ 1 s). From M5 the ObjC-shimmed change-history enumerator narrows the set; history fetch excludes `com.zmre.contacts2mdsync.*` authors (spike S3: works); a `DropEverything` event, a nil token, or error 603/604 → full snapshot. `DropEverything` is the main reset signal: a garbage token raised no error and no exception, it just returned `DropEverything` plus the full snapshot (S3). Group events arrive even with `includeGroupChanges = false`, so events are filtered by type. Saves made by Google sync after our own writes (for example, replacing a card we created) are not authored by us and show up as changes; comparison keys and the stamp-based re-fetch absorb them. `CNContactStoreDidChange` is only a debounced "go look" signal.
 - **Server echo** (iCloud/Google reformatting our writes) is neutralized by comparison keys plus refreshing the base from a post-write re-fetch.
@@ -369,13 +428,16 @@ Live sync is event-driven, not polling. Events can be missed, though: the app ma
 ## 11. Multi-device
 
 - **Lease** `.c2mdsync/lease.json`: `{device_id, device_name, acquired_at, heartbeat_at, expires_at}`; heartbeat 5 min, TTL 20 min. Acquire: expired or explicit "Take Over"; write, wait ~60 s, re-read, proceed only if still ours. Advisory — an accidental double leader converges because merges are idempotent and identical writes are skipped.
+- M3 (`LeaseManager`) renews its own unexpired lease without waiting. It skips the 60 s wait while no other device has ever used the vault and the lease was not someone else's. A sync refreshes the heartbeat when it finishes and leaves the lease in place until it expires. `contacts2md sync --take-over` takes it. The wait and the sleep are injectable (`CLIEnvironment.leaseSettle`, `sleep`), and tests use 0.
 - **Followers** are read-only: they show status and dry-run diffs; user actions go to their own `decisions.jsonl`.
 - **iCloud conflict versions** (`NSFileVersion`): canonically equal → auto-resolve keeping current; else raise a record conflict.
 - **Handover** is safe because each device keeps its own base.
 
-## 12. Scope (shape now, enforcement M3)
+## 12. Scope
 
 See `scope:` in [markdown-schema.md §8](markdown-schema.md#config-yaml-sketch). Precedence: contact rule > group rule; exclude > include. Leaving scope never deletes anything: `on_leave_scope: detach` sets `c2mdsync.status: detached` and stops syncing that file.
+
+`sync` enforces it (`SyncScope`). `exclude_contacts` wins over everything. `markdown.include_paths` limits where synced notes may live. `include_contacts` then wins over groups, containers and `require_tag`. `exclude_groups` wins over `include_groups`. `containers` lists account kinds (`icloud`, `google`, `local`, `exchange`, `carddav`), and a contact needs a card in one of them. `require_tag` checks the note's tags (or, for a contact without a note, its managed tags). An unbound contact outside scope is not exported. A bound one is detached. Contacts of detached notes are never synced, in `export` too, and a detached note is never adopted automatically.
 
 ## 13. Platform notes
 
@@ -392,7 +454,7 @@ See `scope:` in [markdown-schema.md §8](markdown-schema.md#config-yaml-sketch).
 - Unit tests per module (Swift Testing).
 - Golden-file tests for the emitter; round-trip `parse(emit(x)) == x`.
 - Fixtures validated by the real `mbr` binary (flake check) — zero contact "problems".
-- Scenario DSL: one test per row of the merge table; echo convergence; unapplyable; delete queues; breakers.
+- Scenario DSL (`SyncTestSupport.SyncHarness`, `World` in the tests): one test per row of the merge table; echo convergence; unapplyable; delete queues; breakers. The scenario suites run with `stamp_contacts` off and on.
 - Property tests: random edits on both sides → sync twice → fixpoint, no duplicates, no data loss beyond explicit deletes.
 - Multi-device simulation: two state stores, shared `InMemoryVault` with propagation delay, one Apple store with delay.
 
@@ -418,6 +480,7 @@ macOS ties both Contacts permission (TCC) and the sandboxed security-scoped fold
 | `contacts2md plan`            | Dry run: what a sync would change, plus what would be skipped                 |
 | `contacts2md sync`            | Run one sync cycle unattended                                                |
 | `contacts2md export` (M1)     | One-way Apple → markdown; dev/testing                                        |
+| `contacts2md config` (M3)     | Show or set `apple_writes` and `stamp_contacts`                              |
 
 Flags: `--quiet` (warnings and errors only), `--json` (one JSON document on stdout for scripting), `--verbose`.
 
@@ -435,7 +498,7 @@ common: --quiet  --verbose
 - `--stamp` requires `--yes`; it takes a vCard backup to `<state>/backups/` first and refuses to stamp if that fails (nothing is written at all in that case).
 - `--default-folder` / `--region` are saved into `.c2mdsync/config.yaml`.
 - Plan lines: `create md`, `update md <path>  (changed keys)`, `write image`, `write config`, `stamp apple`; executed lines: `created`, `updated`, `wrote`, `backup`, `stamped`. Then `WARNING …` lines, the `summary` line, and for dry runs a `note` line.
-- `--json` is not implemented yet (M3, with `sync`).
+- `--json` arrived in M3 (see below).
 - Usage errors exit 64 (ArgumentParser's `EX_USAGE`), in addition to the table below.
 
 **M2 as implemented** (app binary also dispatches on `review`):
@@ -459,6 +522,26 @@ common: --quiet  --verbose
 - Exit 1 only for contact-related review items or skipped contacts that need a decision; non-contact notes with invalid YAML and contacts excluded by decisions do not count.
 - `status` adds `review <n> pending (as of …)` and Apple `linked=` / `cards=` counts.
 - `bin/contacts2md` in the nix package (and `just app-cli`) execs the app binary.
+
+**M3 as implemented** (app binary also dispatches on `sync` and `config`):
+
+```
+contacts2md sync   [--root <dir>] [--max-apple-changes N] [--allow-mass-vanish] [--allow-undownloaded] [--take-over]
+contacts2md plan   [--root <dir>] [--one-way] [--max-apple-changes N] [export options]
+contacts2md config [--root <dir>] [--apple-writes enabled|disabled] [--stamp-contacts true|false]
+contacts2md review decide <item-id> <choice>
+common: --quiet  --verbose  --json
+```
+
+- `sync` waits up to 60 s for the local lock (`<state>/<vault_id>/sync.lock`, `flock`), then takes the lease. If another run holds the lock or another device holds the lease, it prints a `note` and exits 0. It needs a vault exported or synced on this device before, else exit 3.
+- `plan` shows the two-way plan once the vault has been exported or synced on this device. Before that, or with `--one-way`, it shows the export plan.
+- Plan lines add `update apple`, `create apple`, `delete apple`, `stamp apple`, `unstamp apple`, `trash md`, `detach md`, `link md` and `held apple … — <reason>`. Executed lines are `updated apple …`, `created apple`, `deleted apple`, `stamped apple`, `unstamped apple`, `trashed md`, `detached md`, `linked md`, `backup apple` and `backup md`. Held stamps are summarized in one line.
+- New warnings: `WARNING conflict`, `WARNING delete`, `WARNING unapplyable`, `WARNING blocked`, `WARNING identity`, `WARNING limit` (blast radius) and `WARNING create`. The breaker message goes to stderr.
+- `summary  apple c/u/d …  md c/u/d …  skipped …  pending-review …  held …  <time>`: for markdown, `d` counts notes moved to the Trash.
+- `--json` prints one document: `command`, `started_at`, `device`, `root`, `exit_code`, `items` (`verb`, `side`, `text`), `warnings`, `notes`, `errors`, `summary`, `reviews`, `conflicts`, `settings`. Errors also go to stderr.
+- Review choices: conflicts `apple | markdown | both`; deleted in Contacts `trash | keep | restore`; note deleted `restore | unlink | delete-contact`; markdown-only notes `add | ignore`. Markdown-only items are informational and never make the exit code 1.
+- `status` adds `sync apple_writes=… stamp_contacts=… devices=N`, the lease holder, the identity warning, and counts of conflicts, deletions and markdown-only notes.
+- Exit codes follow the table below. Write failures give 5. A tripped breaker gives 4 even for `plan`.
 
 ### What runs vs. what is skipped
 
@@ -518,12 +601,10 @@ Code 1 is separate from 0 so a wrapper can notify only when review is needed.
   programs.contacts2mdsync.schedule = {
     enable = true;
     interval = 3600;            # seconds → launchd StartInterval
-    # or calendar = [{ Minute = 0; }];
-    logFile = "~/Library/Logs/Contacts2MdSync/sync.log";
   };
   ```
 
-  This creates `launchd.user.agents.contacts2mdsync-sync` that runs `contacts2md sync --quiet`.
+  This creates the user agent `org.nixos.contacts2mdsync-sync`, which runs `contacts2md sync --quiet`. The log goes to `<primaryUserHome>/Library/Logs/Contacts2MdSync.log` by default. launchd needs an absolute path there, so the module requires `system.primaryUser`.
 - **cron may work** (`0 * * * * /Applications/Nix\ Apps/Contacts2MdSync.app/Contents/MacOS/Contacts2MdSync sync`), subject to spike S11. In the spike, cron behaved the same as launchd (`notDetermined` for an ungranted binary).
 - Settings ▸ General gets a "Sync every [1 hour ▾] in the background" toggle that installs the same LaunchAgent via `SMAppService` for non-nix installs.
 
