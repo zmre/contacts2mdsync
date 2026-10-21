@@ -52,6 +52,20 @@ FOUNDATION_EXPORT NSString *const C2MExceptionNameKey;
                                                           error:(NSError *_Nullable *_Nullable)error
     NS_SWIFT_NAME(c2m_changeHistoryEvents(for:token:));
 
+/// Probes whether `CNContactNoteKey` can be fetched (it needs the
+/// `com.apple.developer.contacts.notes` entitlement). Fetches at most one
+/// contact. Exceptions are converted to errors, so this never crashes.
+///
+/// - Returns: `YES` when notes are readable; `NO` with `error` set otherwise
+///   (`CNErrorCodeUnauthorizedKeys` (102) when the entitlement is missing).
+- (BOOL)c2m_probeNoteAccessWithError:(NSError *_Nullable *_Nullable)error
+    NS_SWIFT_NAME(c2m_probeNoteAccess());
+
 @end
+
+/// `+[CNContactVCardSerialization dataWithContacts:error:]` with Objective-C
+/// exceptions (e.g. a contact missing a required key) converted to errors.
+FOUNDATION_EXPORT NSData *_Nullable C2MVCardData(NSArray<CNContact *> *contacts,
+                                                 NSError *_Nullable *_Nullable error);
 
 NS_ASSUME_NONNULL_END

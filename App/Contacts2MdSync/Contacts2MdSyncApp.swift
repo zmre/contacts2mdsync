@@ -1,6 +1,7 @@
 import SwiftUI
 
-@main
+/// The SwiftUI app. Launched from `EntryPoint.main()` when the binary is not
+/// invoked as a command-line tool.
 struct Contacts2MdSyncApp: App {
     var body: some Scene {
         WindowGroup {

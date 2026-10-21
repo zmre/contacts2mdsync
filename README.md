@@ -8,7 +8,7 @@ A macOS app (iPadOS/iOS later) that mirrors Apple Contacts into [mbr](https://zm
 - Two-way, field-level sync with automatic conflict resolution. You're asked only when both sides changed the same thing differently.
 - Built to avoid duplicates, including unlinked iCloud and Google copies of the same person.
 
-**Status:** M0 (scaffolding). Nothing syncs yet. See [docs/plan.md](docs/plan.md).
+**Status:** M1 — one-way export (Apple Contacts → markdown) from the command line, with idempotent re-export, duplicate detection, and output validated against the real mbr. Two-way sync comes in M3. See [docs/plan.md](docs/plan.md).
 
 ## Docs
 
@@ -33,7 +33,13 @@ just run             # build + launch
 just test            # Swift package tests
 just lint            # swiftlint --strict + swift-format lint
 just fmt             # format in place
+just update-goldens  # rewrite golden files from current output (review the diff)
+just mbr-check       # validate the exported fixture notes with the real mbr
+just cli plan --root ~/Notes/Contacts      # dev CLI (reads your real Contacts!)
+nix flake check      # swift-format + mbr validation of the fixtures
 ```
+
+Tests never touch your address book: they use `FakeContactStore`, `InMemoryVault` and temp folders.
 
 Layout:
 
@@ -42,6 +48,7 @@ App/project.yml                  XcodeGen spec
 App/Contacts2MdSync/             SwiftUI app shell, entitlements
 Packages/Contacts2MdSyncKit/     all sync logic (headless, testable)
 nix/                             package + nix-darwin module
+scripts/mbr-check.sh             validate notes with the real mbr
 docs/                            design
 ```
 
@@ -55,17 +62,23 @@ Build configs:
 
 Ad-hoc builds get a new code signature every time, so macOS asks for Contacts permission again after each rebuild. Use Xcode Debug builds signed with your team for day-to-day work.
 
-## Command line (planned, M3)
+## Command line
 
-Once the app is set up and the first sync is done, you can sync without the GUI, for example from launchd or cron:
+M1 has a one-way export. The same commands run from the app binary (`Contacts2MdSync.app/Contents/MacOS/Contacts2MdSync export …`, which keeps the app's Contacts permission) or, for development, `swift run contacts2md …`:
 
 ```sh
-contacts2md status     # configured? last sync? pending review?
-contacts2md plan       # dry run
-contacts2md sync       # unattended sync; items needing a decision are skipped and printed as warnings
+contacts2md status --root ~/Notes/Contacts                 # vault, notes, Contacts access, last export
+contacts2md plan   --root ~/Notes/Contacts                 # dry run: what export would write
+contacts2md export --root ~/Notes/Contacts                 # same as plan: nothing is written without --yes
+contacts2md export --root ~/Notes/Contacts --yes           # write notes (Inbox/ by default, --default-folder X)
+contacts2md export --root ~/Notes/Contacts --yes --stamp   # also stamp contacts with their sync id (backs up first)
 ```
 
-Exit codes: 0 clean, 1 synced but items await review, 2 Apple writes held back by the change limit, 3 not configured or no permission, 4 safety breaker tripped, 5 error. Details are in [docs/architecture.md §15](docs/architecture.md#15-headless-cli-cron--launchd).
+Re-running `export --yes` only rewrites notes whose Apple data changed; you can move notes into any subfolder. Possible duplicates (e.g. the same person in iCloud and Google) get one note and a `WARNING duplicate` line. `--stamp` is the only option that writes to Contacts; it saves a vCard backup of all contacts first (last 10 kept in `~/Library/Application Support/Contacts2MdSync/backups/`).
+
+Planned (M3): `contacts2md sync` for unattended two-way sync from launchd or cron; items needing a decision are skipped and printed as warnings.
+
+Exit codes: 0 clean, 1 done but items await review, 2 Apple writes held back by the change limit (M3), 3 not configured, root missing or no Contacts permission, 4 safety breaker tripped (M3), 5 error, 64 bad command line. Details are in [docs/architecture.md §15](docs/architecture.md#15-headless-cli-cron--launchd).
 
 ## Installing with nix-darwin
 
@@ -90,4 +103,4 @@ Exit codes: 0 clean, 1 synced but items await review, 2 Apple writes held back b
 
 The app is installed to `/Applications/Nix Apps/Contacts2MdSync.app`. For now `packages.default` builds from source with the system Xcode (`__noChroot`), so it needs `sandbox = false` or `relaxed` in your Nix config. Once signed and notarized releases exist, a pure `packages.release` that fetches the release zip will become the default.
 
-Also available: `overlays.default` (adds `pkgs.contacts2mdsync`) and `nix flake check` (swift-format lint).
+Also available: `overlays.default` (adds `pkgs.contacts2mdsync`) and `nix flake check` (swift-format lint, plus validation of the fixture notes with the real mbr from `github:zmre/mbr-markdown-browser`, fetched from zmre.cachix.org).

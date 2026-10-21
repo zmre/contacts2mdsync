@@ -5,14 +5,18 @@
 //
 // Dependency graph (arrows point at dependencies):
 //
-//   SyncTestSupport -> SyncEngine -> ContactsAdapter -> ContactModel, ContactsShim
-//                                 -> VaultIndex      -> ContactModel, MarkdownCodec
-//                                 -> MarkdownCodec   -> Yams
-//                                 -> ContactModel
+//   contacts2md (exe) -> Contacts2MdCLI -> SyncEngine      -> VaultIndex -> MarkdownCodec -> ContactModel, Yams
+//                                       -> ContactsAdapter -> ContactModel, ContactsShim
+//                                       -> PhoneNumberKeys -> ContactModel, PhoneNumberKit
+//                                       -> ArgumentParser
+//   SyncTestSupport -> SyncEngine
 //
-// TODO(M1+): add PhoneNumberKit (phone normalization), GRDB (sync state store),
-// and swift-argument-parser (contacts2md-cli) when the features that need them
-// land. Deferred to keep M0 lean.
+// The engine never imports Contacts.framework: it sees Apple Contacts only
+// through the `ContactStore` protocol (ContactModel), implemented by
+// ContactsAdapter for real and by SyncTestSupport's FakeContactStore in tests.
+//
+// GRDB (per-device sync state) is deferred to M2; M1 keeps its small record
+// map in a JSON file (see SyncEngine/RecordMapStore.swift).
 
 import PackageDescription
 
@@ -29,19 +33,32 @@ let package = Package(
     ],
     products: [
         .library(name: "ContactModel", targets: ["ContactModel"]),
+        .library(name: "PhoneNumberKeys", targets: ["PhoneNumberKeys"]),
         .library(name: "MarkdownCodec", targets: ["MarkdownCodec"]),
         .library(name: "ContactsShim", targets: ["ContactsShim"]),
         .library(name: "ContactsAdapter", targets: ["ContactsAdapter"]),
         .library(name: "VaultIndex", targets: ["VaultIndex"]),
         .library(name: "SyncEngine", targets: ["SyncEngine"]),
+        .library(name: "Contacts2MdCLI", targets: ["Contacts2MdCLI"]),
         .library(name: "SyncTestSupport", targets: ["SyncTestSupport"]),
+        .executable(name: "contacts2md", targets: ["contacts2md"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.0")
+        .package(url: "https://github.com/jpsim/Yams.git", from: "6.2.0"),
+        .package(url: "https://github.com/PhoneNumberKit/PhoneNumberKit.git", from: "5.0.12"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.8.0"),
     ],
     targets: [
         .target(
             name: "ContactModel",
+            swiftSettings: swiftSettings
+        ),
+        .target(
+            name: "PhoneNumberKeys",
+            dependencies: [
+                "ContactModel",
+                .product(name: "PhoneNumberKit", package: "PhoneNumberKit"),
+            ],
             swiftSettings: swiftSettings
         ),
         .target(
@@ -71,29 +88,63 @@ let package = Package(
             dependencies: [
                 "ContactModel",
                 "MarkdownCodec",
-                "ContactsAdapter",
                 "VaultIndex",
             ],
             swiftSettings: swiftSettings
         ),
         .target(
+            name: "Contacts2MdCLI",
+            dependencies: [
+                "ContactModel",
+                "ContactsAdapter",
+                "PhoneNumberKeys",
+                "SyncEngine",
+                "VaultIndex",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            swiftSettings: swiftSettings
+        ),
+        .executableTarget(
+            name: "contacts2md",
+            dependencies: ["Contacts2MdCLI"],
+            swiftSettings: swiftSettings
+        ),
+        .target(
             name: "SyncTestSupport",
-            dependencies: ["SyncEngine"],
+            dependencies: ["ContactModel", "SyncEngine", "VaultIndex"],
             swiftSettings: swiftSettings
         ),
         .testTarget(
             name: "ContactModelTests",
-            dependencies: ["ContactModel"],
+            dependencies: ["ContactModel", "PhoneNumberKeys"],
             swiftSettings: swiftSettings
         ),
         .testTarget(
             name: "MarkdownCodecTests",
-            dependencies: ["MarkdownCodec"],
+            dependencies: [
+                "MarkdownCodec", "ContactModel", "SyncTestSupport", .product(name: "Yams", package: "Yams"),
+            ],
+            exclude: ["Fixtures"],
+            swiftSettings: swiftSettings
+        ),
+        .testTarget(
+            name: "ContactsAdapterTests",
+            dependencies: ["ContactsAdapter", "ContactModel"],
             swiftSettings: swiftSettings
         ),
         .testTarget(
             name: "SyncEngineTests",
-            dependencies: ["SyncEngine", "SyncTestSupport"],
+            dependencies: [
+                "SyncEngine", "SyncTestSupport", "ContactModel", "MarkdownCodec", "VaultIndex", "PhoneNumberKeys",
+            ],
+            exclude: ["Fixtures"],
+            swiftSettings: swiftSettings
+        ),
+        .testTarget(
+            name: "Contacts2MdCLITests",
+            dependencies: [
+                "Contacts2MdCLI", "SyncTestSupport", "SyncEngine", "ContactModel", "VaultIndex", "PhoneNumberKeys",
+            ],
             swiftSettings: swiftSettings
         ),
     ]

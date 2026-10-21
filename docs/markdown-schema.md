@@ -101,6 +101,7 @@ Everything below the frontmatter is the Apple Contacts "Notes" field
 |-------------------------------|----------------|
 | `_$!<Mobile>!$_`              | `mobile`       |
 | `iPhone`                      | `iphone`       |
+| `Apple Watch`                 | `apple_watch`  |
 | `_$!<Main>!$_`                | `main`         |
 | `_$!<Home>!$_`                | `home`         |
 | `_$!<Work>!$_`                | `work`         |
@@ -114,7 +115,10 @@ Everything below the frontmatter is the Apple Contacts "Notes" field
 | `CNLabelSchool`               | `school`       |
 | `_$!<Anniversary>!$_`         | `anniversary`  |
 | custom `"Summer House"`       | `summer_house` |
+| unknown `_$!<Foo Bar>!$_`     | `foo_bar`      |
 | no label                      | bare list item |
+
+Exceptions: social profiles and IM addresses use the **service** as label (`LinkedIn` → `linkedin`, `Skype` → `skype`), falling back to the mapped value label. Unlabeled Apple dates become `other` (mbr requires a label on every date). Markdown → Apple: well-known labels map back to the constants; custom labels are humanized (`summer_house` → `Summer House`).
 
 On write-back, if an existing Apple label already maps to the same markdown label, the Apple label is left untouched (no label flapping). Custom labels keep their original Apple casing when a base record exists.
 
@@ -136,21 +140,47 @@ mdsync:
 ## 4. Emission rules
 
 - Fixed key order (as in §1). Unknown keys keep their original position and bytes; we patch only managed key spans.
+  - A managed key whose value did not change keeps its original bytes too (including user formatting and trailing comments), so re-exporting an unchanged contact is byte-identical.
+  - Comments and blank lines between keys stay where they are.
+  - A managed key that is new to the file goes right after the nearest earlier managed key; if no later managed key exists it is appended at the end.
+  - Patching needs a plain block mapping at column 0. Flow-style frontmatter, YAML anchors/aliases, or anything the line scanner and the real parse disagree on fall back to a full re-emit in canonical order, with unknown keys re-emitted from their parsed values (not their bytes).
 - Multi-value fields are always emitted as **lists of single-key maps** (preserves order and duplicate labels; mbr treats order as preference).
 - We **read** every form mbr accepts: map, list of `{label: value}`, bare strings, scalar, and `{label:, value:}`.
 - Quote anything YAML could reinterpret: phone numbers, postcodes, dates, `yes/no/on/off/true/false/null`, leading `0`, leading `@`, `[`, `*`, `&`, `!`, `#`, `%`, `|`, `>`, `:`.
-- `dates` is a map (mbr's documented form).
+- `dates` is a map (mbr's documented form), except when labels repeat (two anniversaries), which a map cannot hold: then the list-of-single-key-maps form, which mbr reads the same way.
+- Addresses are `- <label>:` + nested fields. A label spelled like an address field or `label`/`value` (`street`, `city`, …) would be misread by mbr, so those use `- label: street` inside the address object (or `{label, value}` for a string address).
+- Values are trimmed (mbr trims too). U+FEFF is removed from values: libyaml drops it from scalars, so it could never read back.
+- Plain vs quoted: a value is written plain only if it reads back as the same string under both YAML 1.1 and 1.2 resolvers (checked in tests against Yams' 1.1 resolver). Quoted values use double quotes with `\n`, `\t`, `\"`, `\\` and `\xNN` escapes. Phones, postcodes and dates are always quoted; `mdsync.id` UUIDs are always plain.
+- The `mdsync.id` is lowercase.
 - Every emitted file is re-parsed before writing; if the decoded model differs from the intended one, the write is aborted and reported.
 - Files with invalid YAML are never written to (mbr would ignore the whole frontmatter anyway).
 - If emitted bytes equal what's on disk, no write happens.
 
 ## 5. Filenames and titles
 
-- New files: `<default_folder>/<Title>.md`. NFC-normalized; `/ : \` and control chars replaced; leading dots stripped; max 120 chars.
-- Collision: `Title (Company).md`, then `Title 2.md`.
+- New files: `<default_folder>/<Title>.md`. NFC-normalized; `/ : \` replaced with `-`; control and format characters dropped; leading dots stripped; max 120 chars.
+- Collision: `Title (Company).md`, then `Title 2.md`, `Title 3.md`, … A stem counts as taken if **any** file anywhere under the root has it (case-insensitive), because mbr resolves links by stem globally.
+- Generated title (new notes only): person → `given family suffix` (no prefix or middle name; Chinese/Japanese names → `familygiven`); else nickname; else company; else first email; else first phone; else `Unnamed Contact`. Organization → company name. Two different contacts may get the same title (their files differ); the exporter warns because `[[links]]` to that title are ambiguous.
 - **Never renamed automatically.** mbr falls back to the filename stem when resolving links, so the original name keeps old links alive. UI offers an explicit "rename file to match title".
 - `title` is markdown-owned. When Apple's name changes and the current title equals the previously generated title, the title is regenerated and the old title is appended to `aliases` as a plain string (keeps `[[Old Name]]` links resolving).
 - Users may move files anywhere under the root. Identity is `mdsync.id`, never path.
+
+## 4a. One-way export (M1)
+
+`contacts2md export` writes Apple → markdown only. For an existing note:
+
+| Data                                                                 | On export                                   |
+|----------------------------------------------------------------------|---------------------------------------------|
+| name parts, `company`, `department`, `job_title`, `emails`, `phones`, `urls`, `social`, `im`, `addresses`, `dates` (except `death`), `apple.phonetic_*` | from Apple. An element whose comparison key equals a markdown element keeps the markdown display text (e.g. `+1 415-555-0199` vs Apple's `(415) 555-0199`). |
+| `aliases` `nickname:` / `maiden_name:`                               | from Apple                                  |
+| other aliases (plain, `formerly:`, …)                                | kept                                        |
+| `title`                                                              | kept (markdown-owned)                       |
+| `company` wikilink                                                   | kept if it names the same organization; a new value becomes `[[Org]]` only if an organization note with that title exists |
+| `relationships`                                                      | from Apple, resolved to `[[Title]]` when exactly one note answers to the name (title, alias, name variants); extra edge attributes kept; markdown-only types (`employer`, `employee`, `manages`, `assists`) and `from:` edges kept |
+| `tags`                                                               | managed tags follow Apple groups; unmanaged tags kept, in order |
+| `image`                                                              | `<images_folder>/<mdsync.id>.<ext>`, relative to the note's current folder; a user-set image is kept when Apple has none |
+| body                                                                 | Apple note when entitled and non-empty; otherwise untouched |
+| `dates.death`, unknown keys, `apple.*` extras, `mdsync.*` extras      | kept                                        |
 
 ## 6. Relationships
 
@@ -165,6 +195,7 @@ mbr resolves `to: "[[X]]"` by **global name** (title → alias → filename stem
 | manager                              | `reports_to`   |                       |
 | assistant                            | `assistant`    |                       |
 | friend, custom                       | snake_case     |                       |
+| no label                             | `related`      |                       |
 
 - Apple stores relations as **names only**. On export we resolve the name to a record; if unique → `to: "[[<record title>]]"`, else plain string.
 - On write-back the Apple relation name is the target's Apple display name.

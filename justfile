@@ -32,6 +32,18 @@ lint:
     swiftlint lint --strict --quiet
     swift-format lint --strict --recursive --parallel {{swift_paths}}
 
+# Regenerate golden files from current output (review the diff!)
+update-goldens:
+    UPDATE_GOLDENS=1 swift test --package-path {{package}} --filter "golden|Golden"
+
+# Validate the exported fixture notes with the real mbr (needs `mbr` on PATH or MBR=…)
+mbr-check *args:
+    scripts/mbr-check.sh {{args}}
+
+# Run the dev CLI (never point it at real Contacts without reading docs/plan.md first)
+cli *args:
+    swift run --package-path {{package}} contacts2md {{args}}
+
 # Format Swift sources in place
 fmt:
     swift-format format --in-place --recursive --parallel {{swift_paths}}

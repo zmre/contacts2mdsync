@@ -66,4 +66,38 @@ static NSError *C2MErrorFromException(NSException *exception) {
     }
 }
 
+- (BOOL)c2m_probeNoteAccessWithError:(NSError **)error {
+    CNContactFetchRequest *request =
+        [[CNContactFetchRequest alloc] initWithKeysToFetch:@[ CNContactIdentifierKey, CNContactNoteKey ]];
+    @try {
+        NSError *fetchError = nil;
+        BOOL ok = [self enumerateContactsWithFetchRequest:request
+                                                    error:&fetchError
+                                               usingBlock:^(CNContact *contact, BOOL *stop) {
+                                                   (void)contact.note;
+                                                   *stop = YES;
+                                               }];
+        if (!ok && error != NULL) {
+            *error = fetchError;
+        }
+        return ok;
+    } @catch (NSException *exception) {
+        if (error != NULL) {
+            *error = C2MErrorFromException(exception);
+        }
+        return NO;
+    }
+}
+
 @end
+
+NSData *C2MVCardData(NSArray<CNContact *> *contacts, NSError **error) {
+    @try {
+        return [CNContactVCardSerialization dataWithContacts:contacts error:error];
+    } @catch (NSException *exception) {
+        if (error != NULL) {
+            *error = C2MErrorFromException(exception);
+        }
+        return nil;
+    }
+}

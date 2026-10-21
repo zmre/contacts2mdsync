@@ -1,0 +1,9 @@
+vault_id: 0d7c0000-0000-4000-8000-0000000000aa
+schema: 1
+default_folder: Inbox
+images_folder: _images
+default_region: US
+groups:
+  Close Friends: close_friends
+  Family: family
+  Work: work

@@ -23,51 +23,63 @@ App/
   project.yml                       XcodeGen spec (macOS now, iOS in M7)
   Contacts2MdSync/                  SwiftUI app: views, AppModel, watchers, bookmarks, SyncCoordinator
 Packages/Contacts2MdSyncKit/
-  ContactModel/     value types, normalization, comparison keys, label map    (Foundation only)
+  ContactModel/     value types, normalization, comparison keys, label map,
+                    ContactStore seam + Apple snapshot types                 (Foundation only)
+  PhoneNumberKeys/  PhoneKeyer backed by PhoneNumberKit (E.164)
   MarkdownCodec/    frontmatter split, YAML parse (Yams), span-patching emitter, filenames
-  ContactsShim/     Objective-C: change-history enumerator wrapped in @try/@catch → NSError
-  ContactsAdapter/  CNContactStore ⇄ ContactModel, writes, groups, stamp, history
-  VaultIndex/       file enumeration, parse cache, id/title/alias/stem indexes, candidates
-  SyncEngine/       Matcher, Planner, Merger, Executor, StateStore, Lease, DecisionLog, Config
-  SyncTestSupport/  FakeContactStore, InMemoryVault, scenario DSL, fixtures
-  contacts2md-cli/  CLI: status / plan / export / sync (headless, cron-safe) — see §15
+  ContactsShim/     Objective-C: @try/@catch wrappers (change history, notes probe, vCard) → NSError
+  ContactsAdapter/  CNContactStore ⇄ ContactModel, snapshot, groups, stamp, history
+  VaultIndex/       VaultFS seam + LocalVaultFS, enumeration, id/title/alias/stem indexes
+  SyncEngine/       Planner, Clustering, Executor, RecordMap (M1); Merger, StateStore, Lease, DecisionLog (M2+)
+  Contacts2MdCLI/   CLI library: status / plan / export (M1), sync (M3) — see §15
+  contacts2md/      dev executable wrapping Contacts2MdCLI (the app binary runs the same CLI)
+  SyncTestSupport/  FakeContactStore, InMemoryVault, fixtures (~60 contacts), golden-file helper
 ```
+
+The engine depends only on ContactModel, MarkdownCodec and VaultIndex; it never imports Contacts.framework. Only Contacts2MdCLI (and the app) link ContactsAdapter.
 
 Third-party dependencies, pinned via `Package.resolved`:
 
 | Package                 | Used for                                   | Lands in |
 |-------------------------|--------------------------------------------|----------|
 | Yams                    | YAML parsing (we emit managed keys ourselves) | M0/M1 |
-| PhoneNumberKit          | E.164 comparison keys (behind a protocol)  | M1       |
-| GRDB                    | per-device SQLite state                    | M2       |
-| swift-argument-parser   | dev CLI                                    | M1       |
+| PhoneNumberKit (github.com/PhoneNumberKit/PhoneNumberKit, 5.x) | E.164 comparison keys (behind `PhoneKeyer`) | M1 |
+| GRDB                    | per-device SQLite state                    | M2 (M1 uses a JSON record map) |
+| swift-argument-parser   | CLI                                        | M1       |
+
+PhoneNumberKit moved from `marmelroy/PhoneNumberKit` (4.x, now deprecated) to the `PhoneNumberKit` org (5.x). The keyer always passes an explicit region, because PhoneNumberKit's default region lookup reads `CNContactsUserDefaults`.
 
 ### Seams
 
 The engine never touches `CN*` types or the real file system.
 
 ```swift
-protocol ContactStore {
-  var capabilities: StoreCapabilities { get }          // notesAvailable, iCloudContainerID, writableContainers
+protocol ContactStore: Sendable {                      // ContactModel
+  var capabilities: StoreCapabilities { get throws }   // notesAvailable, iCloudContainerID, writableContainers
   func snapshot() throws -> AppleSnapshot              // unified contacts + underlying cards + containers + groups
   func fetch(unifiedIDs: [String]) throws -> [AppleContact]
-  func apply(_ batch: AppleWriteBatch, author: String) throws -> AppleWriteResult
+  func apply(_ batch: AppleWriteBatch, author: String) throws -> AppleWriteResult   // M1: .stamp only
   func changes(since token: Data?, excluding authors: [String]) throws -> HistoryResult
+  func exportVCards() throws -> Data                   // vCard backup before Apple writes
 }
 
-protocol VaultFS {
-  func enumerate(root: URL) throws -> [FileEntry]      // path, mtime, size, isDataless
-  func read(_ url: URL) throws -> (Data, FileStamp)
-  func write(_ data: Data, to url: URL, expecting: FileStamp?) throws -> FileStamp   // compare-and-swap
-  func trash(_ url: URL) throws
-  func unresolvedConflictVersions(_ url: URL) -> [ConflictVersion]
+protocol VaultFS: Sendable {                           // VaultIndex; rooted at construction
+  func enumerate() throws -> [FileEntry]               // root-relative path, mtime, size, isDataless; skips dot paths
+  func read(_ path: String) throws -> (Data, FileStamp)
+  func write(_ data: Data, to path: String, expecting: WriteExpectation) throws -> FileStamp
+                                                       // .absent | .unchanged(stamp) (CAS on sha256) | .any
+  func trash(_ path: String) throws
+  func exists(_ path: String) -> Bool
+  // unresolvedConflictVersions(_:) lands with NSFileVersion handling (M6)
 }
 
-protocol SyncStateStore { … }     // GRDB impl + in-memory impl
-protocol Clock, IDGenerator, DeviceIdentity
+protocol RecordMapStore { … }     // M1: JSON file + in-memory; becomes SyncStateStore (GRDB) in M2
+protocol SyncClock, IDGenerator   // (not `Clock`: that name is taken by the stdlib); DeviceIdentity in M6
 ```
 
-`FakeContactStore` has switchable misbehaviours that mirror real-world bugs: unified contacts across iCloud/Google/read-only containers, identifier churn, server-normalization echo (`4155550100` → `(415) 555-0100`), linked-card display precedence, missing notes entitlement (error 102), per-container groups.
+Paths in `VaultFS` are root-relative strings (`Inbox/Jane Doe.md`), never URLs: identity is never a path, and relative strings make fakes and goldens trivial.
+
+`FakeContactStore` has switchable misbehaviours that mirror real-world bugs: unified contacts across iCloud/Google/read-only containers, identifier churn, server-normalization echo (`4155550100` → `(415) 555-0100`), linked-card display precedence, missing notes entitlement (error 102), per-container groups. (M1 implements unified multi-account contacts, groups, images, relations, the notes switch, denied access, and stamping; churn, echo and display precedence arrive with the merge work in M3.)
 
 The app target holds only SwiftUI, an `@Observable AppModel`, FSEvents + `CNContactStoreDidChange` watchers, security-scoped bookmarks, and a `SyncCoordinator` actor that serializes runs.
 
@@ -197,6 +209,20 @@ Until resolved, a cluster produces at most one file (the iCloud-backed member) s
 ### First import
 
 Always a dry-run plan first: N files to create, M existing notes to adopt, K clusters to review, J ambiguous matches. Nothing is written until the user clicks **Run First Sync**. A vCard backup of all contacts (`CNContactVCardSerialization`) is written to Application Support before every session that writes to Apple; the last 10 are kept.
+
+### What M1 implements (one-way export)
+
+`ExportPlanner` → `ExportPlan` → `ExportExecutor` (SyncEngine). The plan holds final, validated bytes; executing it only writes.
+
+1. **Identity**: stamp on any card, else the per-device `RecordMap` (unified id, then any card id; ambiguous card overlap → unbound). Several different stamps on one unified contact → review, skipped. A stamp from another vault (no binding here) simply reuses that id for the new note.
+2. **Clusters**: union-find on email key, E.164 phone key (≥ 7 digits) and exact name+organization. Name+organization requires a non-empty organization; name-only never clusters (two distinct "John Smith"s would otherwise block each other with no way to resolve in M1). Until resolved, a cluster yields one note: if a member already has a note, no other member gets one; otherwise the primary does (iCloud-backed, then local, then lowest unified id). Every cluster is a review item.
+3. **Notes**: a bound record's note is found by `mdsync.id` anywhere under the root and patched in place (moves are free). A bound record whose note is gone is reported as `missing` and not re-created unless `--restore-missing`. A copied note (duplicate `mdsync.id`) pauses that record.
+4. **Create gate**: an unbound contact is not created when it matches a contact note nobody is bound to: by strong key (email, phone, name+organization) for any such note, and also by plain title for *orphaned* notes (they carry an `mdsync.id` no Apple contact is bound to — e.g. the device state was lost). This makes a lost record map fail safe: nothing is duplicated, everything is reported for review.
+5. **Filenames** avoid every stem in the vault (mbr resolves links by stem globally), then planned ones.
+6. **Executor**: images first, then config, then notes; every note write is compare-and-swap (`.absent` for new, `.unchanged(sha)` for updates), so a note edited between plan and execute is reported, not overwritten. Bindings are saved only for notes that were written or already identical.
+7. **Stamping** (the only Apple write in M1) requires a `BackupReceipt`, which only `VCardBackup.backup` can create, and is off unless the user passes `--stamp`.
+
+Per-device state for M1 is `~/Library/Application Support/Contacts2MdSync/<vault_id>/records.json` (`RecordMap`: record id → unified id, card ids, last path, plus `lastExport`). GRDB replaces it in M2 (the `RecordMapStore` protocol is the seam); keeping JSON in M1 avoided a schema we would immediately migrate.
 
 ## 7. Three-way merge
 
@@ -339,6 +365,23 @@ macOS ties both Contacts permission (TCC) and the sandboxed security-scoped fold
 | `contacts2md export` (M1)     | One-way Apple → markdown; dev/testing                                        |
 
 Flags: `--quiet` (warnings and errors only), `--json` (one JSON document on stdout for scripting), `--verbose`.
+
+**M1 as implemented** (`Contacts2MdCLI` library; `contacts2md` dev executable; app binary dispatches when its first argument is `status`, `plan`, `export` or `help`, otherwise starts the GUI):
+
+```
+contacts2md status --root <dir>
+contacts2md plan   --root <dir> [--default-folder Inbox] [--region US] [--restore-missing]
+contacts2md export --root <dir> [--default-folder Inbox] [--region US] [--restore-missing] [--yes [--stamp]]
+common: --quiet  --verbose
+```
+
+- `--root` is required in M1 (security-scoped bookmarks arrive with the GUI setup flow).
+- `export` without `--yes` prints the plan and writes nothing (same as `plan`).
+- `--stamp` requires `--yes`; it takes a vCard backup to `<state>/backups/` first and refuses to stamp if that fails (nothing is written at all in that case).
+- `--default-folder` / `--region` are saved into `.mdsync/config.yaml`.
+- Plan lines: `create md`, `update md <path>  (changed keys)`, `write image`, `write config`, `stamp apple`; executed lines: `created`, `updated`, `wrote`, `backup`, `stamped`. Then `WARNING …` lines, the `summary` line, and for dry runs a `note` line.
+- `--json` is not implemented yet (M3, with `sync`); the header has no `device=` until device identity lands (M6).
+- Usage errors exit 64 (ArgumentParser's `EX_USAGE`), in addition to the table below.
 
 ### What runs vs. what is skipped
 

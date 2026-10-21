@@ -53,6 +53,8 @@ targets:
         product: ContactModel
       - package: Contacts2MdSyncKit
         product: SyncEngine
+      - package: Contacts2MdSyncKit
+        product: Contacts2MdCLI
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zmre.contacts2mdsync
