@@ -1,0 +1,75 @@
+{
+  description = "Contacts2MdSync: two-way sync between Apple Contacts and markdown notes (macOS SwiftUI app)";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+  };
+
+  outputs = {
+    self,
+    nixpkgs,
+  }: let
+    inherit (nixpkgs) lib;
+    systems = ["aarch64-darwin"];
+    forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+  in {
+    devShells = forAllSystems (pkgs: {
+      default = pkgs.mkShellNoCC {
+        packages = with pkgs; [
+          xcodegen
+          swiftlint
+          swift-format
+          xcbeautify
+          periphery
+          create-dmg
+          just
+        ];
+        # Deliberately no pkgs.swift: the app and package build with the
+        # system Xcode toolchain (/usr/bin/xcodebuild, xcrun swift). nixpkgs
+        # stdenv exports DEVELOPER_DIR/SDKROOT pointing at its own apple-sdk,
+        # which would redirect xcrun away from Xcode, so clear them.
+        shellHook = ''
+          unset DEVELOPER_DIR SDKROOT
+        '';
+      };
+    });
+
+    packages = forAllSystems (pkgs: {
+      contacts2mdsync = pkgs.callPackage ./nix/package.nix {};
+      default = self.packages.${pkgs.stdenv.hostPlatform.system}.contacts2mdsync;
+    });
+
+    overlays.default = final: _prev: {
+      contacts2mdsync = final.callPackage ./nix/package.nix {};
+    };
+
+    darwinModules.default = import ./nix/darwin-module.nix {inherit self;};
+
+    checks = forAllSystems (pkgs: {
+      # Fully pure and sandbox-safe: swift-format is self-contained.
+      #
+      # Not checks, deliberately:
+      #  - the app build (impure: needs Xcode + __noChroot, see nix/package.nix)
+      #  - swiftlint: nixpkgs' swiftlint dlopens sourcekitdInProc from the host
+      #    Xcode at runtime, which the sandbox blocks (and __impureHostDeps on
+      #    /Applications/Xcode.app is refused unless the daemon lists it in
+      #    allowed-impure-host-deps). Run it via `just lint` instead.
+      format =
+        pkgs.runCommandLocal "contacts2mdsync-format-check" {
+          src = self;
+          nativeBuildInputs = [pkgs.swift-format];
+        } ''
+          cd $src
+          swift-format lint --strict --recursive --parallel \
+            --configuration .swift-format \
+            App/Contacts2MdSync \
+            Packages/Contacts2MdSyncKit/Sources \
+            Packages/Contacts2MdSyncKit/Tests \
+            Packages/Contacts2MdSyncKit/Package.swift
+          touch $out
+        '';
+    });
+
+    formatter = forAllSystems (pkgs: pkgs.alejandra);
+  };
+}

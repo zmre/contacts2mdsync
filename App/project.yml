@@ -1,0 +1,91 @@
+# XcodeGen spec. The .xcodeproj is generated (and git-ignored):
+#   just gen        # or: cd App && xcodegen generate
+name: Contacts2MdSync
+
+options:
+  bundleIdPrefix: com.zmre
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  developmentLanguage: en
+
+packages:
+  Contacts2MdSyncKit:
+    path: ../Packages/Contacts2MdSyncKit
+
+# Build configurations:
+#   Debug        - day-to-day development, Dev entitlements.
+#   Release      - optimized, STILL Dev entitlements so it builds and launches
+#                  with ad-hoc signing (this is what `nix build` uses).
+#   ReleaseNotes - optimized, Release entitlements, which add
+#                  com.apple.developer.contacts.notes. That entitlement is
+#                  granted by Apple on request and requires a provisioning
+#                  profile + DEVELOPMENT_TEAM; ad-hoc code carrying it is
+#                  killed by AMFI at launch. Switch distribution builds to this
+#                  config once the profile exists.
+configs:
+  Debug: debug
+  Release: release
+  ReleaseNotes: release
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEAD_CODE_STRIPPING: YES
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+
+targets:
+  Contacts2MdSync:
+    type: application
+    platform: macOS
+    sources:
+      - path: Contacts2MdSync
+        excludes:
+          - "*.entitlements"
+    dependencies:
+      - package: Contacts2MdSyncKit
+        product: ContactModel
+      - package: Contacts2MdSyncKit
+        product: SyncEngine
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zmre.contacts2mdsync
+        PRODUCT_NAME: Contacts2MdSync
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Contacts2MdSync
+        INFOPLIST_KEY_NSContactsUsageDescription: "Contacts2MdSync reads and updates your contacts to keep them in sync with markdown files in your notes folder."
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_HARDENED_RUNTIME: YES
+        COMBINE_HIDPI_IMAGES: YES
+        # Ad-hoc signing for local builds; set DEVELOPMENT_TEAM and
+        # CODE_SIGN_STYLE=Automatic (or a profile) for distribution.
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        # Entitlements switch (see `configs` above).
+        CODE_SIGN_ENTITLEMENTS: Contacts2MdSync/Contacts2MdSync.Dev.entitlements
+      configs:
+        ReleaseNotes:
+          CODE_SIGN_ENTITLEMENTS: Contacts2MdSync/Contacts2MdSync.Release.entitlements
+
+schemes:
+  Contacts2MdSync:
+    build:
+      targets:
+        Contacts2MdSync: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release

@@ -1,0 +1,48 @@
+included:
+  - App/Contacts2MdSync
+  - Packages/Contacts2MdSyncKit/Sources
+  - Packages/Contacts2MdSyncKit/Tests
+  - Packages/Contacts2MdSyncKit/Package.swift
+
+excluded:
+  - .build
+  - "**/.build"
+  - build
+  - DerivedData
+  - "**/DerivedData"
+  - result
+
+# swift-format owns layout; disable rules that fight it.
+disabled_rules:
+  - trailing_comma
+  - opening_brace
+  - todo
+
+opt_in_rules:
+  - empty_count
+  - first_where
+  - closure_spacing
+  - contains_over_first_not_nil
+  - discouraged_optional_boolean
+  - explicit_init
+  - fatal_error_message
+  - implicitly_unwrapped_optional
+  - last_where
+  - modifier_order
+  - redundant_nil_coalescing
+  - sorted_first_last
+  - toggle_bool
+  - unneeded_parentheses_in_closure_argument
+  - yoda_condition
+
+line_length:
+  warning: 120
+  error: 160
+  ignores_comments: true
+
+identifier_name:
+  excluded:
+    - id
+
+type_name:
+  max_length: 50
