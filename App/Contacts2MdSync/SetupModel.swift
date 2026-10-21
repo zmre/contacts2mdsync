@@ -121,6 +121,10 @@ final class SetupModel {
     private(set) var outcome: OutcomeSummary?
     private(set) var isBusy = false
     private(set) var errorMessage: String?
+    /// `load()` finished at least once.
+    private(set) var hasLoaded = false
+    /// The saved folder could not be opened (moved, deleted, stale bookmark).
+    private(set) var folderUnavailable: String?
 
     @ObservationIgnored private var resolvedRoot: ResolvedRoot?
     @ObservationIgnored private let bookmark = RootBookmark(directory: CLIEnvironment.live().stateDirectory)
@@ -154,12 +158,22 @@ final class SetupModel {
         if rootURL == nil, bookmark.exists {
             do {
                 adopt(try bookmark.open())
+                folderUnavailable = nil
             } catch {
+                folderUnavailable = bookmark.loadSettings().rootPath ?? "the notes folder"
                 errorMessage = String(describing: error)
             }
         }
         if let folder = bookmark.loadSettings().defaultFolder { defaultFolder = folder }
         await rescan()
+        hasLoaded = true
+    }
+
+    /// Re-reads access status (e.g. after returning from System Settings).
+    func refreshAccess() async {
+        let before = accessStatus
+        accessStatus = CNContactStore.authorizationStatus(for: .contacts)
+        if accessStatus != before, isAuthorized { notesAccess = await Self.probeNotes() }
     }
 
     // MARK: - Step 1: access
@@ -194,6 +208,7 @@ final class SetupModel {
             try bookmark.save(url)
             adopt(try bookmark.open())
             errorMessage = nil
+            folderUnavailable = nil
         } catch {
             errorMessage = "Could not remember this folder: \(error.localizedDescription)"
         }

@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// Onboarding and, once configured, the Overview: access, folders, a
-/// read-only preview, and the first export (docs/ui.md §2 steps 1–3 and 5).
+/// Onboarding: access, folders, a read-only preview, and the first export
+/// (docs/ui.md §2 steps 1–3 and 5). Once the folder is configured the main
+/// window (`MainView`) takes over.
 struct SetupView: View {
     @Bindable var model: SetupModel
 
@@ -18,8 +19,7 @@ struct SetupView: View {
             }
         }
         .formStyle(.grouped)
-        .navigationTitle(model.isConfigured ? "Overview" : "Set Up")
-        .task { await model.load() }
+        .navigationTitle("Set Up Contacts2MdSync")
     }
 
     // MARK: - Step 1
@@ -152,13 +152,8 @@ struct SetupView: View {
                     Text(failure).foregroundStyle(.red)
                 }
                 if outcome.pendingReview > 0 {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("\(outcome.pendingReview) items need a decision. Run:")
-                        Text("\"\(model.cliPath)\" review list")
-                            .font(.callout.monospaced())
-                            .textSelection(.enabled)
-                    }
-                    .foregroundStyle(.secondary)
+                    Text("\(outcome.pendingReview) items need a decision. They wait in Review.")
+                        .foregroundStyle(.secondary)
                 }
             }
             if let preview = model.preview, model.outcome == nil || preview.toCreate + preview.toAdopt > 0 {
@@ -194,55 +189,6 @@ private struct StepHeader: View {
             StatusDot(done: done)
             Text("\(number)  \(title)")
         }
-    }
-}
-
-/// Gray (to do) or green (done) dot.
-private struct StatusDot: View {
-    let done: Bool
-
-    var body: some View {
-        Image(systemName: done ? "checkmark.circle.fill" : "circle")
-            .foregroundStyle(done ? Color.green : Color.secondary)
-            .imageScale(.small)
-    }
-}
-
-/// A label with a right-aligned count; orange dot when it needs review.
-private struct CountRow: View {
-    let title: String
-    let count: Int
-    let note: String?
-    let needsReview: Bool
-
-    init(_ title: String, _ count: Int, note: String? = nil, needsReview: Bool = false) {
-        self.title = title
-        self.count = count
-        self.note = note
-        self.needsReview = needsReview
-    }
-
-    var body: some View {
-        LabeledContent {
-            HStack(spacing: 6) {
-                if let note { Text(note).foregroundStyle(.secondary) }
-                if needsReview { Circle().fill(.orange).frame(width: 7, height: 7) }
-                Text(count.formatted()).monospacedDigit()
-            }
-        } label: {
-            Text(title)
-        }
-    }
-}
-
-/// A selectable, middle-truncated path.
-private struct PathText: View {
-    let path: String
-
-    init(_ path: String) { self.path = path }
-
-    var body: some View {
-        Text(path).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
     }
 }
 

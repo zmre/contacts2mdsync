@@ -1,0 +1,104 @@
+import Contacts2MdCLI
+import SwiftUI
+
+/// Activity (docs/ui.md §8): runs from this Mac's state (exports, and
+/// previews on request), plus contact notes that could not be read.
+struct ActivityView: View {
+    let model: AppModel
+    @State private var showPreviews = false
+
+    private var rows: [UIActivityRow] { model.activityRows.filter { showPreviews || !$0.isPreview } }
+    private var issues: [UIProblemNote] { model.queues?.invalidNotes ?? [] }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if !issues.isEmpty {
+                issuesList
+                Divider()
+            }
+            if rows.isEmpty {
+                ContentUnavailableView(
+                    "No Activity Yet", systemImage: "clock.arrow.circlepath",
+                    description: Text("Exports from this Mac, the app and the command line, appear here."))
+            } else {
+                table
+            }
+        }
+        .navigationTitle("Activity")
+        .toolbar {
+            ToolbarItem {
+                Toggle("Show Previews", isOn: $showPreviews)
+                    .toggleStyle(.checkbox)
+                    .help("Include dry runs (checks that wrote nothing)")
+            }
+        }
+    }
+
+    private var table: some View {
+        Table(rows) {
+            TableColumn("Time") { row in
+                Text(UIFormat.relativeDay(row.startedAt)).monospacedDigit()
+                    .foregroundStyle(row.isPreview ? .secondary : .primary)
+            }
+            .width(min: 130, ideal: 150)
+            TableColumn("Device") { row in Text(row.deviceName).lineLimit(1) }
+            TableColumn("Trigger") { row in
+                Text(row.isPreview ? "\(row.trigger) · Preview" : row.trigger).foregroundStyle(.secondary)
+            }
+            TableColumn("Contacts C/U/D") { row in counts(row.contacts) }
+                .width(min: 90, ideal: 100)
+            TableColumn("Markdown C/U/D") { row in counts(row.markdown) }
+                .width(min: 90, ideal: 110)
+            TableColumn("Review") { row in
+                Text(row.review > 0 ? row.review.formatted() : "—").monospacedDigit()
+            }
+            .width(min: 50, ideal: 60)
+            TableColumn("Result") { row in result(row) }
+                .width(min: 50, ideal: 70)
+        }
+    }
+
+    private func counts(_ counts: UIChangeCounts?) -> some View {
+        Text(counts?.text ?? "—").monospacedDigit().foregroundStyle(counts?.isZero == false ? .primary : .secondary)
+    }
+
+    @ViewBuilder private func result(_ row: UIActivityRow) -> some View {
+        switch row.result {
+        case .success:
+            Image(systemName: "checkmark").foregroundStyle(.secondary).help(
+                "Finished in \(UIFormat.duration(row.duration))")
+        case .warnings(let count):
+            Label("\(count)", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+                .help("\(count) contacts skipped; they wait in Review")
+        case .failed(let count):
+            Label("\(count)", systemImage: "xmark.octagon")
+                .foregroundStyle(.red)
+                .help("\(count) files could not be written")
+        }
+    }
+
+    private var issuesList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(
+                "\(issues.count) contact \(issues.count == 1 ? "note" : "notes") can't be read and won't be written",
+                systemImage: "exclamationmark.triangle"
+            )
+            .foregroundStyle(.orange)
+            ForEach(issues.prefix(20)) { issue in
+                HStack {
+                    Text(issue.path).lineLimit(1).truncationMode(.middle)
+                    Text(issue.problem).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                    Button("Reveal in Finder") { model.revealInFinder(path: issue.path) }
+                        .controlSize(.small)
+                }
+            }
+            if issues.count > 20 {
+                Text("and \(issues.count - 20) more").foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}

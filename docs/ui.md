@@ -1,6 +1,6 @@
 # Contacts2MdSync — UI Design
 
-Status: sketch for review. ASCII mockups; final visuals follow macOS HIG with native SwiftUI components.
+Status: M4 review UI built against the M2 engine (see §14 for what is live, what waits on two-way sync, and deviations). ASCII mockups; final visuals follow macOS HIG with native SwiftUI components.
 
 ## Principles
 
@@ -325,3 +325,41 @@ Advanced  Contact notes      ◦ Not available — notes stay markdown-only
 - **Use:** Sync Now, Live Sync, In sync, Needs Review, Changed in Contacts / Changed in Markdown, Keep Contacts / Keep Markdown / Keep Both, Markdown Only, Link to Existing Contact, Add to Contacts, Delete File, Restore File, Delete Apple Contact…, Open in Contacts to Link, Not Duplicates, Waiting for *device*.
 - **Avoid in main UI:** local/remote, source/target, orphan, tombstone, lease (Advanced only).
 - Counts: number + plain noun ("12 files"). Relative dates ("Today 10:42 AM").
+
+## 14. As built (M4, on the M2 engine)
+
+**Structure.** `ContentView` shows onboarding (`SetupView`, steps 1–3 and 5) until the folder is configured, a "Can't open the notes folder [Locate…]" pane when the saved bookmark no longer resolves, and otherwise `MainView`: the §1 sidebar with badges, toolbar (status dot + text, disabled `Live` toggle, `Export Now`, inspector toggle), and `.inspector`. Menu commands: Contacts ▸ Export Now (⌘R), Check for Changes (⇧⌘R); View ▸ Show/Hide Inspector (⌥⌘I).
+
+**Layers.**
+
+- `Contacts2MdCLI/UI*.swift`: view-model adapters over the public engine APIs, tested in `UIReviewTests`. `UIVaultReader` reads stored state, scans the folder (no Contacts access), runs dry runs and exports (the same `VaultSession` path as the CLI), appends decisions, and edits `default_folder`. `UIReviewQueues`, `UIDuplicateGroup`, `UIMarkdownOnlyRow`, `UIOverview`, `UIActivityRow` and `UILibraryRow` turn that into screen data.
+- `App/…/ReviewDataSource.swift`: the protocol the UI is built against, plus app-side types for conflicts, deletions and vault write options. `LiveReviewDataSource` implements it over `UIVaultReader`; M3 operations throw `ReviewUnavailable`, and `ReviewCapabilities` flags turn their controls off.
+- `AppModel` (`@MainActor @Observable`): loads stored data, then a dry run (off the main actor); queues, badges, snoozes, decisions, Finder and Contacts links.
+
+**Live today.**
+
+| Screen        | Data                                                                                                     | Actions                                                                                                  |
+|---------------|----------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
+| Overview      | stored status, sessions, latest dry run                                                                  | Check Again, Reveal root, review rows link to their screens                                              |
+| Duplicates    | `duplicate cluster`, `copied note` (same sync id), `merge records` items; contact details from the dry run | Open in Contacts to Link (one `addressbook://` per card, rescan on return), Sync Only *card*, Not Duplicates (confirmed), Ignore for Now (until the next export), Keep This One |
+| Markdown Only | contact notes without a sync id, plus notes named by `possible match` items                             | per row: Link to "X" (adopt), Not "X" (distinct), Ignore; tick rows, Apply N Changes (⌘↩); Show Ignored |
+| Deletions     | `missing` items (Deleted in Markdown), read-only                                                         | —                                                                                                        |
+| All Contacts  | record map + note titles; search by name, file, account                                                  | Open in Contacts, Reveal in Finder                                                                       |
+| Activity      | `sessions` (exports; previews behind Show Previews); unreadable contact notes listed with Reveal        | —                                                                                                        |
+| Settings      | device name, folders, accounts from the dry run, notes availability                                     | Choose root (bookmark), change the folder for new notes (`config.yaml`, compare-and-swap), Show backups  |
+
+Decisions are appended to `.c2mdsync/devices/<device>/decisions.jsonl` with the same choices as `contacts2md review decide`; they apply on the next export, and the affected rows say so.
+
+**Waiting on M3** (built against the protocol, disabled with "Arrives with two-way sync"): Conflicts (list, Previous/Contacts/Markdown grid, Keep choice per field, Resolve Selected with confirmation, ⌘1–3 for all fields, ⌘↩ apply), Deletions actions (non-destructive defaults, destructive alert), Add to Contacts, Keep This File (merge records), Changed in Markdown, Rescan / Reset. Settings ▸ Accounts has the two vault write options: "Write changes back to Apple Contacts" (`apple_writes`) and "Add sync IDs to contacts (needed when several devices share this folder)" (`stamp_contacts`). Overview warns when more than one device has written to `.c2mdsync/devices/` and stamping is off.
+
+**Waiting on M5/M6:** Live toggle, background sync, safety check, menu bar, launch at login, lease and "Waiting for *device*".
+
+**Deviations.**
+
+- Onboarding is shown in the main window rather than a separate 640×520 window. Step 4 (review duplicates during onboarding) is not embedded yet: duplicates found by the first preview wait in Review after the first export.
+- The primary action reads **Export Now** until two-way sync exists (`ReviewCapabilities.twoWaySync`).
+- Duplicates: "Sync Only" is a menu next to the group actions, and each card has Open / Reveal buttons. Give the Other a New ID and Delete Other File… are not offered, because the M2 decision log has no kind for them. Keep This One is the only copied-note action.
+- Markdown Only: no rows are ticked by default (Add, the default for rows without a match, is disabled), and Link to Other… (a contact picker) is not built. Rows with a match ≥ 0.5 default to Link, as designed.
+- Activity shows this Mac's sessions only (sessions live in the per-device database). Dry runs are recorded as previews and hidden by default. There is no per-change inspector and no Export Log.
+- Device name is read-only: it follows the computer name.
+
