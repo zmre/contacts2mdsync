@@ -1,7 +1,7 @@
 public import Foundation
 internal import Synchronization
 
-/// Where one record (`mdsync.id`) was last seen on each side.
+/// Where one record (`c2mdsync.id`) was last seen on each side.
 public struct RecordBinding: Codable, Hashable, Sendable {
     /// Unified contact id at last export (may churn; card ids are the backup).
     public var unifiedID: String
@@ -23,7 +23,7 @@ public struct RecordBinding: Codable, Hashable, Sendable {
 /// M1 stand-in for the GRDB `records` table (architecture §4), persisted as a
 /// small JSON file. It is what makes re-export idempotent before (and
 /// without) the Apple-side stamp: an Apple contact whose card ids are known
-/// keeps its `mdsync.id`.
+/// keeps its `c2mdsync.id`.
 public struct RecordMap: Codable, Hashable, Sendable {
     /// Bindings keyed by lowercase record id.
     public var records: [String: RecordBinding]

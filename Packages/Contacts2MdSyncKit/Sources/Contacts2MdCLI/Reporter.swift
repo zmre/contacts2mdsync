@@ -90,7 +90,7 @@ struct Reporter {
         case .duplicateSyncID(let id, let paths):
             warning(
                 "copied",
-                "\(paths.count) notes share mdsync id \(id.uuidString.lowercased()): "
+                "\(paths.count) notes share c2mdsync id \(id.uuidString.lowercased()): "
                     + "\(paths.joined(separator: ", ")) — skipped")
         case .multipleStamps(let title, let ids):
             warning("stamps", "\"\(title)\" carries \(ids.count) different sync stamps — skipped")

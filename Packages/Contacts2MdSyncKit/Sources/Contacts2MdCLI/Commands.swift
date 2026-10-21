@@ -9,7 +9,7 @@ struct CommonOptions: ParsableArguments {
     @Option(name: .long, help: "The notes folder to export into (must exist).")
     var root: String
 
-    @Option(name: .long, help: "Folder (under the root) for new notes. Saved in .mdsync/config.yaml.")
+    @Option(name: .long, help: "Folder (under the root) for new notes. Saved in .c2mdsync/config.yaml.")
     var defaultFolder: String?
 
     @Option(name: .long, help: "Region for phone numbers without a country code (e.g. US). Saved in the config.")

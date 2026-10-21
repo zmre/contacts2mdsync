@@ -4,7 +4,7 @@
 
 ## Safety model
 
-- **Writes only touch scratch cards.** A card counts as a harness card only if both of these hold: its name (`givenName familyName`) starts with `ZZ Spike `, and one of its URL values starts with `x-mdsync-spike:`. That URL carries the label `mdsync-spike` and has the form `x-mdsync-spike:<spike>:<account>:<uuid>`. The harness never uses the notes field.
+- **Writes only touch scratch cards.** A card counts as a harness card only if both of these hold: its name (`givenName familyName`) starts with `ZZ Spike `, and one of its URL values starts with `x-c2mdsync-spike:`. That URL carries the label `c2mdsync-spike` and has the form `x-c2mdsync-spike:<spike>:<account>:<uuid>`. Scratch cards created before the rename carry the legacy marker `x-mdsync-spike:` (label `mdsync-spike`); the harness still recognizes those for checks and cleanup (the name prefix is still required), but never creates new ones. The harness never uses the notes field.
 - **Checks happen right before every write.** All writes go through `SafeWriter` (`Sources/c2m-spike/Support/Harness.swift`). It fetches the target card again by identifier with unified results off, refuses to continue unless the card passes both checks, and checks again after the mutation. A save to a unified contact (S4 `--unified-write`) requires every underlying card to pass.
 - **Writes are dry runs until you add `--yes`.** Every write subcommand prints its plan. Without `--yes`, nothing is written.
 - **`cleanup` needs both markers.** It deletes only cards that pass both checks. If a card matches only one, `cleanup` lists it and you delete it by hand. This can happen when Google strips the marker URL during S1 or S5.
@@ -73,7 +73,7 @@ c2m-spike s1-stamp create --container google --yes
 c2m-spike s1-stamp check                              # right away: local baseline
 ```
 
-Each card gets two URLs: the marker, and the stamp under test (label `mdsync`, value `x-mdsync:<uuid>`).
+Each card gets two URLs: the marker, and the stamp under test (label `c2mdsync`, value `x-c2mdsync:<uuid>`). `s1-stamp check` also recognizes the legacy stamp (label `mdsync`, value `x-mdsync:<uuid>`) on cards created before the rename.
 
 1. Wait 5–15 minutes. Then look at both cards on your iPhone, at iCloud.com, and at contacts.google.com. Is the URL there, and what label does it show?
 2. Run `c2m-spike s1-stamp check` again on this Mac. If a second Mac has the harness built, run it there too. Identifiers will differ on another device, and the ledger is local to each machine.
@@ -155,7 +155,7 @@ The catalog covers:
 
 - 11 phone formats: bare digits, punctuation, E.164, extensions, international numbers, custom and nil labels
 - emails with mixed case and a label containing spaces
-- URLs without a scheme, in uppercase, with query and fragment, and the `x-mdsync:` stamp
+- URLs without a scheme, in uppercase, with query and fragment, and the `x-c2mdsync:` stamp
 - 4 addresses: a multi-line street, a lowercase state and ISO code, a city alone, and a UK address with a lowercase postcode
 - a yearless Feb 29 birthday, plus anniversary and yearless dates
 - social profiles, IM handles and relations

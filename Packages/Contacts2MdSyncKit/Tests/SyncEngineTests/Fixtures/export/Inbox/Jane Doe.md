@@ -46,7 +46,7 @@ tags:
   - close_friends
 apple:
   phonetic_last_name: ドウ
-mdsync:
+c2mdsync:
   id: 00000000-0000-4000-8000-000000000001
 ---
 Met at the **2019** conference.

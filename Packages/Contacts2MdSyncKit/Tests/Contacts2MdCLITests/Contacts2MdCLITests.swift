@@ -79,7 +79,7 @@ struct CLITests {
         #expect(lines.first == "contacts2md plan  2027-01-15T08:00:00Z  root=/vault")
         #expect(lines.contains("create   md     Inbox/Jane Doe.md"))
         #expect(lines.contains("write    image  _images/00000000-0000-4000-8000-000000000002.jpg"))
-        #expect(lines.contains("write    config .mdsync/config.yaml"))
+        #expect(lines.contains("write    config .c2mdsync/config.yaml"))
         #expect(
             lines.contains { $0.hasPrefix("WARNING  duplicate  \"Chris Martin\" (iCloud), \"Chris Martin\" (Google)") })
         #expect(lines.contains { $0.hasPrefix("summary  apple c/u/d 0/0/0  md c/u/d 59/0/0  unchanged 0  skipped 1") })
@@ -101,9 +101,9 @@ struct CLITests {
         let first = harness.run(["export", "--root", "/vault", "--yes", "--default-folder", "People"])
         #expect(first.code == 1)
         #expect(first.out.contains("created  md     People/Jane Doe.md\n"))
-        #expect(first.out.contains("wrote    config .mdsync/config.yaml\n"))
+        #expect(first.out.contains("wrote    config .c2mdsync/config.yaml\n"))
         #expect(harness.vault.exists("People/Jane Doe.md"))
-        #expect(harness.vault.text(".mdsync/config.yaml")?.contains("default_folder: People\n") == true)
+        #expect(harness.vault.text(".c2mdsync/config.yaml")?.contains("default_folder: People\n") == true)
         #expect(harness.backups.isEmpty)  // no --stamp, no Apple writes, no backup
         #expect(harness.store.appliedBatches.isEmpty)
 

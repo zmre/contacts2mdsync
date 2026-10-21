@@ -49,7 +49,7 @@ public enum ReviewItem: Hashable, Sendable {
     case duplicateCluster(members: [ClusterMember], reasons: [String])
     /// A new Apple contact matches an existing, unlinked note: not created.
     case possibleMatch(title: String, path: String, reason: String)
-    /// Several notes carry the same `mdsync.id` (a copied file): record paused.
+    /// Several notes carry the same `c2mdsync.id` (a copied file): record paused.
     case duplicateSyncID(id: UUID, paths: [String])
     /// One unified contact carries several different stamps (linked cards).
     case multipleStamps(title: String, ids: [UUID])
@@ -94,7 +94,7 @@ public struct ExportPlan: Sendable {
     public var configText: String?
     /// Number of Apple contacts considered.
     public var appleContactCount: Int = 0
-    /// Contact notes without an `mdsync.id` (markdown-only candidates, M2).
+    /// Contact notes without an `c2mdsync.id` (markdown-only candidates, M2).
     public var markdownOnly: Int = 0
 
     /// Creates an empty plan.

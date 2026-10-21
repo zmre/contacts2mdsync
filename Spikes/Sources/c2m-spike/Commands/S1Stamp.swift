@@ -2,16 +2,20 @@ import ArgumentParser
 import Contacts
 import Foundation
 
-/// S1: does a URL labeled `mdsync` with value `x-mdsync:<uuid>` survive on
-/// iCloud and Google cards?
+/// S1: does a URL labeled `c2mdsync` with value `x-c2mdsync:<uuid>` survive on
+/// iCloud and Google cards? `check` also recognizes the pre-rename stamp
+/// (`mdsync` / `x-mdsync:`) on cards created before the rename.
 struct S1Stamp: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "s1-stamp",
         abstract: "S1: stamp URL survival on iCloud / Google.",
         subcommands: [Create.self, Check.self])
 
-    static let stampLabel = "mdsync"
-    static let stampScheme = "x-mdsync:"
+    static let stampLabel = "c2mdsync"
+    static let stampScheme = "x-c2mdsync:"
+    /// Pre-rename stamp, recognized by `check` only; never written.
+    static let legacyStampLabel = "mdsync"
+    static let legacyStampScheme = "x-mdsync:"
 
     struct Create: ParsableCommand {
         static let configuration = CommandConfiguration(abstract: "Create a scratch card carrying the S1 stamp URL.")
@@ -87,7 +91,9 @@ struct S1Stamp: ParsableCommand {
                         (try? store.container(ofContact: card.identifier))
                         .flatMap { $0.map { containerOptions.kind(ofContainer: $0)?.rawValue ?? $0.type.name } } ?? "?"
                     let urls = card.urlAddresses
-                    let stamp = urls.first { ($0.value as String).hasPrefix(S1Stamp.stampScheme) }
+                    let stamp =
+                        urls.first { ($0.value as String).hasPrefix(S1Stamp.stampScheme) }
+                        ?? urls.first { ($0.value as String).hasPrefix(S1Stamp.legacyStampScheme) }
                     let markerValue = Harness.marker(card)
                     let ledgerHit =
                         ledger.first { $0.identifier == card.identifier }
@@ -103,7 +109,10 @@ struct S1Stamp: ParsableCommand {
                     }
                     let stampLabel: String
                     if let stamp {
-                        stampLabel = stamp.label == S1Stamp.stampLabel ? "intact" : "CHANGED -> \(stamp.label ?? "nil")"
+                        let expected =
+                            (stamp.value as String).hasPrefix(S1Stamp.stampScheme)
+                            ? S1Stamp.stampLabel : S1Stamp.legacyStampLabel
+                        stampLabel = stamp.label == expected ? "intact" : "CHANGED -> \(stamp.label ?? "nil")"
                     } else {
                         stampLabel = "MISSING"
                     }

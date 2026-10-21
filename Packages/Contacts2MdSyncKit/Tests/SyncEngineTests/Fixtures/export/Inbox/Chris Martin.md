@@ -7,6 +7,6 @@ emails:
   - home: chris@example.com
 phones:
   - mobile: "+1 303 555 0142"
-mdsync:
+c2mdsync:
   id: 00000000-0000-4000-8000-00000000001a
 ---

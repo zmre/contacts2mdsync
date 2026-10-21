@@ -46,7 +46,7 @@ tags:
   - close_friends
 apple:
   phonetic_last_name: ドウ
-mdsync:
+c2mdsync:
   id: 6f1c2e0a-8c1b-4b0e-9a57-2d0d4a1c9f13
 ---
 Everything below the frontmatter is the Apple Contacts "Notes" field

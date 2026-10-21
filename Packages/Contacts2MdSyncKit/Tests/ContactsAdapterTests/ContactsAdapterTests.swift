@@ -55,14 +55,14 @@ struct MapperTests {
         #expect(mapped.emails == [Labeled("icloud", "a@icloud.com"), Labeled("summer_house", "b@example.com")])
     }
 
-    @Test("the x-mdsync stamp URL is filtered out and exposed as the stamp id")
+    @Test("the x-c2mdsync stamp URL is filtered out and exposed as the stamp id")
     func stampFiltered() throws {
         let id = try #require(UUID(uuidString: "6f1c2e0a-8c1b-4b0e-9a57-2d0d4a1c9f13"))
         let contact = CNMutableContact()
         contact.urlAddresses = [
             labeled(CNLabelURLAddressHomePage, "https://janedoe.example" as NSString),
             labeled(SyncStamp.label, SyncStamp.url(for: id) as NSString),
-            labeled("other", "X-MDSYNC:garbage" as NSString),
+            labeled("other", "X-C2MDSYNC:garbage" as NSString),
         ]
         let mapped = AppleContactMapper.canonical(from: contact)
         #expect(mapped.urls == [Labeled("homepage", "https://janedoe.example")])

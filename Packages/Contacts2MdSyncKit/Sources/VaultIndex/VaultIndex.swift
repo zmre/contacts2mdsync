@@ -17,7 +17,7 @@ public struct VaultEntry: Sendable {
 
     /// The contact, for `type: person|organization` notes.
     public var contact: CanonicalContact? { note?.contact }
-    /// `mdsync.id` of a contact note.
+    /// `c2mdsync.id` of a contact note.
     public var syncID: UUID? { contact?.sync.id }
     /// Filename stem.
     public var stem: String { VaultPath.stem(of: path) }
@@ -27,9 +27,9 @@ public struct VaultEntry: Sendable {
 
 /// What the engine knows about the notes folder after one scan (M1 subset of
 /// architecture §2 `VaultIndex`): every markdown file, its contact parse, and
-/// lookups by `mdsync.id`, title and filename stem.
+/// lookups by `c2mdsync.id`, title and filename stem.
 ///
-/// Identity is `mdsync.id`, never the path: a file moved to any subfolder is
+/// Identity is `c2mdsync.id`, never the path: a file moved to any subfolder is
 /// still found by id.
 public struct VaultIndex: Sendable {
     /// Version of the index format.
@@ -84,17 +84,17 @@ public struct VaultIndex: Sendable {
     /// Contact notes (`type: person|organization`).
     public var contacts: [VaultEntry] { entries.filter { $0.contact != nil } }
 
-    /// Files with the given `mdsync.id` (more than one = copied file).
+    /// Files with the given `c2mdsync.id` (more than one = copied file).
     public func entries(withID id: UUID) -> [VaultEntry] {
         (byID[id] ?? []).map { entries[$0] }
     }
 
-    /// `mdsync.id`s that appear in more than one file.
+    /// `c2mdsync.id`s that appear in more than one file.
     public var duplicateIDs: [UUID: [String]] {
         byID.filter { $0.value.count > 1 }.mapValues { $0.map { entries[$0].path } }
     }
 
-    /// Contact notes without an `mdsync.id` (markdown-only candidates).
+    /// Contact notes without an `c2mdsync.id` (markdown-only candidates).
     public var unlinkedContacts: [VaultEntry] { contacts.filter { $0.syncID == nil } }
 
     /// Files whose contact frontmatter could not be read.

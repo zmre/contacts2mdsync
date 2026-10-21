@@ -123,11 +123,11 @@ Every value carries a **display form** (exactly as written) and a **comparison k
 
 ## 4. State tiers
 
-| Tier              | Location                                                  | Shared?      | Contents                                                                 |
-|-------------------|-----------------------------------------------------------|--------------|--------------------------------------------------------------------------|
-| Note frontmatter  | each `.md`                                                | all devices  | contact fields, `mdsync.id`, optional `mdsync.status`                     |
-| Vault state       | `<root>/.mdsync/`                                         | all devices  | `config.yaml`, `lease.json`, `devices/<id>.json`, `devices/<id>/decisions.jsonl` |
-| Device state      | `~/Library/Application Support/Contacts2MdSync/<vault_id>/state.sqlite` | this device | CN ids, merge base, file cache, history token, pending queue, unapplyable fields, session stats |
+| Tier             | Location                                                                | Shared?     | Contents                                                                                        |
+|------------------|-------------------------------------------------------------------------|-------------|-------------------------------------------------------------------------------------------------|
+| Note frontmatter | each `.md`                                                              | all devices | contact fields, `c2mdsync.id`, optional `c2mdsync.status`                                       |
+| Vault state      | `<root>/.c2mdsync/`                                                     | all devices | `config.yaml`, `lease.json`, `devices/<id>.json`, `devices/<id>/decisions.jsonl`                |
+| Device state     | `~/Library/Application Support/Contacts2MdSync/<vault_id>/state.sqlite` | this device | CN ids, merge base, file cache, history token, pending queue, unapplyable fields, session stats |
 
 **Why the merge base is per device.** A shared base can arrive over iCloud before that device's Contacts database has caught up. The device would read its stale Apple data as "Apple changed" and revert markdown. A per-device base fails safe: if stale, both sides look changed *to the same value*, and the "both changed equally → adopt" rule converges with no writes.
 
@@ -150,7 +150,7 @@ acquire lease ──► scan vault ──► snapshot Apple ──► match/bind
       └──── refresh base from fresh re-fetch of both sides; record session stats
 ```
 
-1. **Scan vault** — enumerate root, skip `.mdsync`, `_images`, excluded paths; re-parse only files whose (mtime, size) changed. Dataless iCloud placeholders count as present and are downloaded only when needed.
+1. **Scan vault** — enumerate root, skip `.c2mdsync`, `_images`, excluded paths; re-parse only files whose (mtime, size) changed. Dataless iCloud placeholders count as present and are downloaded only when needed.
 2. **Snapshot Apple** — unified contacts plus underlying cards (`unifyResults = false`, mapped via `isUnifiedWithContactWithIdentifier`). From M5, the history token narrows which contacts to re-fetch; a full snapshot is always the fallback and the source of truth.
 3. **Match / bind** — §6.
 4. **Merge** — §7.
@@ -167,14 +167,14 @@ A markdown file is bound to exactly one *unified* Apple contact. We never silent
 
 ### Matching cascade
 
-| Step | Signal                                         | Confidence | Action                               |
-|------|------------------------------------------------|------------|--------------------------------------|
-| 1    | `x-mdsync:<uuid>` URL on any underlying card   | 1.00       | bind                                 |
-| 2    | cached underlying CN id in device state        | 0.95       | bind, re-stamp                        |
-| 3    | email or phone key equal **and** name key equal | 0.90      | auto-bind only during adoption; else propose |
-| 4    | email or phone equal, name differs             | 0.70       | propose                              |
-| 5    | name + organization equal                      | 0.50       | propose                              |
-| 6    | name only                                      | 0.30       | warning only                         |
+| Step | Signal                                          | Confidence | Action                                       |
+|------|-------------------------------------------------|------------|----------------------------------------------|
+| 1    | `x-c2mdsync:<uuid>` URL on any underlying card  | 1.00       | bind                                         |
+| 2    | cached underlying CN id in device state         | 0.95       | bind, re-stamp                               |
+| 3    | email or phone key equal **and** name key equal | 0.90       | auto-bind only during adoption; else propose |
+| 4    | email or phone equal, name differs              | 0.70       | propose                                      |
+| 5    | name + organization equal                       | 0.50       | propose                                      |
+| 6    | name only                                       | 0.30       | warning only                                 |
 
 **Create gate.** Before creating anything on either side, the candidate runs through the cascade against the whole other side *and* against unstamped person notes in the vault. Any hit ≥ 0.5 blocks auto-creation and moves the item to Review.
 
@@ -203,7 +203,7 @@ Until resolved, a cluster produces at most one file (the iCloud-backed member) s
 
 ### Vault-side duplicates
 
-- Two files with the same `mdsync.id` → sync paused for that id; UI: keep one, assign a new id to the other, or delete one.
+- Two files with the same `c2mdsync.id` → sync paused for that id; UI: keep one, assign a new id to the other, or delete one.
 - Duplicate titles → warned (mbr resolves ties by URL sort, so links become ambiguous).
 
 ### First import
@@ -216,8 +216,8 @@ Always a dry-run plan first: N files to create, M existing notes to adopt, K clu
 
 1. **Identity**: stamp on any card, else the per-device `RecordMap` (unified id, then any card id; ambiguous card overlap → unbound). Several different stamps on one unified contact → review, skipped. A stamp from another vault (no binding here) simply reuses that id for the new note.
 2. **Clusters**: union-find on email key, E.164 phone key (≥ 7 digits) and exact name+organization. Name+organization requires a non-empty organization; name-only never clusters (two distinct "John Smith"s would otherwise block each other with no way to resolve in M1). Until resolved, a cluster yields one note: if a member already has a note, no other member gets one; otherwise the primary does (iCloud-backed, then local, then lowest unified id). Every cluster is a review item.
-3. **Notes**: a bound record's note is found by `mdsync.id` anywhere under the root and patched in place (moves are free). A bound record whose note is gone is reported as `missing` and not re-created unless `--restore-missing`. A copied note (duplicate `mdsync.id`) pauses that record.
-4. **Create gate**: an unbound contact is not created when it matches a contact note nobody is bound to: by strong key (email, phone, name+organization) for any such note, and also by plain title for *orphaned* notes (they carry an `mdsync.id` no Apple contact is bound to — e.g. the device state was lost). This makes a lost record map fail safe: nothing is duplicated, everything is reported for review.
+3. **Notes**: a bound record's note is found by `c2mdsync.id` anywhere under the root and patched in place (moves are free). A bound record whose note is gone is reported as `missing` and not re-created unless `--restore-missing`. A copied note (duplicate `c2mdsync.id`) pauses that record.
+4. **Create gate**: an unbound contact is not created when it matches a contact note nobody is bound to: by strong key (email, phone, name+organization) for any such note, and also by plain title for *orphaned* notes (they carry an `c2mdsync.id` no Apple contact is bound to — e.g. the device state was lost). This makes a lost record map fail safe: nothing is duplicated, everything is reported for review.
 5. **Filenames** avoid every stem in the vault (mbr resolves links by stem globally), then planned ones.
 6. **Executor**: images first, then config, then notes; every note write is compare-and-swap (`.absent` for new, `.unchanged(sha)` for updates), so a note edited between plan and execute is reported, not overwritten. Bindings are saved only for notes that were written or already identical.
 7. **Stamping** (the only Apple write in M1) requires a `BackupReceipt`, which only `VCardBackup.backup` can create, and is off unless the user passes `--stamp`.
@@ -313,14 +313,14 @@ Live sync is event-driven, not polling. Events can be missed, though: the app ma
 
 ## 11. Multi-device
 
-- **Lease** `.mdsync/lease.json`: `{device_id, device_name, acquired_at, heartbeat_at, expires_at}`; heartbeat 5 min, TTL 20 min. Acquire: expired or explicit "Take Over"; write, wait ~60 s, re-read, proceed only if still ours. Advisory — an accidental double leader converges because merges are idempotent and identical writes are skipped.
+- **Lease** `.c2mdsync/lease.json`: `{device_id, device_name, acquired_at, heartbeat_at, expires_at}`; heartbeat 5 min, TTL 20 min. Acquire: expired or explicit "Take Over"; write, wait ~60 s, re-read, proceed only if still ours. Advisory — an accidental double leader converges because merges are idempotent and identical writes are skipped.
 - **Followers** are read-only: they show status and dry-run diffs; user actions go to their own `decisions.jsonl`.
 - **iCloud conflict versions** (`NSFileVersion`): canonically equal → auto-resolve keeping current; else raise a record conflict.
 - **Handover** is safe because each device keeps its own base.
 
 ## 12. Scope (shape now, enforcement M3)
 
-See `scope:` in [markdown-schema.md §8](markdown-schema.md#config-yaml-sketch). Precedence: contact rule > group rule; exclude > include. Leaving scope never deletes anything: `on_leave_scope: detach` sets `mdsync.status: detached` and stops syncing that file.
+See `scope:` in [markdown-schema.md §8](markdown-schema.md#config-yaml-sketch). Precedence: contact rule > group rule; exclude > include. Leaving scope never deletes anything: `on_leave_scope: detach` sets `c2mdsync.status: detached` and stops syncing that file.
 
 ## 13. Platform notes
 
@@ -378,7 +378,7 @@ common: --quiet  --verbose
 - `--root` is required in M1 (security-scoped bookmarks arrive with the GUI setup flow).
 - `export` without `--yes` prints the plan and writes nothing (same as `plan`).
 - `--stamp` requires `--yes`; it takes a vCard backup to `<state>/backups/` first and refuses to stamp if that fails (nothing is written at all in that case).
-- `--default-folder` / `--region` are saved into `.mdsync/config.yaml`.
+- `--default-folder` / `--region` are saved into `.c2mdsync/config.yaml`.
 - Plan lines: `create md`, `update md <path>  (changed keys)`, `write image`, `write config`, `stamp apple`; executed lines: `created`, `updated`, `wrote`, `backup`, `stamped`. Then `WARNING …` lines, the `summary` line, and for dry runs a `note` line.
 - `--json` is not implemented yet (M3, with `sync`); the header has no `device=` until device identity lands (M6).
 - Usage errors exit 64 (ArgumentParser's `EX_USAGE`), in addition to the table below.

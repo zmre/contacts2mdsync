@@ -124,7 +124,7 @@ struct IdempotencyTests {
         #expect(restored.creates.map(\.path) == ["Inbox/Bob Smith.md"])
     }
 
-    @Test("a copied note (duplicate mdsync.id) pauses that record")
+    @Test("a copied note (duplicate c2mdsync.id) pauses that record")
     func copied() throws {
         let harness = ExportHarness()
         try harness.export()

@@ -10,7 +10,7 @@ internal import Foundation
 /// - Markdown-owned and markdown-only data is preserved: `title`, plain and
 ///   other non-Apple aliases, unmanaged tags, `death` dates, mbr-only
 ///   relationship types and `from:` edges, edge attributes, unknown keys,
-///   `apple:`/`mdsync:` extras, and the body unless Apple has a note.
+///   `apple:`/`c2mdsync:` extras, and the body unless Apple has a note.
 struct ExportProjection {
     let keyer: any PhoneKeyer
     let notesAvailable: Bool

@@ -59,7 +59,7 @@ struct StampingTests {
         #expect(store.vCardExportCount == 12)
     }
 
-    @Test("stamping writes x-mdsync stamps to the planned cards with our author")
+    @Test("stamping writes x-c2mdsync stamps to the planned cards with our author")
     func stamping() throws {
         let directory = tempDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -138,10 +138,10 @@ struct StateTests {
         #expect(throws: VaultFSError.conflict(path: "A/b.md")) {
             try fs.write(Data("three".utf8), to: "A/b.md", expecting: .unchanged(stamp))
         }
-        _ = try fs.write(Data("cfg".utf8), to: ".mdsync/config.yaml", expecting: .any)
+        _ = try fs.write(Data("cfg".utf8), to: ".c2mdsync/config.yaml", expecting: .any)
         #expect(try fs.enumerate().map(\.path) == ["A/b.md"])
         #expect(String(data: try fs.read("A/b.md").0, encoding: .utf8) == "two")
-        #expect(fs.exists(".mdsync/config.yaml"))
+        #expect(fs.exists(".c2mdsync/config.yaml"))
         #expect(throws: VaultFSError.self) { try fs.read("../escape.md") }
         let leftovers = try FileManager.default.contentsOfDirectory(
             atPath: root.appending(path: "A").path(percentEncoded: false))

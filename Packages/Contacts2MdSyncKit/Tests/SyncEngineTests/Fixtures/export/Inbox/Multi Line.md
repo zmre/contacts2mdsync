@@ -11,6 +11,6 @@ addresses:
       postcode: "97201"
       country: USA
       country_code: us
-mdsync:
+c2mdsync:
   id: 00000000-0000-4000-8000-000000000016
 ---

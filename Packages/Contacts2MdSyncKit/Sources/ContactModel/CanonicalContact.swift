@@ -27,7 +27,7 @@ public struct CanonicalContact: Hashable, Sendable {
     public var tags: [String]
     /// Apple-only fields stored under `apple:`.
     public var apple: AppleExtras
-    /// The engine-owned `mdsync:` block.
+    /// The engine-owned `c2mdsync:` block.
     public var sync: SyncMetadata
     /// Note body (everything after the frontmatter); ↔ `CNContact.note` when entitled.
     public var body: String?

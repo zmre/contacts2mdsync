@@ -99,7 +99,7 @@ struct Session {
                 + " \(index.entries.count - contacts.count) other notes")
         for (id, paths) in index.duplicateIDs.sorted(by: { $0.value[0] < $1.value[0] }) {
             let list = paths.sorted().joined(separator: ", ")
-            report.warning("copied", "\(paths.count) notes share mdsync id \(id.uuidString.lowercased()): \(list)")
+            report.warning("copied", "\(paths.count) notes share c2mdsync id \(id.uuidString.lowercased()): \(list)")
         }
         for entry in index.problems {
             report.warning("invalid", "\(entry.path): \(entry.problem ?? "unreadable") — never written")

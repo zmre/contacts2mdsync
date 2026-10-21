@@ -41,7 +41,7 @@ final class ExportHarness: Sendable {
         return (plan, result)
     }
 
-    /// Every file in the vault (including `.mdsync/`), path → bytes.
+    /// Every file in the vault (including `.c2mdsync/`), path → bytes.
     var files: [String: Data] {
         Dictionary(uniqueKeysWithValues: vault.paths.compactMap { path in vault.data(path).map { (path, $0) } })
     }

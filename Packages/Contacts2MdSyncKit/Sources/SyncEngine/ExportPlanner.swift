@@ -7,9 +7,9 @@ public import VaultIndex
 /// planner (architecture §6). Pure apart from reading the vault; writes
 /// nothing. The result is executed by `ExportExecutor`.
 ///
-/// Identity of each Apple contact, in order: its `x-mdsync:` stamp, then the
+/// Identity of each Apple contact, in order: its `x-c2mdsync:` stamp, then the
 /// per-device `RecordMap` (unified id or any card id). A bound contact's note
-/// is found by `mdsync.id` wherever it lives under the root and updated in
+/// is found by `c2mdsync.id` wherever it lives under the root and updated in
 /// place. An unbound contact gets a new id and a new note, unless:
 /// - it is a non-primary member of a duplicate cluster (one note per cluster
 ///   until the user resolves it), or

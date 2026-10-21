@@ -58,7 +58,7 @@ struct S5Normalize: ParsableCommand {
             CNLabeledValue(label: CNLabelURLAddressHomePage, value: "example.com" as NSString),
             CNLabeledValue(label: CNLabelWork, value: "HTTP://Example.COM/Path?q=1&r=2#frag" as NSString),
             CNLabeledValue(label: "x-custom", value: "https://example.com/" as NSString),
-            CNLabeledValue(label: "mdsync", value: "x-mdsync:00000000-0000-4000-8000-000000000005" as NSString),
+            CNLabeledValue(label: "c2mdsync", value: "x-c2mdsync:00000000-0000-4000-8000-000000000005" as NSString),
         ]
         func address(_ configure: (CNMutablePostalAddress) -> Void) -> CNPostalAddress {
             let a = CNMutablePostalAddress()

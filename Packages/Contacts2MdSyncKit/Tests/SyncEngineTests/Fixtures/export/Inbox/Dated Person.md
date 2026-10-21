@@ -8,6 +8,6 @@ dates:
   - first_met: "2001-09-09"
   - anniversary: "2005-05-05"
   - anniversary: "--07-07"
-mdsync:
+c2mdsync:
   id: 00000000-0000-4000-8000-000000000026
 ---

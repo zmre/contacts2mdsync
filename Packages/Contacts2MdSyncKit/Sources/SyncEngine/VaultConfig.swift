@@ -15,12 +15,12 @@ public struct GroupTag: Hashable, Sendable {
     }
 }
 
-/// The shared vault configuration, `<root>/.mdsync/config.yaml`
+/// The shared vault configuration, `<root>/.c2mdsync/config.yaml`
 /// (markdown-schema §8). M1 reads and writes the keys below; every other key
 /// (`limits`, `scope`, …) is preserved byte-for-byte when the file is updated.
 public struct VaultConfig: Hashable, Sendable {
     /// Root-relative location of the file.
-    public static let path = ".mdsync/config.yaml"
+    public static let path = ".c2mdsync/config.yaml"
     /// Current schema number.
     public static let currentSchema = 1
 

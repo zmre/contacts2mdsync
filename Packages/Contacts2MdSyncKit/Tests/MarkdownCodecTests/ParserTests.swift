@@ -122,11 +122,11 @@ struct ParserTests {
         #expect(contact.passthrough.map(\.key) == ["gender", "born_place", "custom"])
     }
 
-    @Test("mdsync: id parsed, bad id preserved verbatim")
-    func mdsync() throws {
-        let good = try parseContact("---\ntype: person\nmdsync:\n  id: 6F1C2E0A-8C1B-4B0E-9A57-2D0D4A1C9F13\n---\n")
+    @Test("c2mdsync: id parsed, bad id preserved verbatim")
+    func c2mdsync() throws {
+        let good = try parseContact("---\ntype: person\nc2mdsync:\n  id: 6F1C2E0A-8C1B-4B0E-9A57-2D0D4A1C9F13\n---\n")
         #expect(good.sync.id?.uuidString == "6F1C2E0A-8C1B-4B0E-9A57-2D0D4A1C9F13")
-        let bad = try parseContact("---\ntype: person\nmdsync:\n  id: nope\n  status: detached\n---\n")
+        let bad = try parseContact("---\ntype: person\nc2mdsync:\n  id: nope\n  status: detached\n---\n")
         #expect(bad.sync.id == nil)
         #expect(bad.sync.status == "detached")
         #expect(bad.sync.other == [YAMLField(key: "id", value: .scalar("nope", plain: true))])

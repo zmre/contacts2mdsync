@@ -1,7 +1,7 @@
 public import Foundation
 internal import Synchronization
 
-/// Source of new record ids (`mdsync.id`). Injected so tests are deterministic.
+/// Source of new record ids (`c2mdsync.id`). Injected so tests are deterministic.
 public protocol IDGenerator: Sendable {
     /// A new, unused id.
     func next() -> UUID

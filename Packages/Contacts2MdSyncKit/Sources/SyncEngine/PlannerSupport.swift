@@ -68,7 +68,7 @@ struct NameResolver {
 /// existing note nobody is bound to is not created automatically.
 ///
 /// Strong keys (email, phone, name+company) match any unbound contact note.
-/// Orphaned notes — they carry an `mdsync.id` but no Apple contact is bound
+/// Orphaned notes — they carry an `c2mdsync.id` but no Apple contact is bound
 /// to it (e.g. the per-device state was lost) — were written by us, so a
 /// plain name match blocks creation too.
 struct CreateGate {

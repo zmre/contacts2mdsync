@@ -42,7 +42,7 @@ enum ManagedKeys {
             name: "tags", emit: { $0.tags.isEmpty ? nil : .sequence($0.tags.map { YAMLWriter.scalar($0) }) },
             equal: { $0.tags == $1.tags }),
         ManagedKey(name: "apple", emit: { apple($0.apple) }, equal: { $0.apple == $1.apple }),
-        ManagedKey(name: "mdsync", emit: { sync($0.sync) }, equal: { $0.sync == $1.sync }),
+        ManagedKey(name: "c2mdsync", emit: { sync($0.sync) }, equal: { $0.sync == $1.sync }),
     ]
 
     static let names: Set<String> = Set(all.map(\.name))

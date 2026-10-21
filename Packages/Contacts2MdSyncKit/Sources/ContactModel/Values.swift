@@ -259,7 +259,7 @@ public struct IMHandle: Hashable, Sendable {
 
 /// The other end of a relationship.
 public enum RelationshipTarget: Hashable, Sendable {
-    /// A synced record, by `mdsync.id`. Engine-internal: resolved to a
+    /// A synced record, by `c2mdsync.id`. Engine-internal: resolved to a
     /// `.wikilink` (the record's title) before encoding.
     case record(UUID)
     /// `to: "[[Title]]"` in markdown.
@@ -339,13 +339,13 @@ public struct AppleExtras: Hashable, Sendable {
     }
 }
 
-/// The engine-owned `mdsync:` block.
+/// The engine-owned `c2mdsync:` block.
 public struct SyncMetadata: Hashable, Sendable {
-    /// The record identity (`mdsync.id`), lowercase UUID v4 in markdown.
+    /// The record identity (`c2mdsync.id`), lowercase UUID v4 in markdown.
     public var id: UUID?
     /// `detached` when out of scope / unlinked (M3).
     public var status: String?
-    /// Unknown `mdsync:` sub-keys, preserved in order.
+    /// Unknown `c2mdsync:` sub-keys, preserved in order.
     public var other: [YAMLField]
 
     /// Creates metadata.

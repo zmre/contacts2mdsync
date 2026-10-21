@@ -104,7 +104,7 @@ public struct AppleCard: Hashable, Sendable {
     public var id: String
     public var containerID: String
     public var accountKind: AccountKind
-    /// `x-mdsync:<uuid>` stamp found on this card, if any.
+    /// `x-c2mdsync:<uuid>` stamp found on this card, if any.
     public var stampID: UUID?
 
     /// Creates a card.
@@ -184,11 +184,11 @@ public struct AppleSnapshot: Hashable, Sendable {
 /// The URL stamp that ties an Apple card to a markdown record.
 public enum SyncStamp {
     /// Label of the stamp URL.
-    public static let label = "mdsync"
+    public static let label = "c2mdsync"
     /// Scheme prefix of the stamp URL value.
-    public static let prefix = "x-mdsync:"
+    public static let prefix = "x-c2mdsync:"
 
-    /// `x-mdsync:<uuid>` for `id`.
+    /// `x-c2mdsync:<uuid>` for `id`.
     public static func url(for id: UUID) -> String { prefix + id.uuidString.lowercased() }
 
     /// The id in a stamp URL value, or `nil` when `value` is not a stamp.
@@ -207,7 +207,7 @@ public enum SyncStamp {
 
 /// One Apple-side write. M1 implements only `.stamp`.
 public enum AppleWriteOperation: Hashable, Sendable {
-    /// Add `x-mdsync:<id>` (label `mdsync`) to `cardID`, replacing any other stamp.
+    /// Add `x-c2mdsync:<id>` (label `c2mdsync`) to `cardID`, replacing any other stamp.
     case stamp(cardID: String, id: UUID)
 }
 

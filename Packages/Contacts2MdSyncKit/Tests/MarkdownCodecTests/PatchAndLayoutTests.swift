@@ -65,7 +65,7 @@ struct PatchTests {
             custom:
               nested: [1, 2]
 
-            mdsync:
+            c2mdsync:
               id: 6f1c2e0a-8c1b-4b0e-9a57-2d0d4a1c9f13
             ---
             Body text.

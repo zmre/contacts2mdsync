@@ -8,7 +8,8 @@ struct C2MSpike: ParsableCommand {
         abstract: "Spike harness for Contacts2MdSync (docs/spikes.md). Run from Terminal.",
         discussion: """
             SAFETY: write subcommands only touch scratch cards this tool created: name starts with \
-            "ZZ Spike " AND a URL value starts with "x-mdsync-spike:". Writes print a plan and need --yes.
+            "ZZ Spike " AND a URL value starts with "x-c2mdsync-spike:" (or the legacy "x-mdsync-spike:"). \
+            Writes print a plan and need --yes.
 
             Results land in Spikes/results (override with C2M_SPIKE_RESULTS). See Spikes/README.md.
             """,

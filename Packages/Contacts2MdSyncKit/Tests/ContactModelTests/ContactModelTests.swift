@@ -226,11 +226,11 @@ struct StampTests {
     func stamp() throws {
         let id = try #require(UUID(uuidString: "6F1C2E0A-8C1B-4B0E-9A57-2D0D4A1C9F13"))
         let url = SyncStamp.url(for: id)
-        #expect(url == "x-mdsync:6f1c2e0a-8c1b-4b0e-9a57-2d0d4a1c9f13")
+        #expect(url == "x-c2mdsync:6f1c2e0a-8c1b-4b0e-9a57-2d0d4a1c9f13")
         #expect(SyncStamp.id(fromURL: url) == id)
-        #expect(SyncStamp.id(fromURL: "X-MDSYNC:" + id.uuidString) == id)
-        #expect(SyncStamp.id(fromURL: "x-mdsync:nope") == nil)
-        #expect(SyncStamp.isStamp("x-mdsync:nope"))
+        #expect(SyncStamp.id(fromURL: "X-C2MDSYNC:" + id.uuidString) == id)
+        #expect(SyncStamp.id(fromURL: "x-c2mdsync:nope") == nil)
+        #expect(SyncStamp.isStamp("x-c2mdsync:nope"))
         #expect(!SyncStamp.isStamp("https://example.com"))
     }
 

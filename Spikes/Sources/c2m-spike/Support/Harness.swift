@@ -4,13 +4,21 @@ import Foundation
 /// Identification rules for scratch contacts. A contact is a harness contact
 /// only if BOTH hold:
 ///   1. "givenName familyName" starts with `namePrefix`, and
-///   2. some URL value starts with `markerScheme`.
+///   2. some URL value starts with one of `markerSchemes` (the current
+///      `markerScheme`, or `legacyMarkerScheme` on scratch cards created
+///      before the c2mdsync rename).
 /// Every write path re-checks this on a fresh fetch right before saving.
+/// New cards are always created with the current scheme.
 enum Harness {
     static let namePrefix = "ZZ Spike "
     static let givenName = "ZZ Spike"
-    static let markerLabel = "mdsync-spike"
-    static let markerScheme = "x-mdsync-spike:"
+    static let markerLabel = "c2mdsync-spike"
+    static let markerScheme = "x-c2mdsync-spike:"
+    /// Marker scheme used before the c2mdsync rename. Still recognized so old
+    /// scratch cards can be checked and cleaned up; never written.
+    static let legacyMarkerScheme = "x-mdsync-spike:"
+    /// Every scheme that identifies a harness marker, current first.
+    static let markerSchemes = [markerScheme, legacyMarkerScheme]
 
     /// Keys needed to evaluate `isHarness`.
     nonisolated(unsafe) static let identityKeys: [any CNKeyDescriptor] = [
@@ -37,23 +45,34 @@ enum Harness {
         displayName(contact).hasPrefix(namePrefix)
     }
 
-    /// The first marker URL value, if any.
+    /// The scheme `value` starts with, if it is a (current or legacy) marker.
+    static func markerSchemePrefix(_ value: String) -> String? {
+        markerSchemes.first { value.hasPrefix($0) }
+    }
+
+    /// The first marker URL value (current or legacy scheme), if any.
     static func marker(_ contact: CNContact) -> String? {
         guard contact.areKeysAvailable([CNContactUrlAddressesKey as any CNKeyDescriptor]) else { return nil }
-        return contact.urlAddresses.map { $0.value as String }.first { $0.hasPrefix(markerScheme) }
+        return contact.urlAddresses.map { $0.value as String }.first { markerSchemePrefix($0) != nil }
     }
 
     static func isHarness(_ contact: CNContact) -> Bool {
         hasNamePrefix(contact) && marker(contact) != nil
     }
 
-    /// Spike tag embedded in a marker, e.g. "s4" from "x-mdsync-spike:s4:icloud:<uuid>".
+    /// The `<spike>:<account>:<uuid>` parts of a marker, after its scheme.
+    private static func markerParts(_ marker: String) -> [Substring] {
+        guard let scheme = markerSchemePrefix(marker) else { return [] }
+        return marker.dropFirst(scheme.count).split(separator: ":")
+    }
+
+    /// Spike tag embedded in a marker, e.g. "s4" from "x-c2mdsync-spike:s4:icloud:<uuid>".
     static func spikeTag(_ marker: String) -> String? {
-        marker.dropFirst(markerScheme.count).split(separator: ":").first.map(String.init)
+        markerParts(marker).first.map(String.init)
     }
 
     static func kindTag(_ marker: String) -> String? {
-        let parts = marker.dropFirst(markerScheme.count).split(separator: ":")
+        let parts = markerParts(marker)
         return parts.count > 1 ? String(parts[1]) : nil
     }
 
@@ -232,7 +251,8 @@ func memberIDs(of unified: CNContact, in store: CNContactStore) throws -> [Strin
 func confirmPlan(_ title: String, _ steps: [String], yes: Bool) -> Bool {
     print("PLAN: \(title)")
     for step in steps { print("  - \(step)") }
-    print("  (only cards named \"\(Harness.namePrefix)…\" carrying a \(Harness.markerScheme) URL are ever modified)")
+    let schemes = Harness.markerSchemes.joined(separator: " or ")
+    print("  (only cards named \"\(Harness.namePrefix)…\" carrying a \(schemes) URL are ever modified)")
     if !yes {
         print("DRY RUN: nothing written. Re-run with --yes to perform the steps above.")
         return false

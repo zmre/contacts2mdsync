@@ -49,7 +49,7 @@ public enum MarkdownCodec {
     /// Delimiter that opens and closes a YAML frontmatter block.
     public static let frontmatterDelimiter = Frontmatter.delimiter
 
-    /// Parses a standalone YAML document (e.g. `.mdsync/config.yaml`) with the
+    /// Parses a standalone YAML document (e.g. `.c2mdsync/config.yaml`) with the
     /// same scalar rules as frontmatter: text preserved, no type resolution.
     public static func parseYAML(_ text: String) throws(CodecError) -> YAMLValue {
         try YAMLReader.parse(text)

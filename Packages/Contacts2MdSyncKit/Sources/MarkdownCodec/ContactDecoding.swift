@@ -43,7 +43,7 @@ enum ContactDecoding {
         contact.relationships = relationships(lookup["relationships"])
         contact.tags = tags(lookup["tags"])
         contact.apple = appleExtras(lookup["apple"])
-        contact.sync = syncMetadata(lookup["mdsync"])
+        contact.sync = syncMetadata(lookup["c2mdsync"])
         contact.body = body.isEmpty ? nil : body
         contact.passthrough = fields.filter { !ManagedKeys.names.contains($0.key) }
         return contact

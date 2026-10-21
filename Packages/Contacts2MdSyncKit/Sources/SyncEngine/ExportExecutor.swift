@@ -141,7 +141,7 @@ public struct VCardBackup: Sendable {
     }
 }
 
-/// Stamps Apple cards with their record id (`x-mdsync:<uuid>`, label `mdsync`).
+/// Stamps Apple cards with their record id (`x-c2mdsync:<uuid>`, label `c2mdsync`).
 ///
 /// The only Apple write in M1. Requires a `BackupReceipt`, i.e. a vCard
 /// backup written in this session; callers additionally gate it behind an
