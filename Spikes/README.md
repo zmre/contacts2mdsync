@@ -1,16 +1,17 @@
 # c2m-spike: the spike harness
 
-`c2m-spike` is a command-line tool for the spikes in [`docs/spikes.md`](../docs/spikes.md) that need a real address book: S1, S3, S4, S5, S9, S11, S12 and S13. It also gives partial evidence for S2 (the notes-key probe in `inventory`). S1–S12 use Contacts.framework directly. S13 links `ContactModel` and `ContactsAdapter` from `Packages/Contacts2MdSyncKit` (a path dependency) so it can run the app's real write path; the harness never modifies the kit.
+`c2m-spike` is a command-line tool for the spikes in [`docs/spikes.md`](../docs/spikes.md) that need a real address book: S1, S3, S4, S5, S9, S11, S12, S13 and S14. It also gives partial evidence for S2 (the notes-key probe in `inventory`). S1–S12 use Contacts.framework directly. S13 and S14 link `ContactModel` and `ContactsAdapter` from `Packages/Contacts2MdSyncKit` (a path dependency) so they can run the app's real write path and its real notes provider; the harness never modifies the kit.
 
 ## Safety model
 
-- **Writes only touch scratch cards.** A card counts as a harness card only if both of these hold: its name (`givenName familyName`) starts with `ZZ Spike `, and one of its URL values starts with `x-c2mdsync-spike:`. That URL carries the label `c2mdsync-spike` and has the form `x-c2mdsync-spike:<spike>:<account>:<uuid>`. Scratch cards created before the rename carry the legacy marker `x-mdsync-spike:` (label `mdsync-spike`); the harness still recognizes those for checks and cleanup (the name prefix is still required), but never creates new ones. The harness never reads or writes the notes field through Contacts.framework. The one exception is S12: it uses Apple Events to Contacts.app to write a synthetic note, and only to a scratch card.
+- **Writes only touch scratch cards.** A card counts as a harness card only if both of these hold: its name (`givenName familyName`) starts with `ZZ Spike `, and one of its URL values starts with `x-c2mdsync-spike:`. That URL carries the label `c2mdsync-spike` and has the form `x-c2mdsync-spike:<spike>:<account>:<uuid>`. Scratch cards created before the rename carry the legacy marker `x-mdsync-spike:` (label `mdsync-spike`); the harness still recognizes those for checks and cleanup (the name prefix is still required), but never creates new ones. The harness never reads or writes the notes field through Contacts.framework. The exceptions are S12 and S14: they use Apple Events to Contacts.app to write synthetic notes, and only to scratch cards.
 - **S12 writes go through Contacts.app, so they are checked on both sides.** Right before `set note`, `s12-notes write` verifies every underlying card behind the target with `SafeWriter.verifiedCard`. It also asks Contacts.app for the target person's `id`, first and last name, and `url` values, and refuses unless they show the `ZZ Spike ` prefix and one of the expected marker URLs. The handler arguments are passed as Apple Event descriptors, never pasted into script source.
+- **S14 runs the app's real notes provider behind a two-sided guard.** `s14-notes write` calls `ScriptingNotesProvider.write` only through `S14NotesGuard` (`Sources/c2m-spike/Commands/S14Notes.swift`). Before every call it fetches each target card again by id with unified results off; the card must pass both checks and carry the `s14` spike tag (or `s13`, only for the reused S13 linked pair). It also asks Contacts.app (through the S12 `NSAppleScript` reader) for the person with that id, which must show the `ZZ Spike ` prefix and the same marker URL. One target that fails refuses the whole write. The one write that is not to a harness card is case 5: an injection-shaped id that the guard first proves exists nowhere (not a CN card id, and `person id <it>` does not resolve in Contacts.app). `s14-notes check` and `write` print note text only for the synthetic notes they write; real notes are compared by SHA-256 only.
 - **Checks happen right before every write.** All writes go through `SafeWriter` (`Sources/c2m-spike/Support/Harness.swift`). It fetches the target card again by identifier with unified results off, refuses to continue unless the card passes both checks, and checks again after the mutation. A save to a unified contact (S4 `--unified-write`) requires every underlying card to pass.
 - **S13 runs the app's real write path behind a harness guard.** `s13-writes` calls `CNContactStoreAdapter.apply` (which uses `CardWriter`) only through `HarnessGuardedStore` (`Sources/c2m-spike/Support/KitGuard.swift`). Before each batch, the guard fetches every target card again by id with unified results off. Every card must pass both checks and carry the `s13` spike tag, or the guard refuses the whole batch and nothing is saved. The guard also refuses a URL-list edit that would drop the marker, a name edit that would drop the `ZZ Spike ` prefix, note and image edits, a create without the prefix and an `s13` marker, and group operations on any group other than `ZZ Spike S13 Group`. After the save it checks the cards again. The wrapper exposes only `apply`, so the harness can't reach any other write entry point.
 - **Writes are dry runs until you add `--yes`.** Every write subcommand prints its plan. Without `--yes`, nothing is written.
 - **`cleanup` needs both markers.** It deletes only cards that pass both checks. It deletes the S13 scratch group only if the group's name is exactly `ZZ Spike S13 Group` and it is empty or holds only harness cards; this is checked again right before the delete. If a card matches only one, `cleanup` lists it and you delete it by hand. This can happen when Google strips the marker URL during S1 or S5.
-- **Read-only output contains no PII.** `inventory`, `s9-ids` and `s12-notes probe` print counts, timings and opaque identifiers only. `s12-notes probe` reads every note but never prints note text or names. Container names that contain `@` are redacted. S9 files store SHA-256 hashes of identifiers.
+- **Read-only output contains no PII.** `inventory`, `s9-ids`, `s12-notes probe` and `s14-notes check` print counts, timings and opaque identifiers only. `s12-notes probe` and `s14-notes check` read every note but never print note text or names. Container names that contain `@` are redacted. S9 files store SHA-256 hashes of identifiers.
 
 ## Build
 
@@ -320,6 +321,48 @@ For the unified contact, it reports whether the pair is still linked, whether th
 
 **Record:** the `run` and `check` tables under S13 in `docs/spikes.md`. Then decide whether `apple_writes: enabled` is safe to turn on for the real address book.
 
+## S14: the production notes provider (`ScriptingNotesProvider`) on scratch cards
+
+Question: does the app's real notes path, `ScriptingNotesProvider` (raw Apple Events built by `ContactsScriptingEvents`, Contacts.app launched and quit by `LiveContactsApp`), read every note the same way the S12 `NSAppleScript` reader does, write notes exactly, and leave Contacts.app the way it found it?
+
+```sh
+c2m-spike s14-notes check                        # read-only; may launch Contacts.app hidden, then quits it
+c2m-spike s14-notes check --request-permission   # only if Automation was never decided: shows the macOS prompt once
+c2m-spike s14-notes write                        # dry run: plan only, no Apple Events, nothing created
+c2m-spike s14-notes write --yes                  # creates scratch cards if missing, runs cases 1–5
+#   if it created an S14 pair: wait ~15 min for automatic linking (or link by hand), then
+c2m-spike s14-notes write --yes                  # case 4 now runs on the linked pair
+c2m-spike cleanup --spike s14 --yes
+```
+
+The provider runs on a background thread, as in the app, while the main run loop keeps turning. The S12 `NSAppleScript` reader runs on the main thread.
+
+`check` sends read-only events and writes `Spikes/results/s14-check-<date>.md`:
+
+0. `currentPermission()` (must launch nothing; `unknown` while Contacts.app is not running), then `availability()`. If the provider launched Contacts.app, is it hidden and not frontmost?
+1. `readAll(cardIDs: nil)`: count, non-empty count, time; do the ids equal the CNContact card ids exactly?
+2. `readAll(cardIDs: <every CN card id>)`: the bulk path filtered to a list. Every card seen, same notes as step 1?
+3. Parity with the S12 `NSAppleScript` bulk read (ids, notes, ids again): same ids, same per-card SHA-256. It prints only a 16-hex digest over the sorted `id hash` lines for each side.
+4. `readAll` of 39 random cards plus 1 bogus id: the per-card path (≤ 40). Same hashes as the bulk read; the bogus id is absent (unknown), not empty.
+5. `readAll` of 41 random cards: bulk read plus filter.
+6. `finishSession()`: Contacts.app quit if the provider launched it and it is still hidden; left running if it was already running.
+
+`write --yes` uses `ZZ Spike S14 Notes <id>` (iCloud; created if missing) and a linked harness pair: an S14 pair if one is linked, else the S13 linked pair from `s13-writes setup`. With no linked pair and no S14 pair cards, it creates an iCloud + Google `ZZ Spike S14 Linked <id>` pair with the same name and email, and skips case 4 until Contacts links them. Every case goes through the guard, then `provider.write`, then reads back through the provider (per-card path) and through `NSAppleScript`:
+
+1. A multi-line Unicode note with CRLF line breaks (and one bare LF), straight and curly quotes, backslashes, `\n` literals, a tab, ZWJ and flag emoji, a decomposed `é`, Hebrew and Arabic, and AppleScript-looking text. PASS means the same UTF-8 bytes. WARN means equal only after line-ending normalization (Contacts converted CRLF), with the CR/LF counts.
+2. A deterministic 49,000-character note (S12's longest real note is 49,152). Exact.
+3. Clear (`nil`): the provider reads nil or empty, and `NSAppleScript` reads `missing value` or empty.
+4. One `provider.write` with the same note for both linked cards: both written, both read back exactly. An S13 pair gets its previous notes back afterwards.
+5. An id shaped like an injection (`…:ABPerson" & (do shell script "touch /tmp/c2m-spike-s14-injected") & "\"; save; --`). The guard first proves it exists nowhere. Expect: the provider read leaves it absent, and `write` reports a per-card failure (`-1728`) and writes nothing.
+6. The case-1 note is written to the solo card again, for an off-device check.
+7. CN side: every target card keeps its identifier and every other field (`Snapshot` rows), the linked pair keeps its unified id, no card was added or removed, change-history events (`unify=false`) appear only on target cards, every other card's note hash is unchanged (bulk re-read), and `/tmp/c2m-spike-s14-injected` does not exist.
+
+It writes `Spikes/results/s14-write-<date>.md`. The exit code is 1 if any row FAILs.
+
+**Observe:** any FAIL; a WARN in case 1 (line endings Contacts rewrites: the provider's own verify normalizes them, so it still reports success); the bulk time against S12's 0.5 s; what `finishSession()` did. A WARN on "history events only on target cards" or "every other card's note unchanged" can come from a concurrent sync or edit; it lists counts and opaque ids only.
+
+**Record:** both tables under S14 in `docs/spikes.md`. Then check the solo card's note on iCloud.com and on the iPhone.
+
 ## Cleanup
 
 ```sh
@@ -328,6 +371,7 @@ c2m-spike cleanup --yes           # delete all harness cards
 c2m-spike cleanup --spike s5 --yes
 c2m-spike cleanup --spike s12 --yes   # S12 scratch cards (single card and linked pair)
 c2m-spike cleanup --spike s13 --yes   # S13 cards, plus "ZZ Spike S13 Group" if all its members are harness cards
+c2m-spike cleanup --spike s14 --yes   # S14 cards (solo card and linked pair)
 ```
 
 Cards that match only one marker are listed for manual deletion and never deleted by the tool. After cleanup, delete any leftovers on contacts.google.com and iCloud.com by hand, and unload the S11 LaunchAgent and cron line.

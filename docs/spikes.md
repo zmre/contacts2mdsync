@@ -17,6 +17,7 @@ Each spike is a throwaway target under `Spikes/` with a written result here. Run
 | S11| Headless TCC + sandbox: does the app binary run with a `sync` argument from Terminal, cron and a launchd user agent keep the app's Contacts grant and read its security-scoped bookmark? | Headless CLI (architecture §15).             | Works from launchd at minimum. Otherwise fall back to `open -g -a … --args sync`. | **partial**: Terminal is authorized. launchd and cron report `notDetermined`; `--request` was never tried, so prompting and granting are untested. Bookmark not tested |
 | S12| Notes without the entitlement: can we read and write the Notes field by scripting Contacts.app with Apple Events (`note` and `id` of `person`)? How long do a bulk read and a per-person read take for about 2,500 contacts? Do AppleScript ids match CNContact card ids or unified ids? Which card of a linked pair gets the write? | Body ↔ notes mapping while S2 is blocked on Apple. | Bulk read of all notes takes a few seconds or less, writes keep the text exactly, no other fields or ids change, the linked-pair write target is predictable, and the Automation prompt is acceptable. Then Apple Events become the fallback notes path in architecture §8. | **pass** (2026-10-22) |
 | S13| Real M3 write path on scratch cards: does `CNContactStoreAdapter.apply` → `CardWriter` (behind a harness-only guard) add, edit and delete list values, write single-valued fields through to linked cards, stamp, manage group membership and edit relations correctly on real iCloud and Google cards? Labeled-value ids kept, no unified save, `transactionAuthor` excluded from history, values intact after a server round trip? | Go/no-go for `apple_writes: enabled` on the real address book. | `run`: every row PASS (WARN in steps 8–9 only if explained by a concurrent Google re-save). `check` after 15–30 min: values, stamps and ids survive, or each server rewrite is understood and covered by comparison keys. | todo |
+| S14| Production notes provider on the real Contacts.app: does `ScriptingNotesProvider` (raw Apple Events, `LiveContactsApp`) read every card's note identically to the S12 `NSAppleScript` reader (bulk and per-card paths, ids = CN card ids), write notes exactly (CRLF/Unicode/quotes/backslashes/emoji, ~49k chars, clear, both cards of a linked pair in one call), fail per card on an id that does not exist, and launch Contacts.app hidden and quit it after? | Go/no-go for notes scripting in the app (architecture §8 "As implemented (notes scripting)"). | `check`: every row PASS (parity by per-card SHA-256, no note text printed). `write`: every row PASS; WARN in case 1 only if Contacts rewrites line endings (then the body normalization covers it); CN identifiers and other fields unchanged, history only on target cards. | todo |
 
 ## Results (2026-10-21 UTC run)
 
@@ -294,6 +295,33 @@ Run the steps in this order. Steps 2–7 touch the real address book, but only s
 
 5. **Clean up:** `c2m-spike cleanup --spike s13 --yes`. This deletes the cards and `ZZ Spike S13 Group`. Then check iCloud.com and contacts.google.com for leftover "ZZ Spike S13" cards.
 
+
+### S14 run steps
+
+`c2m-spike s14-notes` runs the app's real notes provider, `ScriptingNotesProvider`, against the real Contacts.app. Writes go only to harness scratch cards: before every `provider.write`, the harness fetches each target card again (unified results off) and asks Contacts.app for the same person; both must show the `ZZ Spike ` prefix and the card's marker with spike tag `s14` (or `s13` for the reused S13 linked pair). For what each row checks, see [`Spikes/README.md`](../Spikes/README.md#s14-the-production-notes-provider-scriptingnotesprovider-on-scratch-cards).
+
+1. **Rebuild** (step 1 above). The harness builds whatever kit is in the working tree.
+
+2. **Check (read-only).** Prints counts, timings, opaque ids and hash comparisons only. If Contacts.app is not running, the provider launches it hidden and `finishSession()` quits it.
+
+   ```sh
+   c2m-spike s14-notes check          # → Spikes/results/s14-check-<date>.md
+   ```
+
+   If it reports `scripting(not-determined)`, run `c2m-spike s14-notes check --request-permission` once and allow the prompt.
+
+3. **Write.** If the S13 linked pair still exists, case 4 uses it and puts its notes back afterwards. Otherwise the first `--yes` creates an S14 pair and skips case 4.
+
+   ```sh
+   c2m-spike s14-notes write          # dry run: plan only, no Apple Events
+   c2m-spike s14-notes write --yes    # → Spikes/results/s14-write-<date>.md
+   #   only if it created an S14 pair: wait ~15 min for automatic linking, then
+   c2m-spike s14-notes write --yes
+   ```
+
+   Within about 5 minutes, check the S14 solo card's note (emoji, quotes, line breaks) on iCloud.com and on the iPhone.
+
+4. **Clean up:** `c2m-spike cleanup --spike s14 --yes`. Then check iCloud.com and contacts.google.com for leftover "ZZ Spike S14" cards.
 
 ---
 
