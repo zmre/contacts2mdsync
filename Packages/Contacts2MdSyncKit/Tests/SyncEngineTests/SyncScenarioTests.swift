@@ -39,8 +39,11 @@ enum World {
     }
 
     /// A world exported once (first import), ready for two-way runs.
+    /// With `distinct`, those contacts (unified ids) are declared different
+    /// people before the first export: same-name contacts cluster otherwise.
     static func exported(
-        _ contacts: [AppleContact], notes: Bool = false, appleWrites: Bool = true, stamps: StampChoice = .mode
+        _ contacts: [AppleContact], notes: Bool = false, appleWrites: Bool = true, stamps: StampChoice = .mode,
+        distinct: [String] = []
     ) throws -> SyncHarness {
         let stamping =
             switch stamps {
@@ -50,6 +53,14 @@ enum World {
             }
         let world = SyncHarness(
             contacts: contacts, notesEntitled: notes, appleWrites: appleWrites, stampContacts: stamping)
+        if !distinct.isEmpty {
+            let refs = contacts.filter { distinct.contains($0.unifiedID) }.map {
+                ContactRef(cardIDs: $0.cardIDs, title: $0.unifiedID)
+            }
+            try DecisionLog.append(
+                [Decision(kind: .distinctPeople, createdAt: world.clock.now, device: world.device, contacts: refs)],
+                deviceID: world.device.id, fs: world.vault)
+        }
         try world.export()
         // The first two-way run settles the merge base (M2 bases → M3 bases).
         let first = try world.sync()

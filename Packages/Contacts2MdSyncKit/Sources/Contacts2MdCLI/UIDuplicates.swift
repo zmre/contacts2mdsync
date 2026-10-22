@@ -9,8 +9,9 @@ internal import VaultIndex
 public enum UIDuplicateAction: Hashable, Sendable {
     /// The contacts are different people (remembered forever).
     case notDuplicates
-    /// Keep cluster member `member` (0-based) synced; exclude the others.
-    case syncOnly(member: Int)
+    /// Record a partition of the cluster (`cluster-resolve`): each group is
+    /// one person with one note, excluded members are not synced.
+    case resolve(ClusterPartition)
     /// Of the notes sharing a sync id, the one at index `path` keeps it.
     case keepSyncID(path: Int)
     /// Snooze until the next export (not recorded).
@@ -29,7 +30,7 @@ public enum UIDuplicateAction: Hashable, Sendable {
     public func decision(itemID: String) -> UIReviewDecision? {
         switch self {
         case .notDuplicates: .choice(itemID: itemID, choice: "distinct")
-        case .syncOnly(let member): .choice(itemID: itemID, choice: "only:\(member + 1)")
+        case .resolve(let partition): .choice(itemID: itemID, choice: partition.choice)
         case .keepSyncID(let path): .choice(itemID: itemID, choice: "keep:\(path + 1)")
         case .pickSurvivingFile(let index, _): .choice(itemID: itemID, choice: "keep:\(index + 1)")
         case .keepCurrentVersion: .choice(itemID: itemID, choice: "keep-current")
@@ -59,11 +60,28 @@ public struct UIDuplicateCard: Identifiable, Hashable, Sendable {
     public var lines: [String]
     /// Underlying card ids (contacts) for `addressbook://` links.
     public var cardIDs: [String]
-    /// Note path (notes).
+    /// Note path (notes; for cluster members, the note the contact syncs to).
     public var path: String?
     public var syncID: UUID?
-    /// The per-card action (`Sync Only iCloud`, `Keep This One`, `Keep This File`).
+    /// The per-card action (`Keep This One`, `Keep This File`, …).
     public var action: UIDuplicateAction?
+    /// Account badges (`iCloud`, `Google`); more than one: linked cards.
+    public var accounts: [String] = []
+    /// Household and office numbers, shown de-emphasized: they never make
+    /// two contacts duplicates.
+    public var quietLines: [String] = []
+    /// Why this card is in the cluster: one line per direct link
+    /// (`With 2 · Google: same email jane@x.com · names match (Jane / Jane)`).
+    public var why: [String] = []
+
+    /// More than one account: cards Contacts already linked.
+    public var isLinked: Bool { accounts.count > 1 }
+
+    /// Cluster member index (0-based), for contact cards of a cluster.
+    public var member: Int? {
+        if case .contact(let member) = source { return member }
+        return nil
+    }
 }
 
 /// A possible duplicate: unlinked contacts (cluster), copied notes (same sync
@@ -89,6 +107,9 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
     public var reasons: [String]
     public var cards: [UIDuplicateCard]
     public var firstSeen: Date
+    /// Contacts groups: the starting partition (an earlier answer for these
+    /// contacts, when the cluster came back with a new member; else empty).
+    public var priorPartition: UIClusterPartition?
 
     /// Builds the group for a pending item, or `nil` when it is not a duplicate.
     public init?(_ entry: PendingReview, plan: UIPlanSummary?, notes: [String: UINoteSummary]) {
@@ -116,6 +137,7 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
         self.reasons = reasons
         self.cards = []
         self.firstSeen = .distantPast
+        self.priorPartition = nil
     }
 
     /// What the builders look things up in.
@@ -125,21 +147,27 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
         let notes: [String: UINoteSummary]
 
         func contactCard(
-            _ index: Int, member: Int?, ref: ContactRef, accounts: [AccountKind]
+            _ index: Int, member: Int?, ref: ContactRef, accounts: [AccountKind], path: String? = nil
         ) -> UIDuplicateCard {
             let details = plan?.contact(for: ref.cardIDs)
             let names = unique((accounts.isEmpty ? details?.accounts ?? [] : accounts).map(\.displayName))
             var lines: [String] = []
+            var quiet: [String] = []
             if let details {
                 lines += [details.jobTitle, details.organization].compactMap { $0 }.filter { !$0.isEmpty }
-                lines += details.emails + details.phones
+                lines += details.emails + details.personalPhones
+                quiet = details.householdPhones.map(\.line)
             }
-            return UIDuplicateCard(
+            if let path { lines.append("Note: " + path) }
+            var card = UIDuplicateCard(
                 id: "\(id)-c\(index)", source: .contact(member: member),
                 heading: names.isEmpty ? "Contacts" : names.joined(separator: " + "),
                 title: details?.title ?? ref.title,
-                lines: lines, cardIDs: details?.cardIDs ?? ref.cardIDs, path: nil, syncID: nil,
-                action: member.map { .syncOnly(member: $0) })
+                lines: lines, cardIDs: details?.cardIDs ?? ref.cardIDs, path: path,
+                syncID: path.flatMap { notes[$0]?.syncID }, action: nil)
+            card.accounts = names
+            card.quietLines = quiet
+            return card
         }
 
         func noteCard(_ index: Int, path: String, action: UIDuplicateAction?) -> UIDuplicateCard {
@@ -158,6 +186,8 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
         }
     }
 
+    /// A duplicate cluster: one selectable card per member, with its
+    /// accounts, details, note (if bound) and why it is in the cluster.
     private static func cluster(_ members: [ClusterMember], reasons: [String], _ context: Context) -> Self {
         let paths = unique(members.compactMap(\.path))
         let accounts = unique(members.flatMap(\.accounts).map(\.displayName))
@@ -165,11 +195,18 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
             id: context.id, kind: .contacts, title: members.first?.title ?? "Contact",
             counts: counts(contacts: members.count, files: paths.count),
             sources: (accounts + (paths.isEmpty ? [] : ["md"])).joined(separator: "+"), reasons: reasons)
-        group.cards =
-            members.enumerated().map { offset, member in
-                context.contactCard(offset, member: offset, ref: member.ref, accounts: member.accounts)
+        var cards = members.enumerated().map { offset, member in
+            context.contactCard(offset, member: offset, ref: member.ref, accounts: member.accounts, path: member.path)
+        }
+        for (offset, member) in members.enumerated() {
+            cards[offset].why = (member.links ?? []).compactMap { link in
+                guard cards.indices.contains(link.other) else { return nil }
+                let other = cards[link.other]
+                return "With \(link.other + 1) · \(other.heading): " + link.reasons.joined(separator: " · ")
             }
-            + paths.enumerated().map { context.noteCard($0.offset, path: $0.element, action: nil) }
+        }
+        group.cards = cards
+        group.priorPartition = UIClusterPartition(prior: members)
         return group
     }
 
@@ -287,6 +324,42 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
 
     /// Every underlying card id (Open in Contacts to Link opens each).
     public var allCardIDs: [String] { cards.flatMap(\.cardIDs) }
+
+    /// Contact cards of a cluster, in member order.
+    public var memberCards: [UIDuplicateCard] { cards.filter { $0.member != nil } }
+
+    /// The partition to start editing from.
+    public var startingPartition: UIClusterPartition {
+        priorPartition ?? UIClusterPartition(memberCount: memberCards.count)
+    }
+
+    /// Card ids of the members of `person` (Open in Contacts to link them).
+    public func cardIDs(of person: Int, in partition: UIClusterPartition) -> [String] {
+        memberCards.filter { $0.member.map { partition.assignment(of: $0) == .person(person) } ?? false }
+            .flatMap(\.cardIDs)
+    }
+
+    /// The confirmation for Apply: who gets a note and who is left out.
+    public func applyMessage(_ partition: UIClusterPartition) -> String {
+        func names(_ members: [Int]) -> String {
+            members.compactMap { index in
+                memberCards.first { $0.member == index }.map { "\($0.title) (\($0.heading))" }
+            }
+            .joined(separator: ", ")
+        }
+        var parts: [String] = []
+        for person in partition.people {
+            let members = partition.members(of: person)
+            let label = UIClusterPartition.personName(person)
+            parts.append(
+                members.count == 1
+                    ? "\(label): \(names(members)) syncs to its own note."
+                    : "\(label): \(names(members)) are one person and sync to one note; link them in Contacts.")
+        }
+        let excluded = partition.excludedMembers
+        if !excluded.isEmpty { parts.append("Not synced: \(names(excluded)). Nothing is deleted.") }
+        return parts.joined(separator: "\n")
+    }
 
     static func shortID(_ id: UUID) -> String { String(id.uuidString.lowercased().prefix(4)) }
 

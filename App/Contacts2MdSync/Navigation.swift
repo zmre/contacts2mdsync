@@ -93,7 +93,9 @@ extension InspectorItem {
             title: card.title, subtitle: card.heading, path: card.path, syncID: card.syncID,
             accounts: isContact ? card.heading : nil, cardIDs: card.cardIDs,
             details: [Detail(label: "Why", value: group.reasons.joined(separator: " · "))]
-                + card.lines.map { Detail(label: "", value: $0) })
+                + card.lines.map { Detail(label: "", value: $0) }
+                + card.quietLines.map { Detail(label: "Shared number", value: $0) }
+                + card.why.map { Detail(label: "Linked by", value: $0) })
     }
 
     init(_ row: UIMarkdownOnlyRow) {

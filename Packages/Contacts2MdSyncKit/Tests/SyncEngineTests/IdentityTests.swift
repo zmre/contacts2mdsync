@@ -6,6 +6,11 @@ import SyncTestSupport
 import Testing
 import VaultIndex
 
+/// The id of the plan's duplicate cluster review.
+func clusterID(_ plan: ExportPlan) throws -> String {
+    try #require(plan.reviews.first { if case .duplicateCluster = $0 { true } else { false } }?.id)
+}
+
 @Suite("Decisions")
 struct DecisionTests {
     /// An unlinked iCloud + Google pair sharing an email.
@@ -16,10 +21,6 @@ struct DecisionTests {
             Book.person("c2", "Chris", "Martin", accounts: [.google]) { $0.emails = email },
         ])
         return ExportHarness(store: store)
-    }
-
-    private func clusterID(_ plan: ExportPlan) throws -> String {
-        try #require(plan.reviews.first { if case .duplicateCluster = $0 { true } else { false } }?.id)
     }
 
     @Test("`distinct` stops a cluster being reported and exports both members")
@@ -188,10 +189,17 @@ struct LinkedContactTests {
             Book.person("a2", "Ann", "One", accounts: [.google]) { $0.emails = [Labeled(nil, "ann@work.example")] },
         ])
         let harness = ExportHarness(store: store)
-        let (first, _) = try harness.export()
-        #expect(first.creates.map(\.path).sorted() == ["Inbox/Ann One 2.md", "Inbox/Ann One.md"])
+        // Equal names cluster; the user says they are different people.
+        let cluster = try harness.export().plan
+        #expect(cluster.creates.map(\.path) == ["Inbox/Ann One.md"])
+        try harness.decide(try clusterID(cluster), "distinct")
+        let (second, _) = try harness.export()
+        #expect(second.creates.map(\.path) == ["Inbox/Ann One 2.md"])
+        var stamps: [String: UUID] = [:]
+        for stamp in cluster.stamps + second.stamps { stamps[stamp.cardID] = stamp.recordID }
         _ = try store.apply(
-            AppleWriteBatch(operations: first.stamps.map { .stamp(cardID: $0.cardID, id: $0.recordID) }), author: "t")
+            AppleWriteBatch(operations: stamps.sorted { $0.key < $1.key }.map { .stamp(cardID: $0.key, id: $0.value) }),
+            author: "t")
         store.link(["a1:icloud", "a2:google"])
         store.setSynthesizeLinkedIDs(true)
         harness.vault.resetWrites()

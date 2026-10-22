@@ -23,9 +23,14 @@ extension PlanningRun {
                 taken.insert(forced)
                 continue
             }
-            guard let best = matches.first else { continue }
+            guard let best = matches.first(where: { !$0.score.advisory }) else {
+                warnSharedEmail(contact, matches, candidateIndex)
+                continue
+            }
             let entry = candidateIndex.candidates[best.index].entry
-            let strongRivals = matches.dropFirst().filter { $0.score.confidence >= MatchScore.gateThreshold }
+            let strongRivals = matches.filter {
+                $0.index != best.index && !$0.score.advisory && $0.score.confidence >= MatchScore.gateThreshold
+            }
             let unique = strongRivals.isEmpty && (scored.byNote[best.index] ?? []) == [contact.unifiedID]
             let isRelocation = entry.syncID.map { records[$0] != nil } ?? false
             let isDetached = entry.syncID.map(detachedIDs.contains) ?? false
@@ -92,6 +97,19 @@ extension PlanningRun {
         let id = entry.syncID ?? planner.ids.next()
         boundIDs[contact.unifiedID] = id
         adoptions[contact.unifiedID] = (entry, detail)
+    }
+
+    /// Only advisory matches (an email shared with someone whose name
+    /// differs): the contact is exported as usual, with a warning.
+    mutating func warnSharedEmail(
+        _ contact: AppleContact, _ matches: [(index: Int, score: MatchScore)], _ candidates: CandidateIndex
+    ) {
+        for match in matches where match.score.advisory {
+            let entry = candidates.candidates[match.index].entry
+            plan.warnings.append(
+                "\"\(title(contact))\" shares an email with \(entry.path), but the names differ "
+                    + "(\(match.score.reasons.last ?? "")); treated as different people")
+        }
     }
 
     /// Any match blocks creation (≥ 0.5 per the create gate; name-only too,

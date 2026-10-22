@@ -335,31 +335,6 @@ struct ReviewListCommand: ParsableCommand, EnvironmentCommand {
     }
 }
 
-struct ReviewDecideCommand: ParsableCommand, EnvironmentCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "decide",
-        abstract: "Record a decision for one review item.",
-        discussion: """
-            Choices: duplicates → distinct | only:N (sync only member N); possible matches → \
-            adopt | distinct | ignore; copied notes → keep:N; conflicts → apple | markdown | both; \
-            deleted in Contacts → trash | keep | restore; note deleted → restore | unlink | delete-contact; \
-            markdown-only notes → add | ignore.
-            """)
-
-    @OptionGroup var options: RootOptions
-
-    @Argument(help: "The item id from `review list` (e.g. dup-1a2b3c4d5e).")
-    var itemID: String
-
-    @Argument(help: "The choice (see `review list`).")
-    var choice: String
-
-    func run(in environment: CLIEnvironment) -> CLIExitCode {
-        Session(options: options, environment: environment, command: "review decide")
-            .reviewDecide(itemID: itemID, choice: choice)
-    }
-}
-
 struct ReviewAdoptAllCommand: ParsableCommand, EnvironmentCommand {
     static let configuration = CommandConfiguration(
         commandName: "adopt-all",

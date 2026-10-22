@@ -23,8 +23,13 @@ struct DuplicatesView: View {
                     groupList.frame(width: 250)
                     Divider()
                     if let group = groups.first(where: { $0.id == selectedID }) ?? groups.first {
-                        DuplicateDetail(model: model, group: group)
-                            .id(group.id)
+                        if group.kind == .contacts {
+                            ClusterDetail(model: model, group: group)
+                                .id(group.id)
+                        } else {
+                            DuplicateDetail(model: model, group: group)
+                                .id(group.id)
+                        }
                     }
                 }
             }
@@ -82,15 +87,7 @@ private struct DuplicateDetail: View {
                     .padding(.bottom, 4)
                 }
                 actions
-                if group.kind == .contacts {
-                    Text(
-                        "Contacts has no way for apps to link cards. Open them in Contacts, select both, "
-                            + "and choose Card ▸ Link Selected Cards. This window checks again when you come back."
-                    )
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                } else if group.kind == .mergeRecords {
+                if group.kind == .mergeRecords {
                     Text(
                         "These cards were linked in Contacts after each had its own note. Choose Keep This File "
                             + "on the note that should stay synced; the other notes are detached, not deleted."
@@ -138,21 +135,7 @@ private struct DuplicateDetail: View {
 
     @ViewBuilder private var actions: some View {
         HStack(spacing: 8) {
-            if group.kind == .contacts {
-                Button("Open in Contacts to Link") { model.openInContacts(cardIDs: group.allCardIDs) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(group.allCardIDs.isEmpty)
-                Menu("Sync Only…") {
-                    ForEach(group.cards.filter { $0.source != .note }) { card in
-                        if let action = card.action {
-                            Button(syncOnlyTitle(card)) { confirming = action }
-                        }
-                    }
-                }
-                .fixedSize()
-                .help("Keep one contact synced and leave the others out")
-                Button("Not Duplicates") { confirming = .notDuplicates }
-            } else if group.kind == .mergeRecords {
+            if group.kind == .mergeRecords {
                 Button("Open in Contacts") { model.openInContacts(cardIDs: group.allCardIDs) }
             } else if group.kind == .fileVersions, let path = group.cards.first?.path {
                 Button("Reveal in Finder") { model.revealInFinder(path: path) }
@@ -163,11 +146,6 @@ private struct DuplicateDetail: View {
         }
     }
 
-    private func syncOnlyTitle(_ card: UIDuplicateCard) -> String {
-        let sameHeading = group.cards.filter { $0.heading == card.heading }.count > 1
-        return sameHeading ? "Sync Only \(card.heading) (\(card.title))" : "Sync Only \(card.heading)"
-    }
-
     // MARK: - Confirmation
 
     private var isConfirming: Binding<Bool> {
@@ -176,8 +154,7 @@ private struct DuplicateDetail: View {
 
     private var confirmTitle: String {
         switch confirming {
-        case .notDuplicates: "Remember that these are different people?"
-        case .syncOnly(let member): "Sync only \(memberCard(member)?.heading ?? "this contact")?"
+        case .notDuplicates, .resolve: ""
         case .keepSyncID: "Keep the sync id on this file?"
         case .pickSurvivingFile(_, let path): "Keep \(path)?"
         case .keepCurrentVersion: "Keep the current version of \(group.title)?"
@@ -189,7 +166,7 @@ private struct DuplicateDetail: View {
     private func confirmButton(_ action: UIDuplicateAction) -> String {
         switch action {
         case .notDuplicates: "Not Duplicates"
-        case .syncOnly: "Sync Only This One"
+        case .resolve: "Apply"
         case .keepSyncID: "Keep This One"
         case .pickSurvivingFile: "Keep This File"
         case .keepCurrentVersion: "Keep Current"
@@ -200,12 +177,8 @@ private struct DuplicateDetail: View {
 
     private func confirmMessage(_ action: UIDuplicateAction) -> String {
         switch action {
-        case .notDuplicates:
-            return "They won't be flagged again. Each gets its own note on the next sync."
-        case .syncOnly(let member):
-            let others = group.cards.filter { $0.source != .note && $0.action != action }.map(\.heading)
-            return "\(memberCard(member)?.title ?? "This contact") stays synced. "
-                + "\(others.joined(separator: ", ")) will be left out of sync. Nothing is deleted."
+        case .notDuplicates, .resolve:
+            return ""
         case .keepSyncID(let index):
             let others = group.cards.indices.filter { $0 != index }.compactMap { group.cards[$0].path }
             return "The other \(others.count == 1 ? "file" : "files") (\(others.joined(separator: ", "))) "
@@ -217,10 +190,6 @@ private struct DuplicateDetail: View {
         case .ignoreForNow:
             return ""
         }
-    }
-
-    private func memberCard(_ member: Int) -> UIDuplicateCard? {
-        group.cards.first { $0.source == .contact(member: member) }
     }
 
     private func run(_ action: UIDuplicateAction) async {
@@ -293,7 +262,7 @@ private struct DuplicateCardView: View {
                 case .keepOtherVersion:
                     Button("Keep This Version") { choose(action) }
                         .help("Replace the file with this version on the next sync")
-                case .syncOnly, .notDuplicates, .ignoreForNow:
+                case .resolve, .notDuplicates, .ignoreForNow:
                     EmptyView()
                 }
             }

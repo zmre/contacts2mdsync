@@ -66,11 +66,16 @@ public struct UIContactSummary: Hashable, Sendable {
     public var jobTitle: String?
     public var emails: [String]
     public var phones: [String]
+    /// Household and office numbers among `phones`: shared by spouses and
+    /// colleagues, so they never make two contacts duplicates (shown
+    /// de-emphasized).
+    public var householdPhones: [UIHouseholdPhone]
 
     /// Creates a summary.
     public init(
         title: String, accounts: [AccountKind], cardIDs: [String], organization: String? = nil,
-        jobTitle: String? = nil, emails: [String] = [], phones: [String] = []
+        jobTitle: String? = nil, emails: [String] = [], phones: [String] = [],
+        householdPhones: [UIHouseholdPhone] = []
     ) {
         self.title = title
         self.accounts = accounts
@@ -79,15 +84,40 @@ public struct UIContactSummary: Hashable, Sendable {
         self.jobTitle = jobTitle
         self.emails = emails
         self.phones = phones
+        self.householdPhones = householdPhones
     }
 
     init(_ contact: AppleContact) {
         let values = contact.contact
+        let household = values.phones.filter { PhoneLabels.isHousehold($0.label) }
         self.init(
             title: TitleGenerator.title(for: values), accounts: contact.cards.map(\.accountKind),
             cardIDs: contact.cardIDs, organization: values.company?.name, jobTitle: values.jobTitle,
-            emails: values.emails.map(\.value), phones: values.phones.map(\.value))
+            emails: values.emails.map(\.value), phones: values.phones.map(\.value),
+            householdPhones: household.map { UIHouseholdPhone(value: $0.value, label: $0.label ?? "") })
     }
+
+    /// Mobile, iPhone and unlabeled numbers (the ones that can identify a person).
+    public var personalPhones: [String] {
+        let household = Set(householdPhones.map(\.value))
+        return phones.filter { !household.contains($0) }
+    }
+}
+
+/// A home / main / work number: shared within a household or office.
+public struct UIHouseholdPhone: Hashable, Sendable {
+    public var value: String
+    /// Markdown label (`home`, `work_fax`, …).
+    public var label: String
+
+    /// Creates a phone.
+    public init(value: String, label: String) {
+        self.value = value
+        self.label = label
+    }
+
+    /// `+1 303 555 0100 (home)`.
+    public var line: String { "\(value) (\(label.replacingOccurrences(of: "_", with: " ")))" }
 }
 
 /// A contact note that could not be parsed (never written to).

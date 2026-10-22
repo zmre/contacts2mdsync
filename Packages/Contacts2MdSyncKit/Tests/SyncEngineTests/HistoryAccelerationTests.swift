@@ -235,7 +235,7 @@ struct MergeKeepTests {
                 World.person("a2", "Ann", "One", accounts: [.google]) {
                     $0.emails = [Labeled(nil, "ann@work.example")]
                 },
-            ], stamps: .always)
+            ], stamps: .always, distinct: ["a1:icloud", "a2:google"])
         #expect(world.store.contacts.allSatisfy { $0.stampIDs.count == 1 })
         world.store.link(["a1:icloud", "a2:google"])
         let blocked = try world.sync()

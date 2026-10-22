@@ -1,4 +1,4 @@
-public import ContactModel
+internal import ContactModel
 public import Foundation
 public import VaultIndex
 
@@ -79,29 +79,6 @@ public struct NoteMove: Hashable, Sendable {
     public var recordID: UUID
     public var oldPath: String
     public var newPath: String
-}
-
-/// One member of a duplicate cluster, for display.
-public struct ClusterMember: Codable, Hashable, Sendable {
-    public var unifiedID: String
-    public var title: String
-    public var accounts: [AccountKind]
-    /// Path of the note this member is (or will be) exported to, if any.
-    public var path: String?
-    /// Underlying card ids (stable identity for decisions).
-    public var cardIDs: [String]
-
-    /// Creates a member.
-    public init(unifiedID: String, title: String, accounts: [AccountKind], path: String?, cardIDs: [String]) {
-        self.unifiedID = unifiedID
-        self.title = title
-        self.accounts = accounts
-        self.path = path
-        self.cardIDs = cardIDs
-    }
-
-    /// The member as a decision reference.
-    public var ref: ContactRef { ContactRef(cardIDs: cardIDs, title: title) }
 }
 
 /// Something that needs a human (Review in the app; WARNING in the CLI).
@@ -193,10 +170,12 @@ public enum ReviewItem: Codable, Hashable, Sendable {
     public enum ChoiceError: Error, Hashable, Sendable, CustomStringConvertible {
         case notDecidable(String)
         case invalidChoice(String, valid: [String])
+        case invalidPartition(String, problem: String)
 
         public var description: String {
             switch self {
             case .notDecidable(let id): "\(id) cannot be decided from the command line"
+            case .invalidPartition(let choice, let problem): "invalid partition \"\(choice)\": \(problem)"
             case .invalidChoice(let choice, let valid):
                 "invalid choice \"\(choice)\"; expected one of: \(valid.joined(separator: ", "))"
             }
@@ -206,6 +185,9 @@ public enum ReviewItem: Codable, Hashable, Sendable {
     /// The decisions recording `choice` (validated against `choices`).
     public func decisions(for choice: String, device: DeviceIdentity, at date: Date) throws -> [Decision] {
         guard !choices.isEmpty else { throw ChoiceError.notDecidable(id) }
+        if case .duplicateCluster(let members, _) = self, choice.hasPrefix(ClusterPartition.prefix) {
+            return [try resolution(members, choice: choice, device: device, at: date)]
+        }
         guard choices.contains(choice) else { throw ChoiceError.invalidChoice(choice, valid: choices) }
         let number = choice.split(separator: ":").last.flatMap { Int($0) }.map { $0 - 1 }
         func make(
@@ -244,6 +226,22 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             // Undecidable items have no choices and were rejected above.
             return syncDecisions(for: choice, device: device, at: date)
         }
+    }
+
+    /// The `cluster-resolve` decision for a `resolve:…` choice.
+    private func resolution(
+        _ members: [ClusterMember], choice: String, device: DeviceIdentity, at date: Date
+    ) throws -> Decision {
+        guard let partition = ClusterPartition(choice: choice) else {
+            throw ChoiceError.invalidPartition(choice, problem: "expected resolve:1,2/3;exclude:4")
+        }
+        if let problem = partition.problem(memberCount: members.count) {
+            throw ChoiceError.invalidPartition(choice, problem: problem)
+        }
+        return Decision(
+            kind: .clusterResolve, createdAt: date, device: device, contacts: members.map(\.ref), itemID: id,
+            choice: partition.choice, groups: partition.groups.map { $0.map { members[$0].ref } },
+            excluded: partition.excluded.map { members[$0].ref })
     }
 
     /// Decisions for the two-way sync items (conflicts, delete queues, opt-ins).

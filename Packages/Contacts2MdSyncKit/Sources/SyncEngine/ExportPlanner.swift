@@ -120,6 +120,9 @@ struct PlanningRun {
     var adoptions: [String: (entry: VaultEntry, detail: String)] = [:]
     /// Unified ids that must not be exported this run.
     var blocked = Set<String>()
+    /// Unified ids a cluster decision left out of sync (still clustered, so
+    /// a re-reported cluster shows them with their earlier answer).
+    var decisionExcluded = Set<String>()
     /// Record ids paused because their notes were copied (or have iCloud
     /// conflict versions, `pauseReasons`).
     var pausedIDs = Set<UUID>()
@@ -274,51 +277,29 @@ struct PlanningRun {
             return !profile.names.isDisjoint(with: names) || !profile.strong.isDisjoint(with: strong)
         }
         guard let entry = note(of: id), let contactNote = entry.contact else { return false }
-        return profile.score(against: MatchProfile(note: entry, contact: contactNote, keyer: planner.keyer)) != nil
+        let score = profile.score(against: MatchProfile(note: entry, contact: contactNote, keyer: planner.keyer))
+        return score.map { !$0.advisory } ?? false
     }
 
-    // MARK: Phase 3: sync-only exclusions
+    // MARK: Phase 3: cluster exclusions (sync-only, cluster-resolve)
 
     mutating func applyExclusions() {
-        for contact in contacts where boundIDs[contact.unifiedID] == nil && !blocked.contains(contact.unifiedID) {
-            guard decisions.syncOnlyRole(of: contact) == .exclude else { continue }
+        for contact in contacts where !blocked.contains(contact.unifiedID) {
+            guard let role = decisions.clusterRole(of: contact), role.isExcluded else { continue }
+            let id = boundIDs[contact.unifiedID]
+            // A legacy sync-only decision only ever held back contacts without a note.
+            if role.kind == .syncOnly, id != nil { continue }
             blocked.insert(contact.unifiedID)
+            decisionExcluded.insert(contact.unifiedID)
             plan.excludedByDecision += 1
-            skip(contact, "excluded by a sync-only decision", needsReview: false)
-        }
-    }
-
-    // MARK: Phase 4: duplicate clusters → at most one note each
-
-    mutating func limitClustersToOneNote() {
-        let eligible = contacts.filter { !blocked.contains($0.unifiedID) || boundIDs[$0.unifiedID] != nil }
-        let byUnifiedID = Dictionary(eligible.map { ($0.unifiedID, $0) }, uniquingKeysWith: { first, _ in first })
-        let clusterInput = eligible.map { contact -> AppleContact in
-            var copy = contact
-            copy.contact = values(contact)
-            return copy
-        }
-        let clusters = Clustering.clusters(of: clusterInput, keyer: planner.keyer) { decisions.areDistinct($0, $1) }
-        for cluster in clusters {
-            let members = cluster.memberIDs.compactMap { byUnifiedID[$0] }
-            // A sync-only decision naming a member settles the cluster.
-            if members.contains(where: { decisions.syncOnlyRole(of: $0) == .keep }),
-                members.allSatisfy({ decisions.syncOnlyRole(of: $0) != nil })
+            if isSync, let id, let entry = note(of: id), records[id] != nil,
+                plan.config.scope.onLeaveScope == "detach"
             {
-                continue
+                detach(entry, id: id, reason: "left out of sync in Duplicates")
+            } else {
+                let reason = role.kind == .syncOnly ? "a sync-only decision" : "a duplicates decision"
+                skip(contact, "excluded by \(reason)", needsReview: false)
             }
-            let alreadyExported = members.contains { notePath(of: $0) != nil }
-            let primary = alreadyExported ? nil : ExportPlanner.primary(of: members)
-            for member in members where boundIDs[member.unifiedID] == nil && member.unifiedID != primary?.unifiedID {
-                blocked.insert(member.unifiedID)
-                skip(member, "possible duplicate; review before export")
-            }
-            let described = members.map { member in
-                ClusterMember(
-                    unifiedID: member.unifiedID, title: title(member), accounts: member.cards.map(\.accountKind),
-                    path: notePath(of: member), cardIDs: member.cardIDs.sorted())
-            }
-            plan.reviews.append(.duplicateCluster(members: described, reasons: cluster.reasons))
         }
     }
 

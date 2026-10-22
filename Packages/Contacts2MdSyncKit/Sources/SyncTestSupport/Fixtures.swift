@@ -207,8 +207,12 @@ public enum Fixtures {
                 $0.phones = [Labeled("grandma_s", "+1 212 555 0101")]
                 $0.addresses = [Labeled("beach_cabin", PostalAddress(city: "Malibu", region: "CA"))]
             },
-            // c24 / c25: duplicate name, different people (no shared keys).
-            person("c24", "John", "Smith") { $0.emails = [Labeled("home", "john.smith@example.com")] },
+            // c24 / c25: duplicate name, different people (no shared keys,
+            // different organizations: equal names alone would cluster).
+            person("c24", "John", "Smith") {
+                $0.company = .plain("Initech")
+                $0.emails = [Labeled("home", "john.smith@example.com")]
+            },
             person("c25", "John", "Smith") {
                 $0.company = .plain("Globex")
                 $0.emails = [Labeled("work", "jsmith@globex.example")]

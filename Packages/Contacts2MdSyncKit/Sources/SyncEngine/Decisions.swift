@@ -66,6 +66,11 @@ public struct Decision: Codable, Hashable, Sendable {
         /// whose sha256 is `version` (`keep-other:N`), only while the current
         /// contents still hash to `markdown_hash` (M6, architecture §11).
         case fileVersionKeep = "file-version-keep"
+        /// A duplicate cluster partitioned by the user: each list of
+        /// `groups` is one person (one note), different groups are different
+        /// people, `excluded` members are not synced. `contacts` lists every
+        /// member. Supersedes `distinct-people` / `sync-only` for its members.
+        case clusterResolve = "cluster-resolve"
     }
 
     public var id: UUID
@@ -86,13 +91,20 @@ public struct Decision: Codable, Hashable, Sendable {
     public var markdownHash: String?
     /// The chosen iCloud conflict version (its sha256), for `file-version-keep`.
     public var version: String?
+    /// `cluster-resolve`: each list is one person.
+    public var groups: [[ContactRef]]?
+    /// `cluster-resolve`: members left out of sync.
+    public var excluded: [ContactRef]?
 
     /// Creates a decision.
     public init(
         id: UUID = UUID(), kind: Kind, createdAt: Date, device: DeviceIdentity, contacts: [ContactRef] = [],
         path: String? = nil, syncID: UUID? = nil, itemID: String? = nil, choice: String? = nil,
-        appleHash: String? = nil, markdownHash: String? = nil, version: String? = nil
+        appleHash: String? = nil, markdownHash: String? = nil, version: String? = nil,
+        groups: [[ContactRef]]? = nil, excluded: [ContactRef]? = nil
     ) {
+        self.groups = groups
+        self.excluded = excluded
         self.version = version
         self.choice = choice
         self.appleHash = appleHash
@@ -125,6 +137,8 @@ public struct Decision: Codable, Hashable, Sendable {
         case appleHash = "apple_hash"
         case markdownHash = "markdown_hash"
         case version
+        case groups
+        case excluded
     }
 
     public init(from decoder: any Decoder) throws {
@@ -142,6 +156,8 @@ public struct Decision: Codable, Hashable, Sendable {
         appleHash = try container.decodeIfPresent(String.self, forKey: .appleHash)
         markdownHash = try container.decodeIfPresent(String.self, forKey: .markdownHash)
         version = try container.decodeIfPresent(String.self, forKey: .version)
+        groups = try container.decodeIfPresent([[ContactRef]].self, forKey: .groups)
+        excluded = try container.decodeIfPresent([ContactRef].self, forKey: .excluded)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -159,6 +175,8 @@ public struct Decision: Codable, Hashable, Sendable {
         try container.encodeIfPresent(appleHash, forKey: .appleHash)
         try container.encodeIfPresent(markdownHash, forKey: .markdownHash)
         try container.encodeIfPresent(version, forKey: .version)
+        try container.encodeIfPresent(groups, forKey: .groups)
+        try container.encodeIfPresent(excluded, forKey: .excluded)
     }
 }
 
@@ -183,30 +201,53 @@ public struct DecisionSet: Sendable {
         all.last { $0.kind == .fileVersionKeep && $0.path == path }
     }
 
-    /// `first` and `second` were declared different people.
+    /// `first` and `second` were declared different people: by a
+    /// `distinct-people` decision, or by the latest cluster resolution
+    /// naming both, which put them in different groups. A later resolution
+    /// putting them in one group lifts an older separation.
     public func areDistinct(_ first: AppleContact, _ second: AppleContact) -> Bool {
-        all.contains { decision in
-            guard decision.kind == .distinctPeople, decision.path == nil else { return false }
-            let matchesA = decision.contacts.firstIndex { $0.matches(first) }
-            let matchesB = decision.contacts.firstIndex { $0.matches(second) }
-            guard let matchesA, let matchesB else { return false }
-            return matchesA != matchesB
+        var distinct = false
+        for decision in all {
+            switch decision.kind {
+            case .distinctPeople where decision.path == nil:
+                let matchesA = decision.contacts.firstIndex { $0.matches(first) }
+                let matchesB = decision.contacts.firstIndex { $0.matches(second) }
+                if let matchesA, let matchesB, matchesA != matchesB { distinct = true }
+            case .clusterResolve:
+                guard let groupA = decision.groupIndex(of: first), let groupB = decision.groupIndex(of: second) else {
+                    continue
+                }
+                distinct = groupA != groupB
+            default:
+                continue
+            }
         }
+        return distinct
     }
 
-    /// `contact` was declared not to be the person in the note at `path`.
-    public func isDistinct(_ contact: AppleContact, fromNoteAt path: String) -> Bool {
-        all.contains { decision in
-            decision.kind == .distinctPeople && decision.path == path
-                && decision.contacts.contains { $0.matches(contact) }
-        }
-    }
-
-    /// `.keep` / `.exclude` from the latest sync-only decision naming `contact`.
-    public func syncOnlyRole(of contact: AppleContact) -> SyncOnlyRole? {
-        for decision in all.reversed() where decision.kind == .syncOnly {
-            guard let index = decision.contacts.firstIndex(where: { $0.matches(contact) }) else { continue }
-            return index == 0 ? .keep : .exclude
+    /// The contact's place in the latest cluster decision naming it
+    /// (`cluster-resolve`, `distinct-people` without a path, `sync-only`).
+    public func clusterRole(of contact: AppleContact) -> ClusterRole? {
+        for decision in all.reversed() {
+            switch decision.kind {
+            case .clusterResolve:
+                if decision.excluded?.contains(where: { $0.matches(contact) }) == true {
+                    return ClusterRole(decision: decision.id, group: nil, kind: .resolve)
+                }
+                if let group = decision.groupIndex(of: contact) {
+                    return ClusterRole(decision: decision.id, group: group, kind: .resolve)
+                }
+            case .distinctPeople where decision.path == nil:
+                if let index = decision.contacts.firstIndex(where: { $0.matches(contact) }) {
+                    return ClusterRole(decision: decision.id, group: index, kind: .distinct)
+                }
+            case .syncOnly:
+                if let index = decision.contacts.firstIndex(where: { $0.matches(contact) }) {
+                    return ClusterRole(decision: decision.id, group: index == 0 ? 0 : nil, kind: .syncOnly)
+                }
+            default:
+                continue
+            }
         }
         return nil
     }
@@ -266,10 +307,42 @@ public struct DecisionSet: Sendable {
         all.contains { $0.kind == .createContact && $0.path == path }
     }
 
-    /// Role of a contact in a sync-only decision.
-    public enum SyncOnlyRole: Hashable, Sendable {
-        case keep
-        case exclude
+    /// `contact` was declared not to be the person in the note at `path`.
+    public func isDistinct(_ contact: AppleContact, fromNoteAt path: String) -> Bool {
+        all.contains { decision in
+            decision.kind == .distinctPeople && decision.path == path
+                && decision.contacts.contains { $0.matches(contact) }
+        }
+    }
+}
+
+/// Where a contact stands after a cluster decision.
+public struct ClusterRole: Hashable, Sendable {
+    /// The decision this comes from.
+    public var decision: UUID
+    /// Group number within that decision (`nil`: not synced).
+    public var group: Int?
+    /// Which kind of decision.
+    public var kind: Source
+
+    /// Decision kinds that settle cluster members.
+    public enum Source: Hashable, Sendable {
+        case resolve
+        case distinct
+        case syncOnly
+    }
+
+    /// Left out of sync.
+    public var isExcluded: Bool { group == nil }
+
+    /// Members with equal keys are one person.
+    public var groupKey: String? { group.map { "\(decision.uuidString)#\($0)" } }
+}
+
+extension Decision {
+    /// The group (0-based) of a `cluster-resolve` decision holding `contact`.
+    func groupIndex(of contact: AppleContact) -> Int? {
+        groups?.firstIndex { group in group.contains { $0.matches(contact) } }
     }
 }
 

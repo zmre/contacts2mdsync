@@ -94,7 +94,8 @@ struct MultiDeviceSimulationTests {
             World.person("sam1", "Sam", "Lee") { $0.jobTitle = "Baker" },
             World.person("sam2", "Sam", "Lee") { $0.jobTitle = "Pilot" },
         ]
-        let first = try World.exported(twins, stamps: .never)
+        // Same-name contacts cluster: declared different people first.
+        let first = try World.exported(twins, stamps: .never, distinct: ["sam1:icloud", "sam2:icloud"])
         let paths = first.notePaths
         #expect(paths.count == 2)
         let second = SimMac(

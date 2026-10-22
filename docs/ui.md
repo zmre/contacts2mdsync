@@ -213,25 +213,31 @@ Deleted in Markdown
 ## 7. Duplicates
 
 ```
-┌──────────────────────┬───────────────────────────────────────────────────────────────┐
-│ 7 possible duplicates│  Chris Martin — 2 contacts, 1 file                            │
-│                      │  Why: same email chris@acme.com · same phone · similar name   │
-│▸ Chris Martin   2+1  │                                                               │
-│  iCloud+Google+md    │  ┌ iCloud ─────────┐ ┌ Google ─────────┐ ┌ Markdown ───────┐  │
-│  Ana Ruiz       2 md │  │ Chris Martin    │ │ Christopher     │ │ Chris Martin.md │  │
-│  same sync id        │  │ Acme            │ │ Martin          │ │ Work/           │  │
-│  J. Park        2    │  │ chris@acme.com  │ │ chris@acme.com  │ │ id 7f3a…        │  │
-│  iCloud+Google       │  │ +1 555 0111     │ │ +1 555 0111     │ │ tags: friends   │  │
-│                      │  └─────────────────┘ └─────────────────┘ └─────────────────┘  │
-│                      │                                                               │
-│                      │  [Open in Contacts to Link]  [Sync Only iCloud ▾]             │
-│                      │  [Not Duplicates]            [Ignore for Now]                 │
-└──────────────────────┴───────────────────────────────────────────────────────────────┘
+2 possible duplicates │ John Doe — 2 contacts, 1 file
+                      │ Why: same email · same name
+▸ John Doe       2+1  │
+  iCloud+Google+md    │ 2 selected [Same Person] [Different People] [Don't Sync]
+  Jane Doe       2    │
+  iCloud+Google       │ ┌ ◉ 1 John Doe   Person A ┐ ┌ ◉ 2 John Doe   Person A ┐
+                      │ │ iCloud                  │ │ Google                  │
+                      │ │ john@doe.example        │ │ john@doe.example        │
+                      │ │ +1 303 555 0111         │ │ +1 303 555 0100 (home)  │
+                      │ │ +1 303 555 0100 (home)  │ │                         │
+                      │ │ Note: Inbox/John Doe.md │ │                         │
+                      │ │ With 2 · Google: same   │ │ With 1 · iCloud: same   │
+                      │ │ name · same email …     │ │ name · same email …     │
+                      │ └─────────────────────────┘ └─────────────────────────┘
+                      │ (Person A: 2 cards)  [Link Person A in Contacts…]
+                      │ [Apply] [Undo] [Reset]   [Not Duplicates] [Ignore for Now]
 ```
 
-- Apple has no public API to link cards, so the primary action opens both in Contacts.app (user links them with Card ▸ Link Selected Cards); we rescan on return.
-- **Sync Only …** keeps one card synced and excludes the others.
-- **Not Duplicates** is remembered forever; **Ignore for Now** snoozes until the next detection run.
+- A cluster joins cards with equal names, or a shared email and compatible names (architecture §6). Shared phones never join cards; home, main and work numbers are shown de-emphasized on the cards because a household shares them.
+- Each card is one Apple contact: a checkbox and selection ring, its number, the person badge it is assigned to, account badges (iCloud, Google, both with a *Linked* mark when Contacts already links them), emails and personal numbers, household numbers in tertiary text, the note it syncs to (if any), and why it is in the cluster: one line per direct link (`With 2 · Google: same email … · names match (Jane / Jane)`).
+- Click or Space toggles a card; ⌘A selects all. Actions on the selection: **Same Person** (the selected cards become one person: one note), **Different People** (each selected card becomes its own person), **Don't Sync** (left out of sync; nothing is deleted).
+- The resulting partition shows live as colored chips: `Person A: 2 cards · Person B: 1 card · Not synced: 1 · Undecided: 1`. A person with several cards offers **Link Person A in Contacts…** (Apple has no public API to link cards; the user selects them and chooses Card ▸ Link Selected Cards; we rescan on return). **Undo** (⌘Z) and **Reset** revert edits.
+- **Apply** (⌘↩) is enabled once every card is assigned; it confirms who syncs to which note and who is left out, then records one `cluster-resolve` decision.
+- **Not Duplicates** (every card a different person) is remembered forever; **Ignore for Now** snoozes until the next sync.
+- When a resolved cluster gains a member, it comes back with the earlier answer prefilled and the new card undecided ("You answered for some of these before"). Earlier Not Duplicates and Sync Only answers show the same way.
 - Two files with the same sync id: Keep This One · Give the Other a New ID · Delete Other File…
 - Two stamped files now pointing at one linked contact: Pick Surviving File · (other file → Trash on confirm).
 
@@ -353,7 +359,7 @@ Advanced  Contact notes      ◦ Not available — notes stay markdown-only
 |---------------|----------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
 | Overview      | stored status, sessions, latest dry run: Changed in Contacts (notes to write), Changed in Markdown (Apple changes from note edits, with "held" when writes are off or over the limit), notes to Trash, This Session / Last Sync with Apple and markdown C/U/D and held | Check Again, Reveal root, review rows link to their screens |
 | Conflicts     | open `conflict` items grouped per record (one row per field: Previous / Contacts / Markdown, options from the engine; label conflicts offer only Keep Contacts / Keep Markdown) | Keep choice per field, ⌘1–3 for all fields, Apply (⌘↩), Resolve Selected with confirmation (Keep Both Where Possible leaves fields without it undecided) |
-| Duplicates    | `duplicate cluster`, `copied note`, `merge records` and iCloud `version` items; contact details from the dry run; for versions a Current card plus one card per version (device, modified date, changed keys) | Open in Contacts to Link, Sync Only *card*, Not Duplicates (confirmed), Ignore for Now (until the next sync), Keep This One, Keep This File (merge records, confirmed: `keep:N` → `merge-keep`), Keep Current / Keep This Version (iCloud versions, confirmed: `keep-current` / `keep-other:N`), Reveal in Finder |
+| Duplicates    | `duplicate cluster`, `copied note`, `merge records` and iCloud `version` items; contact details from the dry run; for versions a Current card plus one card per version (device, modified date, changed keys) | card multi-select (click / Space / ⌘A) with Same Person, Different People, Don't Sync, partition chips, Link Person N in Contacts…, Undo / Reset, Apply (confirmed: `resolve:…` → `cluster-resolve`), Not Duplicates (confirmed), Ignore for Now (until the next sync), Keep This One, Keep This File (merge records, confirmed: `keep:N` → `merge-keep`), Keep Current / Keep This Version (iCloud versions, confirmed: `keep-current` / `keep-other:N`), Reveal in Finder |
 | Markdown Only | contact notes without a sync id, plus notes named by `possible match` items                             | per row: Add to Contacts (default when nothing matches), Link to "X" (default at ≥ 0.5), Not "X", Ignore; toolbar Add to Contacts for the selection; tick rows, Apply N Changes (⌘↩); Show Ignored |
 | Deletions     | Deleted in Contacts (`appleDeleted`), Deleted in Markdown (`markdownDeleted`); notes a one-way export found missing are listed read-only until the next sync | Keep File, Unlink (default) · Delete File · Restore Contact; Restore File (default) · Unlink, Keep Contact · Delete Apple Contact…; Apply N Changes; destructive alert naming each file and contact (with its accounts) |
 | All Contacts  | record map + note titles; search by name, file, account                                                  | Open in Contacts, Reveal in Finder                                                                       |
@@ -407,7 +413,7 @@ Every review answer is a decision appended to `.c2mdsync/devices/<device>/decisi
 **Deviations.**
 
 - Onboarding is shown in the main window rather than a separate 640×520 window. Step 4 (review duplicates during onboarding) is not embedded: duplicates found by the first preview wait in Review after the first export.
-- Duplicates: "Sync Only" is a menu next to the group actions, and each card has Open / Reveal buttons. Give the Other a New ID and Delete Other File… are not offered (no decision kind). Keep This One is the only copied-note action.
+- Duplicates: clusters use the card multi-select (`ClusterDetail`; model `UIClusterPartition` in `Contacts2MdCLI/UIClusterPartition.swift`, tested in `UIClusterPartitionTests`). Each member card carries its note path instead of a separate Markdown card, and has Open / Reveal / Details buttons. The old "Sync Only" menu is gone; `only:N` remains a CLI choice and old sync-only answers display as Person A + Not synced. Give the Other a New ID and Delete Other File… are not offered (no decision kind). Keep This One is the only copied-note action.
 - Markdown Only: no rows are ticked by default, even where Add or Link is the default action, so nothing is applied without a tick. Link to Other… (a contact picker) is not built.
 - Conflicts: Keep Both is offered only where the engine offers it (list elements edited on both sides, the body), never for label conflicts.
 - Deletions: Delete Apple Contact deletes every card of the contact that this Mac can write to (the engine's `delete-contact`), not only the iCloud card; the alert says so and lists the contact's accounts.

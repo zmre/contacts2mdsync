@@ -3,6 +3,7 @@ type: person
 title: John Smith
 first_name: John
 last_name: Smith
+company: Initech
 emails:
   - home: john.smith@example.com
 c2mdsync:

@@ -48,7 +48,11 @@ struct UIReviewTests {
         #expect(group.sources == "iCloud+Google")
         #expect(group.counts == "2 contacts")
         #expect(group.cards.map(\.heading) == ["iCloud", "Google"])
-        #expect(group.cards.map(\.action) == [.syncOnly(member: 0), .syncOnly(member: 1)])
+        #expect(group.cards.map(\.member) == [0, 1])
+        #expect(group.cards.map(\.accounts) == [["iCloud"], ["Google"]])
+        #expect(group.cards[0].why.first?.hasPrefix("With 2 · Google: same name \"Chris Martin\"") == true)
+        #expect(group.priorPartition == nil)
+        #expect(group.startingPartition.undecided == [0, 1])
         #expect(group.actions == [.notDuplicates, .ignoreForNow])
         #expect(group.allCardIDs == ["c26:icloud", "c27:google"])
     }
@@ -65,10 +69,13 @@ struct UIReviewTests {
         let group = try #require(UIReviewQueues(data: data, plan: plan).duplicates.first)
         #expect(group.cards[0].lines.contains("chris@example.com"))
         #expect(group.cards[1].lines.contains("(303) 555-0142"))
-        #expect(group.cards[2].lines.first == "Inbox/")
+        // The member's note is on its card (no separate note card).
+        #expect(group.cards[0].lines.last == "Note: Inbox/Chris Martin.md")
+        #expect(group.cards[0].path == "Inbox/Chris Martin.md")
+        #expect(group.cards[1].path == nil)
         #expect(group.sources == "iCloud+Google+md")
         #expect(group.counts == "2 contacts, 1 file")
-        #expect(group.cards.map(\.heading) == ["iCloud", "Google", "Markdown"])
+        #expect(group.cards.map(\.heading) == ["iCloud", "Google"])
         // The dry run is recorded as a preview in Activity.
         let rows = UIActivityRow.rows(data.sessions, device: data.device)
         #expect(rows.first?.isPreview == true)
@@ -94,11 +101,11 @@ struct UIReviewTests {
         #expect(try reader.plan().reviews.isEmpty)
     }
 
-    @Test("Sync Only, Keep This One and Keep This File map to the CLI's choices")
+    @Test("Apply (a partition), Keep This One and Keep This File map to the CLI's choices")
     func actionChoices() {
         #expect(
-            UIDuplicateAction.syncOnly(member: 1).decision(itemID: "dup-1")
-                == .choice(itemID: "dup-1", choice: "only:2"))
+            UIDuplicateAction.resolve(ClusterPartition(groups: [[0, 2], [1]], excluded: [3])).decision(itemID: "dup-1")
+                == .choice(itemID: "dup-1", choice: "resolve:1,3/2;exclude:4"))
         #expect(
             UIDuplicateAction.keepSyncID(path: 0).decision(itemID: "copy-1")
                 == .choice(itemID: "copy-1", choice: "keep:1"))

@@ -278,6 +278,36 @@ struct CLITests {
         #expect(!plan.out.contains("WARNING  duplicate"))
     }
 
+    @Test("review decide --group/--exclude records a cluster partition; review list numbers the members")
+    func reviewPartition() throws {
+        let harness = CLIHarness()
+        _ = harness.run(["export", "--root", "/vault", "--yes"])
+        let list = harness.run(["review", "list", "--root", "/vault"])
+        let line = try #require(list.out.split(separator: "\n").first { $0.hasPrefix("item     dup-") })
+        let id = String(line.split(separator: " ", omittingEmptySubsequences: true)[1])
+        #expect(list.out.contains("         1. \"Chris Martin\" (iCloud) — with 2: same name \"Chris Martin\""))
+        #expect(list.out.contains("         2. \"Chris Martin\" (Google)"))
+        #expect(list.out.contains("or a partition: --group 1,2 --group 3 --exclude 4"))
+
+        let incomplete = harness.run(["review", "decide", id, "--group", "1", "--root", "/vault"])
+        #expect(incomplete.code == 64 && incomplete.err.contains("missing: 2"), "\(incomplete.err)")
+        let both = harness.run(["review", "decide", id, "distinct", "--group", "1,2", "--root", "/vault"])
+        #expect(both.code == 64)
+        let malformed = harness.run(["review", "decide", id, "--group", "one", "--root", "/vault"])
+        #expect(malformed.code == 64)
+
+        let decided = harness.run(["review", "decide", id, "--group", "1", "--exclude", "2", "--root", "/vault"])
+        #expect(decided.code == 0, "\(decided.err)")
+        #expect(decided.out.contains("decided  review \(id) → resolve:1;exclude:2"))
+        let log = try #require(
+            harness.vault.text(".c2mdsync/devices/00000000-0000-4000-8000-00000000d001/decisions.jsonl"))
+        #expect(log.contains("\"kind\":\"cluster-resolve\""))
+        #expect(log.contains("\"excluded\":[{\"card_ids\":[\"c27:google\"]"))
+        let plan = harness.run(["plan", "--root", "/vault"])
+        #expect(plan.code == 0, "\(plan.out)")
+        #expect(!plan.out.contains("WARNING  duplicate"))
+    }
+
     @Test("review adopt-all adopts pending one-to-one matches")
     func adoptAll() {
         let vault = InMemoryVault(files: ["People/Bob Smith.md": "---\ntype: person\ntitle: Bob Smith\n---\nmine\n"])

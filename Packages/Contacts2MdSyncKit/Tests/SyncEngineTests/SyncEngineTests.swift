@@ -182,7 +182,7 @@ struct DuplicateTests {
         #expect(plan.skipped.contains { $0.title == "Chris Martin" })
     }
 
-    @Test("clustering joins on email, E.164 phone, or name+company; never on name alone")
+    @Test("clustering joins on equal names or email + compatible names; never on a phone alone")
     func clustering() {
         func person(
             _ id: String, _ given: String, _ family: String, _ build: (inout CanonicalContact) -> Void = { _ in }
@@ -195,19 +195,107 @@ struct DuplicateTests {
             }
         }
         let contacts = [
+            // A shared unlabeled phone alone joins nobody.
             person("a", "Ann", "One") { $0.phones = [Labeled(nil, "(415) 555-0100")] },
             person("b", "Ann", "Uno") { $0.phones = [Labeled(nil, "+1 415 555 0100")] },
             person("c", "Bo", "Two") { $0.company = .plain("Acme") },
             person("d", "bo", "TWO") { $0.company = .plain("ACME") },
+            // Equal names cluster (no organization on either).
             person("e", "Cy", "Three"),
             person("f", "Cy", "Three"),
             person("g", "Di", "Four") { $0.phones = [Labeled(nil, "911")] },
             person("h", "Ed", "Five") { $0.phones = [Labeled(nil, "911")] },
+            // Equal names, different organizations: different people.
+            person("i", "Flo", "Six") { $0.company = .plain("Initech") },
+            person("j", "Flo", "Six") { $0.company = .plain("Globex") },
+            // Same email, incompatible names (a couple sharing an address).
+            person("k", "Gus", "Seven") { $0.emails = [Labeled("home", "sevens@example.com")] },
+            person("l", "Hana", "Seven") { $0.emails = [Labeled("home", "sevens@example.com")] },
         ]
         let clusters = Clustering.clusters(of: contacts, keyer: ExportHarness().keyer)
-        #expect(clusters.map(\.memberIDs) == [["a:icloud", "b:icloud"], ["c:icloud", "d:icloud"]])
-        #expect(clusters[0].reasons == ["same phone"])
-        #expect(clusters[1].reasons == ["same name and company"])
+        #expect(clusters.map(\.memberIDs) == [["c:icloud", "d:icloud"], ["e:icloud", "f:icloud"]])
+        #expect(clusters[0].reasons == ["same name and company"])
+        #expect(clusters[1].reasons == ["same name"])
+        #expect(clusters[1].links.map(\.reasons) == [["same name \"Cy Three\""]])
+    }
+
+    @Test("spouses sharing a home phone, each with an unlinked duplicate: two clusters, one per person")
+    func spouses() {
+        let home = Labeled<String>("home", "+1 303 555 0100")
+        let contacts = [
+            Fixtures.contact("john") {
+                $0.name = PersonName(given: "John", family: "Doe")
+                $0.phones = [home, Labeled("mobile", "+1 303 555 0111")]
+                $0.emails = [Labeled("home", "john@doe.example")]
+            },
+            Fixtures.contact("johng", accounts: [.google]) {
+                $0.name = PersonName(given: "John", family: "Doe")
+                $0.phones = [home]
+            },
+            Fixtures.contact("jane") {
+                $0.name = PersonName(given: "Jane", family: "Doe")
+                $0.phones = [home, Labeled("mobile", "+1 303 555 0122")]
+                $0.emails = [Labeled("home", "jane@doe.example")]
+            },
+            Fixtures.contact("janeg", accounts: [.google]) {
+                $0.name = PersonName(given: "Jane", family: "Doe")
+                $0.phones = [Labeled("home", "(303) 555-0100")]
+                $0.emails = [Labeled("work", "JANE@doe.example")]
+            },
+        ]
+        let clusters = Clustering.clusters(of: contacts, keyer: ExportHarness().keyer)
+        #expect(clusters.map(\.memberIDs) == [["jane:icloud", "janeg:google"], ["john:icloud", "johng:google"]])
+        #expect(clusters[0].reasons == ["same email", "same name"])
+        #expect(
+            clusters[0].links.first?.reasons == [
+                "same name \"Jane Doe\"", "same email jane@doe.example", "names match (Jane / Jane)",
+            ])
+    }
+
+    @Test("nickname + same email clusters; siblings sharing a mobile do not")
+    func nicknamesAndSiblings() {
+        let contacts = [
+            Fixtures.contact("bob") {
+                $0.name = PersonName(given: "Bob", family: "Smith")
+                $0.emails = [Labeled("home", "rsmith@example.com")]
+                $0.phones = [Labeled("mobile", "+1 212 555 0100")]
+            },
+            Fixtures.contact("robert", accounts: [.google]) {
+                $0.name = PersonName(given: "Robert", family: "Smith")
+                $0.emails = [Labeled(nil, "RSmith@example.com")]
+                $0.phones = [Labeled("iphone", "(212) 555-0100")]
+            },
+            Fixtures.contact("amy") {
+                $0.name = PersonName(given: "Amy", family: "Park")
+                $0.phones = [Labeled("mobile", "+1 646 555 0100")]
+            },
+            Fixtures.contact("beth") {
+                $0.name = PersonName(given: "Beth", family: "Park")
+                $0.phones = [Labeled("mobile", "+1 646 555 0100")]
+            },
+        ]
+        let clusters = Clustering.clusters(of: contacts, keyer: ExportHarness().keyer)
+        #expect(clusters.map(\.memberIDs) == [["bob:icloud", "robert:google"]])
+        #expect(clusters[0].reasons == ["same email", "same phone"])
+        #expect(
+            clusters[0].links.first?.reasons == [
+                "same email rsmith@example.com", "same mobile +1 212 555 0100", "names match (Bob / Robert)",
+            ])
+    }
+
+    @Test("organization-only contacts cluster on the same organization name")
+    func organizations() {
+        let contacts = [
+            Fixtures.contact("o1", kind: .organization) { $0.company = .plain("Acme Corp") },
+            Fixtures.contact("o2", kind: .organization, accounts: [.google]) { $0.company = .plain("ACME corp") },
+            Fixtures.contact("p1") {
+                $0.name = PersonName(given: "Wendy", family: "Worker")
+                $0.company = .plain("Acme Corp")
+            },
+        ]
+        let clusters = Clustering.clusters(of: contacts, keyer: ExportHarness().keyer)
+        #expect(clusters.map(\.memberIDs) == [["o1:icloud", "o2:google"]])
+        #expect(clusters[0].reasons == ["same organization"])
     }
 
     @Test("an existing unlinked note with the same email blocks creation")
@@ -221,8 +309,8 @@ struct DuplicateTests {
         #expect(
             plan.reviews.contains {
                 if case .possibleMatch(let contact, let path, let confidence, let reasons) = $0 {
-                    contact.title == "Gail Both" && path == "People/Gail.md" && reasons == ["same email"]
-                        && confidence == 0.7
+                    contact.title == "Gail Both" && path == "People/Gail.md"
+                        && reasons == ["same email", "names match (Gail / Gail)"] && confidence == 0.7
                 } else {
                     false
                 }

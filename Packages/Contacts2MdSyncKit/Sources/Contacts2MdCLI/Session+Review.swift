@@ -20,7 +20,15 @@ extension Session {
                     entry.item.choices.isEmpty
                     ? "resolve in Contacts.app or the notes folder" : entry.item.choices.joined(separator: " | ")
                 report.info("item     \(entry.id)  \(entry.item.summary)")
+                if case .duplicateCluster(let members, _) = entry.item {
+                    for (offset, member) in members.enumerated() {
+                        report.info("         \(offset + 1). \(Self.describe(member, in: members))")
+                    }
+                }
                 report.info("         choices: \(choices)")
+                if case .duplicateCluster = entry.item {
+                    report.info("         or a partition: --group 1,2 --group 3 --exclude 4 (each group is one person)")
+                }
             }
             if open.count < pending.items.count {
                 report.info(
@@ -28,6 +36,20 @@ extension Session {
             }
             return open.contains(where: \.item.needsDecision) ? .needsReview : .success
         }
+    }
+
+    /// `"Jane Doe" (iCloud) Inbox/Jane Doe.md — with 2: same email jane@x.com · names match (Jane / Jane)`
+    static func describe(_ member: ClusterMember, in members: [ClusterMember]) -> String {
+        var text = "\"\(member.title)\" (\(member.accounts.map(\.displayName).joined(separator: "+")))"
+        if let path = member.path { text += " \(path)" }
+        switch member.prior {
+        case .excluded: text += " [was: not synced]"
+        case .person(let group): text += " [was: person \(group + 1)]"
+        case nil: if members.contains(where: { $0.prior != nil }) { text += " [new]" }
+        }
+        let links = (member.links ?? []).filter { $0.other > members.firstIndex(of: member) ?? 0 }
+        let why = links.map { "with \($0.other + 1): " + $0.reasons.joined(separator: " · ") }
+        return why.isEmpty ? text : text + " — " + why.joined(separator: "; ")
     }
 
     /// `review decide <item> <choice>`: appends the decision to this device's log.
