@@ -26,16 +26,24 @@ extension SyncCoordinator {
         let status = await Task.detached { leaseKeeper.heartbeat() }.value
         guard !stopped else { return }
         leaseStatus = status
-        switch status.role {
-        case .follower:
-            if let holder = status.holder, previous?.role != .follower, current == nil {
-                emit(.following(device: holder, check: nil))
-            }
-        case .vacant where previous?.role == .follower:
+        reportLeaseChange(from: previous, to: status)
+        if status.role == .vacant, previous?.role == .follower {
             let name = previous?.holder?.deviceName ?? "the other device"
             submit(SyncTrigger(.launch, reason: "\(name) stopped leading; taking over"))
-        case .vacant, .leader:
-            break
+        }
+    }
+
+    /// Publishes a change of leader the keeper saw, so displays follow the
+    /// actual lease between runs: another device leads (first seen, or a
+    /// different one took over), or this device no longer follows. A run in
+    /// progress reports the leader itself.
+    private func reportLeaseChange(from previous: LeaseStatus?, to status: LeaseStatus) {
+        if let holder = status.holder {
+            if previous?.holder?.deviceID != holder.deviceID, current == nil {
+                emit(.following(device: holder, check: nil))
+            }
+        } else if previous?.role == .follower {
+            emit(.followingEnded)
         }
     }
 
@@ -47,8 +55,10 @@ extension SyncCoordinator {
             syncNow()
             return nil
         }
+        let previous = leaseStatus
         let status = try await Task.detached { try leaseKeeper.takeOver() }.value
         leaseStatus = status
+        reportLeaseChange(from: previous, to: status)
         if status.role == .leader { syncNow() }
         return status
     }

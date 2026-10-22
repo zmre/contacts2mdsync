@@ -52,6 +52,8 @@ public struct UILiveState: Hashable, Sendable {
     /// While another device leads: what this Mac's last read-only check
     /// found (what the leader still has to apply), or why it failed.
     public private(set) var followerCheck: FollowerCheck?
+    /// The leading device the check is about (`LeaseHolder.deviceID`).
+    private var leaderID: String?
 
     /// Creates an idle state.
     public init() {}
@@ -77,14 +79,13 @@ public struct UILiveState: Hashable, Sendable {
             lastSummary = summary
             problem = nil
             followerCheck = nil
+            leaderID = nil
             return .refresh
         case .following(let holder, let check):
-            // M6: another device leads; a run was a read-only dry run (a
-            // heartbeat that noticed the leader carries no check).
             activity = .idle
-            problem = .waitingForDevice(name: holder.deviceName, until: holder.expiresAt)
-            if let check { followerCheck = check }
-            return .refresh
+            return follow(holder, check: check)
+        case .followingEnded:
+            return stopFollowing()
         case .blocked(let reason):
             activity = .idle
             return block(reason)
@@ -97,6 +98,34 @@ public struct UILiveState: Hashable, Sendable {
         return .none
     }
 
+    /// M6: another device leads; a run was a read-only dry run (a
+    /// heartbeat that noticed the leader carries no check). A check made
+    /// while another device led says nothing about this one.
+    private mutating func follow(_ holder: LeaseHolder, check: FollowerCheck?) -> Effect {
+        if holder.deviceID != leaderID { followerCheck = nil }
+        leaderID = holder.deviceID
+        problem = .waitingForDevice(name: holder.deviceName, until: holder.expiresAt)
+        if let check { followerCheck = check }
+        return .refresh
+    }
+
+    /// The leader's lease lapsed or this Mac took it (the run that follows
+    /// reports itself; it may be skipped with live sync off).
+    private mutating func stopFollowing() -> Effect {
+        if isFollowing { problem = nil }
+        followerCheck = nil
+        leaderID = nil
+        return .refresh
+    }
+
+    /// A dry run made outside the coordinator (Check for Changes, after a
+    /// review answer) while another device leads: it replaces the last
+    /// check, so the follower line counts what is left from it.
+    public mutating func recheck(_ summary: SyncRunSummary) {
+        guard isFollowing else { return }
+        followerCheck = .checked(summary)
+    }
+
     /// A blocked run: remembered until a run finishes. The lock retry is
     /// the coordinator's business; anything else may change the banners.
     private mutating func block(_ reason: SyncBlockReason) -> Effect {
@@ -104,7 +133,13 @@ public struct UILiveState: Hashable, Sendable {
         case .localRunInProgress:
             problem = .localRunInProgress
             return .none
-        case .leaseHeldElsewhere(let name, let until): problem = .waitingForDevice(name: name, until: until)
+        case .leaseHeldElsewhere(let name, let until):
+            // No device id here: another name is another leader.
+            if leaderName != name {
+                followerCheck = nil
+                leaderID = nil
+            }
+            problem = .waitingForDevice(name: name, until: until)
         case .breaker(let message): problem = .breaker(message)
         case .notRunnable(let message): problem = .notRunnable(message)
         }

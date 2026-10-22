@@ -14,7 +14,7 @@ extension AppModel {
 
     /// Overview: "Mac B leads; it still has N changes to apply" while another device leads.
     var follower: UIFollowerLine? {
-        UIFollowerLine.current(live: live.isHosting ? live.state : nil, status: data?.status)
+        UIFollowerLine.current(live: live.isHosting ? live.state : nil, status: data?.status, reviewTotal: counts.total)
     }
 
     /// Release Lease (Settings ▸ Advanced): another device may lead at once.

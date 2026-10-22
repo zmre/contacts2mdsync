@@ -196,6 +196,8 @@ final class AppModel {
             phase = .idle
             guard root == rootURL else { return }
             plan = result
+            // Following another device: this plan is a fresher follower check.
+            if let planned = result.planned { live.recheck(planned) }
             await reload()
         } catch {
             phase = .idle
@@ -277,6 +279,9 @@ final class AppModel {
         do {
             try await source.record(answers, root: root)
             await reload()
+            // Following another device: what it still has to apply changed
+            // (the leader carries the answers out); count it again.
+            if live.state.isFollowing { await check() }
             return true
         } catch {
             errorMessage = Self.describe(error)
@@ -343,13 +348,7 @@ final class AppModel {
     }
 
     /// Engine errors describe themselves; Cocoa errors use their localized text.
-    static func describe(_ error: any Error) -> String {
-        let domain = (error as NSError).domain
-        if domain == NSCocoaErrorDomain || domain == NSPOSIXErrorDomain || domain == NSURLErrorDomain {
-            return error.localizedDescription
-        }
-        return String(describing: error)
-    }
+    static func describe(_ error: any Error) -> String { UIFormat.message(for: error) }
 }
 
 // MARK: - Finder and Contacts

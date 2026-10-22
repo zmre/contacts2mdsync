@@ -1,4 +1,5 @@
 internal import ArgumentParser
+internal import Foundation
 internal import SyncEngine
 
 /// `review decide <item> <choice>` or `review decide <item> --group … --exclude …`.

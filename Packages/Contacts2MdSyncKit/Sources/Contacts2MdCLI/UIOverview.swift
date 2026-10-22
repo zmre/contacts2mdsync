@@ -353,6 +353,16 @@ public enum UIFormat {
         return cardIDs.filter { seen.insert($0).inserted }.compactMap { URL(string: "addressbook://\($0)") }
     }
 
+    /// An error for display: engine errors describe themselves; Cocoa,
+    /// POSIX and URL errors use their localized text (not the `NSError` dump).
+    public static func message(for error: any Error) -> String {
+        let domain = (error as NSError).domain
+        if domain == NSCocoaErrorDomain || domain == NSPOSIXErrorDomain || domain == NSURLErrorDomain {
+            return error.localizedDescription
+        }
+        return String(describing: error)
+    }
+
     /// Short duration: `0.4 s`, `4 s`, `2 min`.
     public static func duration(_ seconds: TimeInterval) -> String {
         if seconds < 1 { return String(format: "%.1f s", max(0, seconds)) }

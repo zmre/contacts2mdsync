@@ -14,8 +14,12 @@ public enum SyncCoordinatorStatus: Hashable, Sendable {
     /// Another device leads this vault: the run was a read-only dry run
     /// (`check`: what the leader still has to do, or why this device could
     /// not look); review decisions made here are executed by the leader.
-    /// Also emitted, with `check == nil`, when a heartbeat finds another leader.
+    /// Also emitted, with `check == nil`, when a heartbeat (or a lost Take
+    /// Over) finds another leader than the last one seen.
     case following(device: LeaseHolder, check: FollowerCheck?)
+    /// This device no longer follows: the other device's lease lapsed
+    /// (expired or released), or this device took it.
+    case followingEnded
     /// A run could not happen or stopped before writing.
     case blocked(SyncBlockReason)
     /// A run failed unexpectedly.
@@ -51,8 +55,10 @@ public protocol SettingsAwareTriggerSource: SyncTriggerSource {
 ///   vault lease every `heartbeatInterval` while it is alive (also during a
 ///   long run), so another device sees this one lead even between runs. A
 ///   run while another device leads is a read-only dry run reported as
-///   `following(device:check:)`. When the other leader's lease lapses (expired or
-///   released), a catch-up run takes it. `shutdown()` releases the lease;
+///   `following(device:check:)`. A heartbeat that sees another leader
+///   reports it the same way; when the other leader's lease lapses
+///   (expired or released) it reports `followingEnded` and a catch-up run
+///   takes the lease. `shutdown()` releases the lease;
 ///   `takeOver()` takes it explicitly and syncs.
 public actor SyncCoordinator {
     /// Timing knobs.

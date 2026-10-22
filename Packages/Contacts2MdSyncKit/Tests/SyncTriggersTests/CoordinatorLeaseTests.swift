@@ -130,6 +130,37 @@ struct CoordinatorLeaseTests {
         await coordinator.shutdown()
     }
 
+    @Test("a heartbeat reports every change of leader: another device taking over, then the lease lapsing")
+    func leaderChanges() async throws {
+        let vault = InMemoryVault()
+        let clock = ManualTriggerClock()
+        _ = try manager(vault, Self.macB, clock).acquire(otherDevicesKnown: true)
+        let runner = FakeRunner(clock: clock)
+        // Live sync off: the catch-up run is skipped, so only the lease report tells the app.
+        let coordinator = SyncCoordinator(
+            runner: runner, settings: TriggerSettings(liveSync: false), clock: clock,
+            leaseKeeper: LeaseKeeper(manager: manager(vault, Self.macA, clock)))
+        let log = await StatusLog(coordinator)
+        @Sendable func following(_ name: String) -> Bool {
+            log.contains { if case .following(let holder, nil) = $0 { holder.deviceName == name } else { false } }
+        }
+        await coordinator.start([])
+        await nextHeartbeat(clock)
+        #expect(await eventually { following("Mac B") })
+        let macC = manager(vault, DeviceIdentity(id: "c", name: "Mac C"), clock)
+        _ = try macC.takeOver()
+        await nextHeartbeat(clock)
+        #expect(await eventually { following("Mac C") })
+        #expect(await coordinator.leaseStatus?.holder?.deviceName == "Mac C")
+        #expect(!log.contains { $0 == .followingEnded })
+        _ = try macC.release()
+        await nextHeartbeat(clock)
+        #expect(await eventually { log.contains { $0 == .followingEnded } })
+        #expect(await eventually { log.contains { $0 == .skipped(.launch, reason: "live sync is off") } })
+        #expect(runner.requests.isEmpty)
+        await coordinator.shutdown()
+    }
+
     @Test("Take Over makes this device the leader and syncs at once")
     func explicitTakeOver() async throws {
         let vault = InMemoryVault()

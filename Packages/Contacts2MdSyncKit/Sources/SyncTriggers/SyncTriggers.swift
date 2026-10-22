@@ -144,6 +144,9 @@ public struct SyncRunSummary: Hashable, Sendable, Codable {
     public var markdownCreated = 0
     public var markdownUpdated = 0
     public var markdownTrashed = 0
+    /// Other vault writes: images, resolved iCloud conflict versions, the
+    /// config file.
+    public var otherWrites = 0
     /// Review items that need a decision.
     public var pendingReview = 0
     public var conflicts = 0
@@ -159,10 +162,14 @@ public struct SyncRunSummary: Hashable, Sendable, Codable {
         self.appleRead = appleRead
     }
 
-    /// Anything written on either side.
-    public var changedSomething: Bool {
-        appleCreated + appleUpdated + appleDeleted + markdownCreated + markdownUpdated + markdownTrashed > 0
+    /// Changes on both sides: written by a run, or still to apply as seen
+    /// by a follower's check. Held Apple changes are not counted.
+    public var changeCount: Int {
+        appleCreated + appleUpdated + appleDeleted + markdownCreated + markdownUpdated + markdownTrashed + otherWrites
     }
+
+    /// Anything written on either side.
+    public var changedSomething: Bool { changeCount > 0 }
 
     /// One line: `apple c/u/d 0/1/0  md c/u/d 1/0/0  review 2  held 1`.
     public var line: String {

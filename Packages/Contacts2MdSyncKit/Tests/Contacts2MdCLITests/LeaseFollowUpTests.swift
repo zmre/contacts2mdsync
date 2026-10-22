@@ -129,7 +129,10 @@ struct LeaseFollowUpTests {
         #expect(name == "Test Mac")
         let line = try #require(UIFollowerLine.current(live: nil, status: data.status, now: joining.clock.now))
         #expect(line.text == "Test Mac leads syncing this folder")
-        #expect(line.detail.contains("first sync waits until Test Mac stops leading"))
+        #expect(
+            line.detail
+                == "This Mac has not synced this folder yet, and nothing retries it: run the first sync again once "
+                + "Test Mac stops leading, or use Take Over.")
     }
 
     // MARK: - Follower dry run failures
@@ -162,12 +165,17 @@ struct LeaseFollowUpTests {
             kind: .live, startedAt: Self.now, finishedAt: Self.now, appleFull: false, appleRead: "incremental")
         summary.markdownUpdated = 2
         summary.appleUpdated = 1
-        summary.pendingReview = 1
         #expect(state.apply(.following(device: holder, check: .checked(summary))) == .refresh)
-        let line = state.follower(now: Self.now)
+        let line = state.follower(reviewTotal: 1, now: Self.now)
         #expect(line?.text == "Mac B leads; it still has 3 changes to apply")
         #expect(line?.isError == false)
-        #expect(line?.detail.contains("1 review item answered here are carried out by Mac B") == true)
+        #expect(line?.detail.hasSuffix(". 1 item needs review; answers made here are carried out by Mac B.") == true)
+        #expect(
+            state.follower(reviewTotal: 2, now: Self.now)?.detail.hasSuffix(
+                ". 2 items need review; answers made here are carried out by Mac B.") == true)
+        #expect(
+            state.follower(now: Self.now)?.detail.hasSuffix(". Review answers made here are carried out by Mac B.")
+                == true)
         #expect(state.display(now: Self.now)?.text == "Waiting for Mac B")
         // A heartbeat noticing the leader keeps the last check.
         state.apply(.following(device: holder, check: nil))
@@ -200,7 +208,6 @@ struct LeaseFollowUpTests {
         #expect(state.followerCheck == nil)
         #expect(UIFollowerLine.current(live: state, status: nil, now: Self.now) == nil)
     }
-
 }
 
 /// Settings ▸ Advanced ▸ Sync lease and iCloud versions in Duplicates (M6 follow-ups).

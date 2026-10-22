@@ -1,6 +1,7 @@
 public import ContactModel
 public import Foundation
 public import SyncEngine
+public import SyncTriggers
 internal import VaultIndex
 
 // View-model adapters for the app's review UI (docs/ui.md). Everything here
@@ -220,6 +221,9 @@ public struct UIPlanSummary: Sendable {
     public var contacts: [String: UIContactSummary]
     /// The two-way part (`nil` when this was the one-way export plan).
     public var sync: UISyncPlanSummary?
+    /// The two-way plan counted like a follower's check: while another
+    /// device leads, what it still has to apply (`nil` for the export plan).
+    public var planned: SyncRunSummary?
 
     /// Creates a summary of a one-way export plan.
     public init(_ prepared: PreparedExport, computedAt: Date) {
@@ -237,6 +241,8 @@ public struct UIPlanSummary: Sendable {
             prepared.plan.markdown, computedAt: computedAt, cards: snapshot.contacts.flatMap(\.cards),
             contacts: snapshot.contacts, notesAvailable: snapshot.notesAvailable)
         sync = UISyncPlanSummary(prepared.plan)
+        planned = VaultSyncRunner.plannedSummary(
+            .manual, prepared: prepared, startedAt: computedAt, finishedAt: computedAt)
     }
 
     private init(

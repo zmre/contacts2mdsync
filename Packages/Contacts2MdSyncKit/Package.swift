@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 //
 // Contacts2MdSyncKit: all non-UI logic for Contacts2MdSync lives here so it can
 // be built and tested with `swift test` without Xcode or the app target.
@@ -25,6 +25,7 @@ import PackageDescription
 let swiftSettings: [SwiftSetting] = [
     .enableUpcomingFeature("ExistentialAny"),
     .enableUpcomingFeature("InternalImportsByDefault"),
+    .treatWarning("UnusedImportAccess", as: .error),
 ]
 
 let package = Package(

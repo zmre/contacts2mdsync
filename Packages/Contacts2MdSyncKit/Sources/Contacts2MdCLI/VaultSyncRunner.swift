@@ -130,11 +130,13 @@ public struct VaultSyncRunner: SyncRunner {
         case let error as VaultNotReady: error.description
         case let error as RootAccessError: error.message
         case ContactStoreError.accessDenied: ContactStoreError.accessDenied.description
-        default: String(describing: error)
+        default: UIFormat.message(for: error)
         }
     }
 
-    /// What the leader still has to do, as seen by a follower.
+    /// What the leader still has to do, as seen by a follower. Held Apple
+    /// changes (`apple_writes` off, over the limit) count as held, as in
+    /// the leader's own summary, not as changes it will apply.
     static func plannedSummary(
         _ kind: SyncRunKind, prepared: PreparedSync, startedAt: Date, finishedAt: Date
     ) -> SyncRunSummary {
@@ -142,12 +144,20 @@ public struct VaultSyncRunner: SyncRunner {
         var summary = SyncRunSummary(
             kind: kind, startedAt: startedAt, finishedAt: finishedAt, appleFull: prepared.apple.isComplete,
             appleRead: prepared.apple.kind.summary)
-        summary.appleCreated = plan.apple.filter { $0.kind == .create }.count
-        summary.appleDeleted = plan.apple.filter { $0.kind == .delete }.count
-        summary.appleUpdated = plan.apple.count - summary.appleCreated - summary.appleDeleted
+        if let hold = plan.appleHold {
+            summary.appleHeld = plan.apple.count
+            summary.appleHoldReason = hold.reason
+        } else {
+            summary.appleCreated = plan.apple.filter { $0.kind == .create }.count
+            summary.appleDeleted = plan.apple.filter { $0.kind == .delete }.count
+            summary.appleUpdated = plan.apple.count - summary.appleCreated - summary.appleDeleted
+        }
         summary.markdownCreated = plan.markdown.creates.count
         summary.markdownUpdated = plan.markdown.updates.count
         summary.markdownTrashed = plan.trash.count
+        summary.otherWrites =
+            plan.markdown.images.count + plan.markdown.versionResolutions.count
+            + (plan.markdown.configText == nil ? 0 : 1)
         summary.pendingReview = plan.markdown.reviews.filter(\.needsDecision).count
         summary.conflicts = plan.conflicts.count
         return summary
@@ -168,6 +178,9 @@ public struct VaultSyncRunner: SyncRunner {
         summary.markdownCreated = result.markdown.created.count
         summary.markdownUpdated = result.markdown.updated.count
         summary.markdownTrashed = result.trashed.count
+        summary.otherWrites =
+            result.markdown.imagesWritten.count + result.markdown.versionsResolved.count
+            + (result.markdown.configWritten ? 1 : 0)
         summary.pendingReview = plan.markdown.reviews.filter(\.needsDecision).count
         summary.conflicts = plan.conflicts.count
         summary.failures =

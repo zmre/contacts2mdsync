@@ -171,6 +171,12 @@ final class LiveSyncController {
         return status
     }
 
+    /// A dry run the app made itself (Check for Changes, after a review
+    /// answer): while another device leads, the follower line counts from it.
+    func recheck(_ planned: SyncRunSummary) {
+        state.recheck(planned)
+    }
+
     /// Gives this Mac's lease up (the next run takes it again unless
     /// another device does first). `nil` when not hosting.
     func releaseLease() async -> LeaseStatus? {
