@@ -104,6 +104,35 @@ struct HouseholdDetectionTests {
             })
     }
 
+    @Test("a hand-written note whose title is not plainly a name still blocks a contact sharing its email")
+    func decoratedTitle() throws {
+        for title in ["Dr. Jane Doe", "Doe, Jane", "Jane Doe (Acme)"] {
+            let vault = InMemoryVault(files: [
+                "People/Note.md": "---\ntype: person\ntitle: \(title)\nemails:\n  - jane@doe.example\n---\n"
+            ])
+            let jane = Book.person("jane", "Jane", "Doe") { $0.emails = [Labeled("home", "jane@doe.example")] }
+            let plan = try ExportHarness(store: Book.store([jane]), vault: vault).plan()
+            #expect(plan.creates.isEmpty, "\(title)")
+            #expect(Book.matches(plan).map(\.path) == ["People/Note.md"], "\(title)")
+        }
+    }
+
+    @Test("a card that fits both spouses (no person name) joins only one of them")
+    func noBridge() throws {
+        let family = Labeled<String>("home", "family@doe.example")
+        let store = Book.store([
+            Book.person("john", "John", "Doe") { $0.emails = [family] },
+            Book.person("jane", "Jane", "Doe") { $0.emails = [family] },
+            Fixtures.contact("doefamily", kind: .organization) {
+                $0.company = .plain("Doe Family")
+                $0.emails = [family]
+            },
+        ])
+        let clusters = Household.clusters(try ExportHarness(store: store).plan()).map { Set($0.map(\.unifiedID)) }
+        #expect(clusters.count == 1)
+        #expect(!clusters.contains { $0.isSuperset(of: ["john:icloud", "jane:icloud"]) })
+    }
+
     @Test("two-way create gate: the wife's opted-in note is created despite the husband's shared home phone")
     func createGateHousehold() throws {
         let world = try World.exported([Household.john()])
@@ -264,6 +293,8 @@ struct ClusterResolveTests {
         #expect(ClusterPartition(choice: "resolve:;exclude:1,2")?.excluded == [0, 1])
         #expect(ClusterPartition(choice: "resolve:1,x") == nil)
         #expect(ClusterPartition(choice: "resolve:0") == nil)
+        #expect(ClusterPartition(choice: "resolve:-9223372036854775808") == nil)
+        #expect(ClusterPartition(choice: "resolve:1;exclude:-9223372036854775808") == nil)
         #expect(ClusterPartition(choice: "only:1") == nil)
         #expect(partition.problem(memberCount: 4) == nil)
         #expect(partition.problem(memberCount: 5)?.contains("missing: 5") == true)

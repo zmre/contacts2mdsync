@@ -89,6 +89,59 @@ struct NameCompatibilityTests {
         #expect(NameCompatibility.verdict(NameCompatibility.Profile(note), husband) == .noPersonName)
     }
 
+    @Test("a title that is not plainly a name is no person name; one word is a given name")
+    func titleShapes() {
+        let jane = NameCompatibility.Profile(person("Jane", "Doe"))
+        for title in ["Dr. Jane Doe", "Jane Doe Jr.", "Jane Doe, MD", "Doe, Jane", "Jane Doe (Acme)", "Jane Doe 2"] {
+            let note = NameCompatibility.Profile(CanonicalContact(kind: .person, title: title), titleFallback: true)
+            #expect(NameCompatibility.verdict(note, jane) == .noPersonName, "\(title)")
+        }
+        func titled(_ title: String) -> NameSpelling? {
+            NameCompatibility.Profile(CanonicalContact(kind: .person, title: title), titleFallback: true).primary
+        }
+        #expect(titled("Jane Q. Doe")?.given == "jane" && titled("Jane Q. Doe")?.family == "doe")
+        #expect(titled("Jane")?.given == "jane" && titled("Jane")?.family == "")
+    }
+
+    @Test(
+        "spouse and sibling pairs where one name starts the other are different people",
+        arguments: [
+            ("Daniel", "Danielle"), ("Paul", "Paula"), ("Eric", "Erica"), ("Robert", "Roberta"), ("Joan", "Joanna"),
+            ("Louis", "Louise"), ("Gabriel", "Gabriella"),
+        ])
+    func masculineFeminine(lhs: String, rhs: String) {
+        #expect(!compatible(person(lhs, "Doe"), person(rhs, "Doe")))
+    }
+
+    @Test(
+        "short forms and pet forms not in the nickname table still match",
+        arguments: [("Jess", "Jessica"), ("Theo", "Theodore"), ("Ann", "Annie"), ("Jenn", "Jenny")])
+    func shortForms(short: String, long: String) {
+        #expect(compatible(person(short, "Smith"), person(long, "Smith")))
+    }
+
+    @Test("compound given names agree word by word")
+    func compoundGivenNames() {
+        #expect(!compatible(person("Jean-Luc", "Picard"), person("Jean-Pierre", "Picard")))
+        #expect(!compatible(person("Mary Ann", "Lee"), person("Mary Beth", "Lee")))
+        #expect(!compatible(person("José Luis", "García"), person("José Antonio", "García")))
+        #expect(compatible(person("Mary", "Lee"), person("Mary Ann", "Lee")))
+        #expect(compatible(person("Jean Luc", "Picard"), person("Jean-Luc", "Picard")))
+        #expect(compatible(person("J. L.", "Picard"), person("Jean-Luc", "Picard")))
+    }
+
+    @Test("different generational suffixes are different people; a missing suffix is not")
+    func generations() {
+        func smith(_ suffix: String?) -> CanonicalContact {
+            CanonicalContact(kind: .person, title: "", name: PersonName(given: "John", family: "Smith", suffix: suffix))
+        }
+        #expect(!compatible(smith("Sr."), smith("Jr.")))
+        #expect(!compatible(smith("II"), smith("III")))
+        #expect(compatible(smith("Jr."), smith("jr")))
+        #expect(compatible(smith("Jr."), smith(nil)))
+        #expect(compatible(smith("PhD"), smith("MD")))
+    }
+
     @Test("household phone labels")
     func phoneLabels() {
         for label in ["home", "main", "work", "other", "home_fax", "work_fax", "pager", "grandma_s"] {

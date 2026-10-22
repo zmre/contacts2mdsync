@@ -82,9 +82,10 @@ public struct ClusterPartition: Hashable, Sendable {
         guard let groupPart = parts.first, parts.count <= 2 else { return nil }
         func numbers(_ text: Substring) -> [Int]? {
             let items = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-            let values = items.map { Int($0).map { $0 - 1 } }
-            guard values.allSatisfy({ ($0 ?? -1) >= 0 }) else { return nil }
-            return values.compactMap { $0 }
+            let values = items.map { Int($0) }
+            // Range-checked before subtracting: `Int.min - 1` would trap.
+            guard values.allSatisfy({ ($0 ?? 0) >= 1 }) else { return nil }
+            return values.compactMap { $0.map { $0 - 1 } }
         }
         var groups: [[Int]] = []
         for group in groupPart.split(separator: "/") {

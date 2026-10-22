@@ -71,6 +71,15 @@ extension Session {
             }
             try record(decisions, fs: fs, state: state, device: device)
             report.item("decided", "review", "\(itemID) → \(choice): \(entry.item.summary)")
+            if case .duplicateCluster(let members, _) = entry.item, let partition = ClusterPartition(choice: choice) {
+                // Notes are never dropped: one person with several keeps them all until linked.
+                for group in partition.groups where group.filter({ members[$0].path != nil }).count > 1 {
+                    let numbers = group.map { String($0 + 1) }.joined(separator: ", ")
+                    report.note(
+                        "members \(numbers) already have their own notes; each keeps syncing until you link "
+                            + "the cards in Contacts and keep one")
+                }
+            }
             report.note("takes effect on the next `contacts2md plan` / `export`")
             return .success
         }

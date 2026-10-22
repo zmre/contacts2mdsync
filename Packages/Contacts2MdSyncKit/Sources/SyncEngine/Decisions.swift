@@ -227,26 +227,21 @@ public struct DecisionSet: Sendable {
 
     /// The contact's place in the latest cluster decision naming it
     /// (`cluster-resolve`, `distinct-people` without a path, `sync-only`).
+    ///
+    /// A contact holding a card the user kept is that person even when an
+    /// excluded card was linked into it later: groups win over `excluded`.
     public func clusterRole(of contact: AppleContact) -> ClusterRole? {
-        for decision in all.reversed() {
+        for decision in all.reversed() where decision.isClusterAnswer {
+            guard let reference = decision.referenceIndex(of: contact) else { continue }
             switch decision.kind {
             case .clusterResolve:
-                if decision.excluded?.contains(where: { $0.matches(contact) }) == true {
-                    return ClusterRole(decision: decision.id, group: nil, kind: .resolve)
-                }
-                if let group = decision.groupIndex(of: contact) {
-                    return ClusterRole(decision: decision.id, group: group, kind: .resolve)
-                }
-            case .distinctPeople where decision.path == nil:
-                if let index = decision.contacts.firstIndex(where: { $0.matches(contact) }) {
-                    return ClusterRole(decision: decision.id, group: index, kind: .distinct)
-                }
+                let group = decision.groupIndex(of: contact)
+                return ClusterRole(decision: decision.id, group: group, kind: .resolve, reference: reference)
             case .syncOnly:
-                if let index = decision.contacts.firstIndex(where: { $0.matches(contact) }) {
-                    return ClusterRole(decision: decision.id, group: index == 0 ? 0 : nil, kind: .syncOnly)
-                }
+                return ClusterRole(
+                    decision: decision.id, group: reference == 0 ? 0 : nil, kind: .syncOnly, reference: reference)
             default:
-                continue
+                return ClusterRole(decision: decision.id, group: reference, kind: .distinct, reference: reference)
             }
         }
         return nil
@@ -324,6 +319,11 @@ public struct ClusterRole: Hashable, Sendable {
     public var group: Int?
     /// Which kind of decision.
     public var kind: Source
+    /// Which of the decision's references the contact matched (its
+    /// `contacts`; for `cluster-resolve`, its groups then `excluded`).
+    /// Several contacts matching one reference are the halves of a contact
+    /// unlinked since the decision, which nobody answered for separately.
+    public var reference: Int
 
     /// Decision kinds that settle cluster members.
     public enum Source: Hashable, Sendable {
@@ -343,6 +343,22 @@ extension Decision {
     /// The group (0-based) of a `cluster-resolve` decision holding `contact`.
     func groupIndex(of contact: AppleContact) -> Int? {
         groups?.firstIndex { group in group.contains { $0.matches(contact) } }
+    }
+
+    /// An answer about duplicate cluster members (`cluster-resolve`,
+    /// `distinct-people` without a path, `sync-only`).
+    var isClusterAnswer: Bool {
+        switch kind {
+        case .clusterResolve, .syncOnly: true
+        case .distinctPeople: path == nil
+        default: false
+        }
+    }
+
+    /// The first reference matching `contact` (`ClusterRole.reference`).
+    func referenceIndex(of contact: AppleContact) -> Int? {
+        let references = kind == .clusterResolve ? (groups ?? []).flatMap { $0 } + (excluded ?? []) : contacts
+        return references.firstIndex { $0.matches(contact) }
     }
 }
 

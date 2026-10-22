@@ -114,6 +114,37 @@ struct UIClusterPartitionTests {
                 + "link them in Contacts.")
     }
 
+    @Test("Apply says when one person already has several notes, and when an excluded note stops syncing")
+    func applyMessageWithNotes() throws {
+        let group = try Self.group([
+            Self.member(1, "Ann One", .iCloud, path: "Inbox/Ann One.md"),
+            Self.member(2, "Ann One", .google, path: "Inbox/Ann One 2.md"),
+            Self.member(3, "Ann One", .local, path: "Inbox/Ann One 3.md"),
+        ])
+        var partition = group.startingPartition
+        partition.samePerson([0, 1])
+        partition.dontSync([2])
+        let message = group.applyMessage(partition)
+        #expect(message.contains("are one person, but 2 of them already have a note; each note keeps syncing"))
+        #expect(message.hasSuffix("Nothing is deleted; a note they already have stops syncing."))
+    }
+
+    @Test("the detail is keyed by membership: linking cards keeps the item id but not the identity")
+    func memberIdentity() throws {
+        let separate = try Self.group([
+            Self.member(1, "Pat Lee", .iCloud), Self.member(2, "Pat Lee", .google), Self.member(3, "Pat Lee", .local),
+        ])
+        let linked = try Self.group([
+            ClusterMember(
+                unifiedID: "u12", title: "Pat Lee", accounts: [.iCloud, .google], path: nil,
+                cardIDs: ["card1", "card2"]),
+            Self.member(3, "Pat Lee", .local),
+        ])
+        #expect(separate.id == linked.id)
+        #expect(separate.memberIdentity != linked.memberIdentity)
+        #expect(separate.memberIdentity == [separate.id, "card1", "card2", "card3"])
+    }
+
     @Test("a dry run shows household numbers de-emphasized and personal numbers as details")
     func householdPhones() throws {
         let home = Labeled<String>("home", "+1 303 555 0100")

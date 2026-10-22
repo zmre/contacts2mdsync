@@ -208,3 +208,63 @@ public struct UIPartitionChip: Hashable, Sendable, Identifiable {
         return "\(title): \(count)"
     }
 }
+
+// MARK: - Cluster groups (card multi-select)
+
+extension UIDuplicateGroup {
+    /// Contact cards of a cluster, in member order.
+    public var memberCards: [UIDuplicateCard] { cards.filter { $0.member != nil } }
+
+    /// The item id plus each member's cards, in member order. Linking cards
+    /// in Contacts keeps the item id but changes this, so a partition being
+    /// edited (by member number) never outlives the members it numbers.
+    public var memberIdentity: [String] {
+        [id] + memberCards.map { $0.cardIDs.sorted().joined(separator: "+") }
+    }
+
+    /// The partition to start editing from.
+    public var startingPartition: UIClusterPartition {
+        priorPartition ?? UIClusterPartition(memberCount: memberCards.count)
+    }
+
+    /// Card ids of the members of `person` (Open in Contacts to link them).
+    public func cardIDs(of person: Int, in partition: UIClusterPartition) -> [String] {
+        memberCards.filter { $0.member.map { partition.assignment(of: $0) == .person(person) } ?? false }
+            .flatMap(\.cardIDs)
+    }
+
+    /// The confirmation for Apply: who gets a note and who is left out.
+    public func applyMessage(_ partition: UIClusterPartition) -> String {
+        func names(_ members: [Int]) -> String {
+            members.compactMap { index in
+                memberCards.first { $0.member == index }.map { "\($0.title) (\($0.heading))" }
+            }
+            .joined(separator: ", ")
+        }
+        func notes(_ members: [Int]) -> Int {
+            members.filter { index in memberCards.first { $0.member == index }?.path != nil }.count
+        }
+        var parts: [String] = []
+        for person in partition.people {
+            let members = partition.members(of: person)
+            let label = UIClusterPartition.personName(person)
+            if members.count == 1 {
+                parts.append("\(label): \(names(members)) syncs to its own note.")
+            } else if notes(members) > 1 {
+                // The engine never drops a note: each keeps syncing until the
+                // cards are linked and one note is kept (merge records).
+                parts.append(
+                    "\(label): \(names(members)) are one person, but \(notes(members)) of them already have a "
+                        + "note; each note keeps syncing until you link them in Contacts and keep one.")
+            } else {
+                parts.append("\(label): \(names(members)) are one person and sync to one note; link them in Contacts.")
+            }
+        }
+        let excluded = partition.excludedMembers
+        if !excluded.isEmpty {
+            let stops = notes(excluded) > 0 ? "; a note they already have stops syncing" : ""
+            parts.append("Not synced: \(names(excluded)). Nothing is deleted\(stops).")
+        }
+        return parts.joined(separator: "\n")
+    }
+}

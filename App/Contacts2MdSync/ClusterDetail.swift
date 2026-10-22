@@ -108,7 +108,7 @@ struct ClusterDetail: View {
                 .help("Each selected card is a different person with its own note")
             Button("Don't Sync") { edit { $0.dontSync(selection) } }
                 .disabled(selection.isEmpty)
-                .help("Leave the selected cards out of sync; nothing is deleted")
+                .help("Leave the selected cards out of sync; nothing is deleted, but a note they have stops syncing")
             Divider().frame(height: 16)
             Button("Select All") { selection = Set(cards.compactMap(\.member)) }
                 .keyboardShortcut("a", modifiers: .command)

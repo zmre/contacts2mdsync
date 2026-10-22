@@ -1,5 +1,5 @@
 public import Foundation
-public import SyncTriggers
+import SyncTriggers
 
 // Following another device (architecture §11, M6; docs/ui.md §3, §14): the
 // Overview line that says who leads and what it still has to apply, or why

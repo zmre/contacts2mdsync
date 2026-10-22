@@ -325,42 +325,6 @@ public struct UIDuplicateGroup: Identifiable, Hashable, Sendable {
     /// Every underlying card id (Open in Contacts to Link opens each).
     public var allCardIDs: [String] { cards.flatMap(\.cardIDs) }
 
-    /// Contact cards of a cluster, in member order.
-    public var memberCards: [UIDuplicateCard] { cards.filter { $0.member != nil } }
-
-    /// The partition to start editing from.
-    public var startingPartition: UIClusterPartition {
-        priorPartition ?? UIClusterPartition(memberCount: memberCards.count)
-    }
-
-    /// Card ids of the members of `person` (Open in Contacts to link them).
-    public func cardIDs(of person: Int, in partition: UIClusterPartition) -> [String] {
-        memberCards.filter { $0.member.map { partition.assignment(of: $0) == .person(person) } ?? false }
-            .flatMap(\.cardIDs)
-    }
-
-    /// The confirmation for Apply: who gets a note and who is left out.
-    public func applyMessage(_ partition: UIClusterPartition) -> String {
-        func names(_ members: [Int]) -> String {
-            members.compactMap { index in
-                memberCards.first { $0.member == index }.map { "\($0.title) (\($0.heading))" }
-            }
-            .joined(separator: ", ")
-        }
-        var parts: [String] = []
-        for person in partition.people {
-            let members = partition.members(of: person)
-            let label = UIClusterPartition.personName(person)
-            parts.append(
-                members.count == 1
-                    ? "\(label): \(names(members)) syncs to its own note."
-                    : "\(label): \(names(members)) are one person and sync to one note; link them in Contacts.")
-        }
-        let excluded = partition.excludedMembers
-        if !excluded.isEmpty { parts.append("Not synced: \(names(excluded)). Nothing is deleted.") }
-        return parts.joined(separator: "\n")
-    }
-
     static func shortID(_ id: UUID) -> String { String(id.uuidString.lowercased().prefix(4)) }
 
     private static func counts(contacts: Int, files: Int) -> String {

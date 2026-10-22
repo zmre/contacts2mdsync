@@ -19,7 +19,13 @@ extension PlanningRun {
             return copy
         }
         var roles: [String: ClusterRole] = [:]
-        for contact in eligible { roles[contact.unifiedID] = decisions.clusterRole(of: contact) }
+        for contact in eligible { roles[contact.unifiedID] = clusterRole(of: contact) }
+        // Contacts answering to one reference are the halves of a contact
+        // unlinked since the decision: undecided, so the cluster is asked again.
+        let owners = Dictionary(grouping: roles) { "\($0.value.decision)#\($0.value.reference)" }
+        for entries in owners.values where entries.count > 1 {
+            for entry in entries { roles[entry.key] = nil }
+        }
         var byGroup: [String: [String]] = [:]
         for contact in eligible {
             guard let key = roles[contact.unifiedID]?.groupKey else { continue }
@@ -33,15 +39,19 @@ extension PlanningRun {
             of: clusterInput, keyer: planner.keyer, areDistinct: { decisions.areDistinct($0, $1) },
             decidedSame: decidedSame)
         for cluster in clusters {
-            let members = cluster.memberIDs.compactMap { byUnifiedID[$0] }
+            // Member numbers (`resolve:1,2/3`) follow the cards, not the
+            // volatile unified ids, so they mean the same contacts next run.
+            let members = cluster.memberIDs.compactMap { byUnifiedID[$0] }.sorted { $0.sortKey < $1.sortKey }
             if isSettled(cluster, roles: roles) {
                 settle(members, roles: roles)
                 continue
             }
-            let alreadyExported = members.contains { notePath(of: $0) != nil }
-            let primary = alreadyExported ? nil : ExportPlanner.primary(of: members)
-            for member in members where boundIDs[member.unifiedID] == nil && member.unifiedID != primary?.unifiedID {
-                guard !decisionExcluded.contains(member.unifiedID) else { continue }
+            // Members left out by a decision never stand in for the cluster.
+            let syncable = members.filter { !decisionExcluded.contains($0.unifiedID) }
+            let alreadyExported = syncable.contains { notePath(of: $0) != nil }
+            let primary =
+                alreadyExported ? nil : ExportPlanner.primary(of: syncable.filter { !blocked.contains($0.unifiedID) })
+            for member in syncable where boundIDs[member.unifiedID] == nil && member.unifiedID != primary?.unifiedID {
                 blocked.insert(member.unifiedID)
                 skip(member, "possible duplicate; review before export")
             }
@@ -60,6 +70,8 @@ extension PlanningRun {
 
     /// A decided cluster: each group gets one note (the member that has one,
     /// else the group's primary); excluded members were blocked in phase 3.
+    /// A member that is itself held back (a detached note, …) never keeps
+    /// the person's note.
     mutating func settle(_ members: [AppleContact], roles: [String: ClusterRole]) {
         let people = Dictionary(grouping: members.filter { roles[$0.unifiedID]?.groupKey != nil }) {
             roles[$0.unifiedID]?.groupKey ?? ""
@@ -67,8 +79,9 @@ extension PlanningRun {
         for key in people.keys.sorted() {
             let group = people[key] ?? []
             guard group.count > 1 else { continue }
-            let exported = group.first { notePath(of: $0) != nil }
-            guard let keeper = exported ?? ExportPlanner.primary(of: group) else { continue }
+            let candidates = group.filter { !blocked.contains($0.unifiedID) }
+            let exported = candidates.first { notePath(of: $0) != nil }
+            guard let keeper = exported ?? ExportPlanner.primary(of: candidates) else { continue }
             for member in group where boundIDs[member.unifiedID] == nil && member.unifiedID != keeper.unifiedID {
                 guard !blocked.contains(member.unifiedID) else { continue }
                 blocked.insert(member.unifiedID)

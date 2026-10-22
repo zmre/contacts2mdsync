@@ -283,12 +283,19 @@ struct PlanningRun {
 
     // MARK: Phase 3: cluster exclusions (sync-only, cluster-resolve)
 
+    /// The contact's cluster role as this run applies it. A legacy sync-only
+    /// decision only ever held back contacts without a note: one that has a
+    /// note keeps syncing to it, a person of its own.
+    func clusterRole(of contact: AppleContact) -> ClusterRole? {
+        guard var role = decisions.clusterRole(of: contact) else { return nil }
+        if role.kind == .syncOnly, role.isExcluded, boundIDs[contact.unifiedID] != nil { role.group = role.reference }
+        return role
+    }
+
     mutating func applyExclusions() {
         for contact in contacts where !blocked.contains(contact.unifiedID) {
-            guard let role = decisions.clusterRole(of: contact), role.isExcluded else { continue }
+            guard let role = clusterRole(of: contact), role.isExcluded else { continue }
             let id = boundIDs[contact.unifiedID]
-            // A legacy sync-only decision only ever held back contacts without a note.
-            if role.kind == .syncOnly, id != nil { continue }
             blocked.insert(contact.unifiedID)
             decisionExcluded.insert(contact.unifiedID)
             plan.excludedByDecision += 1

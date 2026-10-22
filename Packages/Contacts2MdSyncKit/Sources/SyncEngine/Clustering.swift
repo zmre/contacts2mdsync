@@ -90,7 +90,10 @@ public enum MatchKeys {
 ///   unlabeled) is reported alongside, but never creates an edge.
 ///
 /// A shared phone alone never joins anyone: spouses share a home number.
-/// Household and office numbers never count at all.
+/// Household and office numbers never count at all. An edge that would put
+/// two incompatible names in one cluster is dropped, so a card that fits
+/// both spouses (an organization or an initial on the family email) joins
+/// only one of them; only the user's own decisions join such names.
 public enum Clustering {
     /// Clusters with more than one member, ordered by first member id.
     /// Pairs for which `areDistinct` is true are never joined directly (a
@@ -104,47 +107,34 @@ public enum Clustering {
         decidedSame: [[String]] = []
     ) -> [DuplicateCluster] {
         let facts = contacts.map { Facts($0.contact, keyer: keyer) }
-        var parent = Array(contacts.indices)
-        func find(_ index: Int) -> Int {
-            var root = index
-            while parent[root] != root { root = parent[root] }
-            var node = index
-            while parent[node] != root { (node, parent[node]) = (parent[node], root) }
-            return root
-        }
-        func union(_ left: Int, _ right: Int) {
-            let (first, second) = (find(left), find(right))
-            if first != second { parent[max(first, second)] = min(first, second) }
-        }
-
+        var components = Components(count: contacts.count)
         var links: [Edge] = []
-        var kinds: [Int: [Int: Set<String>]] = [:]
+        // Edges are judged pair by pair; a member compatible with two people
+        // (no person name, an initial) must not bridge them into one cluster.
+        let namesFit = { (one: Int, other: Int) in
+            NameCompatibility.verdict(facts[one].names, facts[other].names).isCompatible
+        }
         for (left, right) in candidatePairs(facts) where !areDistinct(contacts[left], contacts[right]) {
-            guard let edge = edge(facts[left], facts[right]) else { continue }
-            union(left, right)
-            links.append(Edge(left: left, right: right, reasons: edge.reasons))
-            kinds[left, default: [:]][right] = edge.kinds
+            guard let edge = edge(facts[left], facts[right]), components.everyPair(left, right, fit: namesFit) else {
+                continue
+            }
+            components.union(left, right)
+            links.append(Edge(left: left, right: right, reasons: edge.reasons, kinds: edge.kinds))
         }
         let position = Dictionary(
             contacts.enumerated().map { ($1.unifiedID, $0) }, uniquingKeysWith: { first, _ in first })
         for group in decidedSame {
-            let members = group.compactMap { position[$0] }
-            for (left, right) in zip(members, members.dropFirst()) {
-                union(left, right)
-                links.append(Edge(left: left, right: right, reasons: ["same person (your decision)"]))
-                kinds[left, default: [:]][right] = ["your decision"]
-            }
+            join(group.compactMap { position[$0] }.sorted(), components: &components, links: &links)
         }
 
-        let groups = Dictionary(grouping: contacts.indices, by: find).filter { $0.value.count > 1 }
+        let roots = contacts.indices.map { components.find($0) }
+        let groups = Dictionary(grouping: contacts.indices) { roots[$0] }.filter { $0.value.count > 1 }
+        let linksByRoot = Dictionary(grouping: links) { roots[$0.left] }
         return groups.map { root, members in
-            let clusterLinks = links.filter { find($0.left) == root }
-            let reasons = clusterLinks.reduce(into: Set<String>()) { result, link in
-                result.formUnion(kinds[link.left]?[link.right] ?? [])
-            }
+            let clusterLinks = linksByRoot[root] ?? []
             return DuplicateCluster(
                 memberIDs: members.map { contacts[$0].unifiedID }.sorted(),
-                reasons: reasons.sorted(),
+                reasons: clusterLinks.reduce(into: Set<String>()) { $0.formUnion($1.kinds) }.sorted(),
                 links: clusterLinks.map {
                     DuplicateLink(
                         first: contacts[$0.left].unifiedID, second: contacts[$0.right].unifiedID, reasons: $0.reasons)
@@ -153,11 +143,65 @@ public enum Clustering {
         .sorted { $0.memberIDs[0] < $1.memberIDs[0] }
     }
 
+    /// Joins the members (sorted indices) of one group the user declared one
+    /// person, even without an edge; a pair already linked keeps its reasons
+    /// and gains the decision, so each pair has one link.
+    static func join(_ members: [Int], components: inout Components, links: inout [Edge]) {
+        let decision = "same person (your decision)"
+        for (left, right) in zip(members, members.dropFirst()) {
+            components.union(left, right)
+            if let existing = links.firstIndex(where: { $0.left == left && $0.right == right }) {
+                links[existing].reasons.append(decision)
+                links[existing].kinds.insert("your decision")
+            } else {
+                links.append(Edge(left: left, right: right, reasons: [decision], kinds: ["your decision"]))
+            }
+        }
+    }
+
     /// A direct edge between two contact indices.
     struct Edge {
         var left: Int
         var right: Int
         var reasons: [String]
+        /// Summary kinds (`same email`, `same name`, …) for the cluster's reasons.
+        var kinds: Set<String>
+    }
+
+    /// Union-find over contact indices that keeps each component's members.
+    struct Components {
+        private var parent: [Int]
+        private var members: [Int: [Int]]
+
+        init(count: Int) {
+            parent = Array(0..<count)
+            members = Dictionary(uniqueKeysWithValues: (0..<count).map { ($0, [$0]) })
+        }
+
+        mutating func find(_ index: Int) -> Int {
+            var root = index
+            while parent[root] != root { root = parent[root] }
+            var node = index
+            while parent[node] != root { (node, parent[node]) = (parent[node], root) }
+            return root
+        }
+
+        mutating func union(_ left: Int, _ right: Int) {
+            let (first, second) = (find(left), find(right))
+            guard first != second else { return }
+            let (root, child) = (min(first, second), max(first, second))
+            parent[child] = root
+            members[root, default: []] += members.removeValue(forKey: child) ?? []
+        }
+
+        /// `fit` holds for every member of `left`'s component against every
+        /// member of `right`'s (trivially when they are already one).
+        mutating func everyPair(_ left: Int, _ right: Int, fit: (Int, Int) -> Bool) -> Bool {
+            let (first, second) = (find(left), find(right))
+            guard first != second else { return true }
+            let others = members[second] ?? []
+            return (members[first] ?? []).allSatisfy { one in others.allSatisfy { fit(one, $0) } }
+        }
     }
 
     /// What clustering looks at for one contact.

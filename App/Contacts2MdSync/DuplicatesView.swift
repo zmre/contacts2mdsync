@@ -24,8 +24,10 @@ struct DuplicatesView: View {
                     Divider()
                     if let group = groups.first(where: { $0.id == selectedID }) ?? groups.first {
                         if group.kind == .contacts {
+                            // Keyed by membership too: cards linked in Contacts keep the
+                            // item id but renumber the members a partition refers to.
                             ClusterDetail(model: model, group: group)
-                                .id(group.id)
+                                .id(group.memberIdentity)
                         } else {
                             DuplicateDetail(model: model, group: group)
                                 .id(group.id)
@@ -215,7 +217,10 @@ private struct DuplicateCardView: View {
                 ForEach(Array(card.lines.enumerated()), id: \.offset) { _, line in
                     Text(line).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                 }
-                if card.lines.isEmpty && card.source != .note {
+                ForEach(Array(card.quietLines.enumerated()), id: \.offset) { _, line in
+                    Text(line).font(.callout).foregroundStyle(.tertiary).lineLimit(1)
+                }
+                if card.lines.isEmpty && card.quietLines.isEmpty && card.source != .note {
                     Text("Details appear after the next check.").foregroundStyle(.tertiary)
                 }
                 Spacer(minLength: 8)
