@@ -1,0 +1,5 @@
+{
+  "_comment": "TODO: placeholder until the first GitHub release exists. Update with scripts/update-release-nix.sh <version>. packages.release / pkgs.contacts2mdsync-release only exist when hash is a real sha256- SRI hash.",
+  "version": "0.0.0",
+  "hash": ""
+}

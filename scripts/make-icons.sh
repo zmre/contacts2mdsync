@@ -144,4 +144,4 @@ find "$out" -maxdepth 1 -name '*.png' ! -name 'icon_*x*.png' -delete
     echo '}'
 } >"$out/Contents.json"
 
-echo "wrote $(ls "$out"/*.png | wc -l | tr -d ' ') icons + Contents.json to ${out#"$root"/}"
+echo "wrote $(find "$out" -maxdepth 1 -name '*.png' | wc -l | tr -d ' ') icons + Contents.json to ${out#"$root"/}"

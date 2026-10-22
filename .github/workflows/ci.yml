@@ -1,0 +1,86 @@
+# Lint, test and flake checks on every push and pull request.
+#
+# Action versions are pinned by commit SHA (tag in the trailing comment).
+# Update them deliberately, e.g. with Dependabot or:
+#   git ls-remote https://github.com/<owner>/<action> refs/tags/<tag>
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: flake check, test, lint
+    # Apple silicon; the flake only defines aarch64-darwin.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # `just test` / `just lint` and the release build use the system Xcode
+      # (/usr/bin/xcodebuild, xcrun swift); the dev shell provides the rest.
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: latest-stable
+
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          # The checks are written to pass in the full sandbox, so enforce it
+          # here (the maintainer's machine runs with sandbox = false).
+          # zmre.cachix.org serves mbr-cli for checks.mbr.
+          extra-conf: |
+            sandbox = true
+            extra-substituters = https://zmre.cachix.org
+            extra-trusted-public-keys = zmre.cachix.org-1:WIE1U2a16UyaUVr+Wind0JM6pEXBe43PQezdPKoDWLE=
+
+      # Evaluates every output (packages are evaluated, not built) and builds
+      # the checks: swift-format, mbr fixture validation, darwin-module
+      # evaluation, release.json shape.
+      - name: nix flake check
+        run: nix flake check -L
+
+      - name: just test
+        run: nix develop -c just test
+
+      # swiftlint dlopens sourcekitd from the host Xcode, which is why it is
+      # not a flake check (see flake.nix) and runs from the dev shell instead.
+      - name: just lint
+        run: nix develop -c just lint
+
+      - name: shellcheck + actionlint
+        run: nix develop -c bash -c 'shellcheck scripts/*.sh && actionlint'
+
+  nix-build:
+    name: nix build .#default (impure, informational)
+    # nix/package.nix runs /usr/bin/xcodebuild and lets SwiftPM fetch over the
+    # network, so it sets __noChroot, which Nix only honours with
+    # sandbox = false or relaxed. A relaxed sandbox on this throwaway runner
+    # is fine. Kept non-blocking: it builds as the _nixbld user against the
+    # runner's Xcode, which GitHub can change under us; the release workflow
+    # does not depend on it.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
+        with:
+          xcode-version: latest-stable
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+        with:
+          extra-conf: |
+            sandbox = relaxed
+      - name: nix build .#default
+        run: nix build .#default -L
+      - name: verify the ad-hoc signature
+        run: codesign --verify --deep --strict --verbose=2 result/Applications/Contacts2MdSync.app

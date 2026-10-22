@@ -31,6 +31,16 @@
 
   appName = "Contacts2MdSync";
 
+  # MARKETING_VERSION from App/project.yml, the single source of the version.
+  version = let
+    lines = lib.splitString "\n" (builtins.readFile (root + "/App/project.yml"));
+    matches = map (builtins.match "[[:space:]]*MARKETING_VERSION:[[:space:]]*\"?([0-9][0-9.]*)\"?[[:space:]]*") lines;
+    found = lib.findFirst (m: m != null) null matches;
+  in
+    if found == null
+    then "0.0.0"
+    else lib.head found;
+
   # Ad-hoc builds are signed with the Dev entitlements. The Release file adds
   # com.apple.developer.contacts.notes, a managed entitlement that AMFI only
   # honours with a provisioning profile; ad-hoc code carrying it is killed at
@@ -39,7 +49,7 @@
 in
   stdenvNoCC.mkDerivation {
     pname = "contacts2mdsync";
-    version = "0.1.0";
+    inherit version;
 
     src = fs.toSource {inherit root fileset;};
 
@@ -135,36 +145,25 @@ in
         --entitlements ${entitlements} \
         "$app"
 
-      /usr/bin/codesign --verify --deep --strict "$app"
+      # Shared with scripts/release.sh. Verifies the signature (--deep
+      # --strict), hardened runtime, ad-hoc signing and that EVERY key and
+      # string value in the entitlements file made it into the signature
+      # (codesign exits 0 even when it fails to parse the file and then signs
+      # with none). Optional entitlements such as
+      # com.apple.security.automation.apple-events and
+      # com.apple.security.temporary-exception.apple-events
+      # (com.apple.AddressBook) are therefore expected exactly when the file
+      # has them; automation.apple-events additionally requires
+      # NSAppleEventsUsageDescription in Info.plist.
+      bash ${../scripts/verify-app.sh} \
+        --adhoc \
+        --identifier com.zmre.contacts2mdsync \
+        --forbid com.apple.developer.contacts.notes \
+        "$app" ${entitlements}
 
-      # codesign exits 0 even when it fails to parse the entitlements file
-      # (it then signs with none), so assert what must be in the signature.
-      /usr/bin/codesign -d --entitlements - --xml "$app" > $TMPDIR/entitlements.plist
-      for key in \
-        com.apple.security.app-sandbox \
-        com.apple.security.personal-information.addressbook \
-        com.apple.security.files.user-selected.read-write \
-        com.apple.security.files.bookmarks.app-scope; do
-        if ! /usr/bin/grep -q "$key" $TMPDIR/entitlements.plist; then
-          echo "error: $key missing from signed ${appName}.app" >&2
-          exit 1
-        fi
-      done
       # The CLI wrapper must exec the signed app binary.
       /usr/bin/grep -q "Contents/MacOS/${appName}" $out/bin/contacts2md || {
         echo "error: bin/contacts2md does not exec the app binary" >&2
-        exit 1
-      }
-      if /usr/bin/grep -q com.apple.developer.contacts.notes $TMPDIR/entitlements.plist; then
-        echo "error: contacts.notes must not be in an ad-hoc build (needs a profile)" >&2
-        exit 1
-      fi
-      # Hardened runtime flag must be set. Captured to a file first: piping
-      # straight into `grep -q` lets grep exit early, codesign takes SIGPIPE,
-      # and stdenv's pipefail turns that into a spurious failure.
-      /usr/bin/codesign -d --verbose=2 "$app" > $TMPDIR/codesign-info.txt 2>&1
-      /usr/bin/grep -q 'flags=.*runtime' $TMPDIR/codesign-info.txt || {
-        echo "error: hardened runtime not enabled on ${appName}.app" >&2
         exit 1
       }
     '';

@@ -20,13 +20,14 @@ A macOS app (iPadOS/iOS later) that mirrors Apple Contacts into [mbr](https://zm
 | [docs/ui.md](docs/ui.md)                         | Screen sketches                                  |
 | [docs/spikes.md](docs/spikes.md)                 | Open technical questions to settle before M1     |
 | [docs/research.md](docs/research.md)             | Platform facts the design relies on              |
+| [docs/release.md](docs/release.md)               | Signed + notarized releases, CI secrets, troubleshooting |
 
 ## Development
 
 Requires Xcode (at `/usr/bin/xcodebuild`) and Nix with flakes. Every other tool comes from the dev shell.
 
 ```sh
-nix develop          # xcodegen, swiftlint, swift-format, xcbeautify, periphery, create-dmg, just
+nix develop          # xcodegen, swiftlint, swift-format, xcbeautify, periphery, create-dmg, just, shellcheck, actionlint
 just gen             # generate App/Contacts2MdSync.xcodeproj from App/project.yml (not committed)
 just build           # Debug build
 just run             # build + launch
@@ -37,7 +38,8 @@ just update-goldens  # rewrite golden files from current output (review the diff
 just mbr-check       # validate the exported fixture notes with the real mbr
 just cli plan --root ~/Notes/Contacts      # dev CLI (reads your real Contacts!)
 just app-cli status                        # CLI through the Debug app binary (app's grant + saved folder)
-nix flake check      # swift-format, mbr validation of the fixtures, darwin-module eval
+nix flake check      # swift-format, mbr validation of the fixtures, darwin-module eval, release.json
+scripts/release.sh --dry-run               # rehearse a release build (ad-hoc signed zip in build/release/)
 ```
 
 Tests never touch your address book: they use `FakeContactStore`, `InMemoryVault` and temp folders.
@@ -48,8 +50,12 @@ Layout:
 App/project.yml                  XcodeGen spec
 App/Contacts2MdSync/             SwiftUI app: setup/overview window, entitlements
 Packages/Contacts2MdSyncKit/     all sync logic (headless, testable)
-nix/                             package + nix-darwin module
+nix/                             packages (from source, notarized release) + nix-darwin module
 scripts/mbr-check.sh             validate notes with the real mbr
+scripts/release.sh               Developer ID sign + notarize + staple + zip (docs/release.md)
+scripts/verify-app.sh            signature/entitlement checks (release.sh and nix build)
+scripts/update-release-nix.sh    point nix/release.json at a published release
+.github/workflows/               CI (flake check, test, lint) and tag-triggered releases
 docs/                            design
 ```
 
@@ -58,10 +64,12 @@ Build configs:
 | Config        | Entitlements                         | Use                                                  |
 |---------------|--------------------------------------|------------------------------------------------------|
 | Debug         | Dev                                  | daily development                                    |
-| Release       | Dev                                  | `nix build`, ad-hoc signed                           |
-| ReleaseNotes  | Release (adds `contacts.notes`)      | Developer ID builds, once Apple grants the entitlement |
+| Release       | Dev                                  | `nix build` (ad-hoc) and `scripts/release.sh` (Developer ID) |
+| ReleaseNotes  | Release (adds `contacts.notes`)      | `NOTES_ENTITLEMENT=1 scripts/release.sh`, once Apple grants the entitlement and a Developer ID profile exists |
 
 Ad-hoc builds get a new code signature every time, so macOS asks for Contacts permission again after each rebuild. Use Xcode Debug builds signed with your team for day-to-day work.
+
+Releases are Developer ID signed and notarized by `scripts/release.sh`, locally or by CI on a `v*` tag. See [docs/release.md](docs/release.md) for the procedure, one-time setup and CI secrets.
 
 ## Command line
 
@@ -107,13 +115,13 @@ Nothing below writes to Apple Contacts: stamping is off unless you pass `--stamp
 
 Where things are (the app is sandboxed): state, backups and the folder bookmark live in `~/Library/Containers/com.zmre.contacts2mdsync/Data/Library/Application Support/Contacts2MdSync/` (`<vault id>/backups/` holds `contacts-*.vcf` and `notes-*/`). To undo an export: delete the created notes (listed in the output), restore adopted notes from `notes-*/`, and remove `.c2mdsync/` from the notes folder.
 
-Caveats: ad-hoc builds (`nix build`, `just build`) get a new code signature on every rebuild, so macOS asks for Contacts access again and the saved folder may need choosing again in the app. When run from Terminal, macOS may attribute Contacts access to your terminal app; if the CLI exits 3 with "Contacts access has not been granted", grant it in System Settings › Privacy & Security › Contacts. launchd/cron runs are untested (spike S11).
+Caveats: ad-hoc builds (`nix build`, `just build`) get a new code signature on every rebuild, so macOS asks for Contacts access again and the saved folder may need choosing again in the app. Signed releases don't have this problem (see [Installing with nix-darwin](#installing-with-nix-darwin)). When run from Terminal, macOS may attribute Contacts access to your terminal app; if the CLI exits 3 with "Contacts access has not been granted", grant it in System Settings › Privacy & Security › Contacts. launchd/cron runs are untested (spike S11).
 
 ## Installing with nix-darwin
 
 ```nix
 {
-  inputs.contacts2mdsync.url = "github:zmre/mbr-apple-contact-sync";
+  inputs.contacts2mdsync.url = "github:zmre/contacts2mdsync";
 
   outputs = { nix-darwin, contacts2mdsync, ... }: {
     darwinConfigurations.myMac = nix-darwin.lib.darwinSystem {
@@ -122,6 +130,9 @@ Caveats: ad-hoc builds (`nix build`, `just build`) get a new code signature on e
         {
           system.primaryUser = "alice";   # nix-darwin installs user agents for this user
           programs.contacts2mdsync.enable = true;
+          # Which build (see below). The default picks the release once one exists.
+          # programs.contacts2mdsync.package = contacts2mdsync.packages.aarch64-darwin.release;  # notarized
+          # programs.contacts2mdsync.package = contacts2mdsync.packages.aarch64-darwin.default;  # from source
           # Optional: headless sync in the background (launchd user agent).
           programs.contacts2mdsync.schedule = {
             enable = true;
@@ -137,7 +148,16 @@ Caveats: ad-hoc builds (`nix build`, `just build`) get a new code signature on e
 }
 ```
 
-The app is installed to `/Applications/Nix Apps/Contacts2MdSync.app`, and `contacts2md` (a wrapper that execs the app binary) is put on your `PATH`. For now `packages.default` builds from source with the system Xcode (`__noChroot`), so it needs `sandbox = false` or `relaxed` in your Nix config. Once signed and notarized releases exist, a pure `packages.release` that fetches the release zip will become the default.
+The app is installed to `/Applications/Nix Apps/Contacts2MdSync.app`, and `contacts2md` (a wrapper that execs the app binary) is put on your `PATH`. Two builds are available:
+
+| Package | Flake output | What it is |
+|---------|--------------|------------|
+| `pkgs.contacts2mdsync-release` | `packages.aarch64-darwin.release` | The Developer ID signed, notarized zip from the GitHub release pinned in `nix/release.json`. Pure: no Xcode, works with the Nix sandbox on. **Default once a release exists.** |
+| `pkgs.contacts2mdsync` | `packages.aarch64-darwin.default` | Built from source with your Xcode, signed ad-hoc. Impure (`__noChroot`): needs `nix.settings.sandbox = false` or `"relaxed"`. The default until the first release. |
+
+`pkgs.contacts2mdsync-release` and `packages.release` exist only once `nix/release.json` names a published release. No release has been published yet, so for now the module installs the from-source build.
+
+**Why the signed release matters.** macOS ties the Contacts permission, the Automation permission (Apple Events to Contacts.app, used for notes sync), the saved notes folder and background runs to the app's code signature. A Developer ID build keeps the same identity (bundle id + team) across upgrades, so you grant access once and the launchd agent keeps working after every `darwin-rebuild`. An ad-hoc from-source build is a new identity each time it changes: macOS asks again, and a scheduled sync that runs before you reopen the app exits 3. Switching between the two builds also changes the identity, so grant access once more after switching (or `tccutil reset All com.zmre.contacts2mdsync` if a grant looks stuck).
 
 `schedule.enable` adds the user agent `launchd.user.agents.contacts2mdsync-sync`, which runs `"/Applications/Nix Apps/Contacts2MdSync.app/Contents/MacOS/Contacts2MdSync" sync --quiet` (the same as `contacts2md sync`) every hour, or at the `calendar` times. It does not run at login, and it runs as a background, low-priority, niced job. Notes:
 
@@ -147,4 +167,4 @@ The app is installed to `/Applications/Nix Apps/Contacts2MdSync.app`, and `conta
 - launchd won't expand `~` or create directories. So `logFile` must be an absolute path in a directory that already exists. The default, `~/Library/Logs/Contacts2MdSync.log` for `system.primaryUser`, can be viewed in Console.app. The file is appended to and never rotated. Set `logFile = null` to discard output.
 - Check it with `launchctl print gui/$(id -u)/org.nixos.contacts2mdsync-sync`. Run it right away with `launchctl kickstart gui/$(id -u)/org.nixos.contacts2mdsync-sync`.
 
-Also available: `overlays.default` (adds `pkgs.contacts2mdsync`) and `nix flake check` (swift-format lint, plus validation of the fixture notes with the real mbr from `github:zmre/mbr-markdown-browser`, fetched from zmre.cachix.org, and an evaluation test of the nix-darwin module's schedule options).
+Also available: `overlays.default` (adds `pkgs.contacts2mdsync`, and `pkgs.contacts2mdsync-release` once a release exists) and `nix flake check` (swift-format lint, plus validation of the fixture notes with the real mbr from `github:zmre/mbr-markdown-browser`, fetched from zmre.cachix.org, and an evaluation test of the nix-darwin module's schedule options).

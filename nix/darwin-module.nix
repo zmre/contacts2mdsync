@@ -4,8 +4,12 @@
 #   programs.contacts2mdsync.enable = true;
 #   programs.contacts2mdsync.schedule.enable = true;   # hourly headless sync
 #
-# The package is an impure build (needs Xcode and a relaxed sandbox); see
-# nix/package.nix.
+# Package: once a notarized GitHub release is recorded in nix/release.json,
+# the default is that build (pkgs.contacts2mdsync-release, nix/release.nix):
+# pure, and Developer ID signed, so Contacts/Automation grants survive
+# upgrades. Until then it is the from-source build (pkgs.contacts2mdsync,
+# nix/package.nix: impure, needs Xcode and a relaxed sandbox). Either can be
+# chosen explicitly with `programs.contacts2mdsync.package`.
 {self}: {
   config,
   lib,
@@ -31,9 +35,28 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.contacts2mdsync;
-      defaultText = lib.literalExpression "pkgs.contacts2mdsync";
-      description = "The Contacts2MdSync package to install.";
+      default = pkgs.contacts2mdsync-release or pkgs.contacts2mdsync;
+      defaultText = lib.literalExpression "pkgs.contacts2mdsync-release or pkgs.contacts2mdsync";
+      example = lib.literalExpression "pkgs.contacts2mdsync  # build from source with Xcode";
+      description = ''
+        The Contacts2MdSync package to install.
+
+        - `pkgs.contacts2mdsync-release` (also
+          `contacts2mdsync.packages.''${system}.release`): the Developer ID
+          signed, notarized app from the GitHub release named in the flake's
+          {file}`nix/release.json`. Pure (no Xcode, works with the sandbox on)
+          and signed with a stable identity, so macOS keeps the Contacts and
+          Automation permissions and the chosen notes folder across upgrades.
+          It is the default once a release exists (the overlay attribute is
+          absent before that).
+        - `pkgs.contacts2mdsync`: built from source with the host's Xcode and
+          signed ad-hoc. Impure: needs `nix.settings.sandbox = false` or
+          `"relaxed"`. Every rebuild is a new code identity, so macOS asks for
+          Contacts access again.
+
+        Switching between the two changes the app's code identity: grant
+        access once more after switching.
+      '';
     };
 
     schedule = {
