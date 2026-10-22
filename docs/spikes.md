@@ -15,7 +15,7 @@ Each spike is a throwaway target under `Spikes/` with a written result here. Run
 | S9 | Is `CNContact.identifier` stable across Contacts.app link/unlink and across iCloud sign-out/in on this Mac? | Validates cascade step 2 confidence.              | Record observed behavior.                                                                | **partial**: only a 30 s compare with no experiment in between. Side evidence: Google card ids change once after create; iCloud ids stayed stable through the Google enable |
 | S10| Does the real `mbr` render our fixture files with zero contact problems (incl. `[[Title]]` relationships after moving files into subfolders)? | Format contract.                                   | Add mbr as flake input + check derivation in M1.                                         | done (M1): `checks.mbr` / `just mbr-check` — 59 fixture notes, 0 problems with mbr 0.7.0 |
 | S11| Headless TCC + sandbox: does the app binary run with a `sync` argument from Terminal, cron and a launchd user agent keep the app's Contacts grant and read its security-scoped bookmark? | Headless CLI (architecture §15).             | Works from launchd at minimum. Otherwise fall back to `open -g -a … --args sync`. | **partial**: Terminal is authorized. launchd and cron report `notDetermined`; `--request` was never tried, so prompting and granting are untested. Bookmark not tested |
-| S12| Notes without the entitlement: can we read and write the Notes field by scripting Contacts.app with Apple Events (`note` and `id` of `person`)? How long do a bulk read and a per-person read take for about 2,500 contacts? Do AppleScript ids match CNContact card ids or unified ids? Which card of a linked pair gets the write? | Body ↔ notes mapping while S2 is blocked on Apple. | Bulk read of all notes takes a few seconds or less, writes keep the text exactly, no other fields or ids change, the linked-pair write target is predictable, and the Automation prompt is acceptable. Then Apple Events become the fallback notes path in architecture §8. | todo |
+| S12| Notes without the entitlement: can we read and write the Notes field by scripting Contacts.app with Apple Events (`note` and `id` of `person`)? How long do a bulk read and a per-person read take for about 2,500 contacts? Do AppleScript ids match CNContact card ids or unified ids? Which card of a linked pair gets the write? | Body ↔ notes mapping while S2 is blocked on Apple. | Bulk read of all notes takes a few seconds or less, writes keep the text exactly, no other fields or ids change, the linked-pair write target is predictable, and the Automation prompt is acceptable. Then Apple Events become the fallback notes path in architecture §8. | **pass** (2026-10-22) |
 | S13| Real M3 write path on scratch cards: does `CNContactStoreAdapter.apply` → `CardWriter` (behind a harness-only guard) add, edit and delete list values, write single-valued fields through to linked cards, stamp, manage group membership and edit relations correctly on real iCloud and Google cards? Labeled-value ids kept, no unified save, `transactionAuthor` excluded from history, values intact after a server round trip? | Go/no-go for `apple_writes: enabled` on the real address book. | `run`: every row PASS (WARN in steps 8–9 only if explained by a concurrent Google re-save). `check` after 15–30 min: values, stamps and ids survive, or each server rewrite is understood and covered by comparison keys. | todo |
 
 ## Results (2026-10-21 UTC run)
@@ -293,3 +293,162 @@ Run the steps in this order. Steps 2–7 touch the real address book, but only s
    You can also look at the cards on the iPhone.
 
 5. **Clean up:** `c2m-spike cleanup --spike s13 --yes`. This deletes the cards and `ZZ Spike S13 Group`. Then check iCloud.com and contacts.google.com for leftover "ZZ Spike S13" cards.
+
+
+---
+
+## S12 findings (2026-10-22)
+
+**Verdict: pass. Contacts.app scripting is a viable notes path without the entitlement.** Raw output follows below.
+
+| Question                         | Result                                                                                                  |
+|----------------------------------|---------------------------------------------------------------------------------------------------------|
+| Bulk read speed                  | 3,785 ids in 0.24 s + 3,785 notes in 0.28 s = **0.52 s total**. Per-person reads ~8.5 ms (≈36 s for all), so always use bulk. |
+| Data shape                       | 1,572 non-empty notes, 2,213 `missing value`, 561 multi-line, median 49 chars, max 49,152 chars.       |
+| Id mapping                       | AppleScript `person` = **underlying card**, and its `id` equals the CNContact card id **exactly** (3,785/3,785, `…:ABPerson`). Synthesized unified ids don't resolve (-1728). |
+| Write fidelity                   | `set note … ; save` in ~22 ms; re-read matches the written multi-line/Unicode text exactly.            |
+| Side effects                     | Card identifier and unified id unchanged; 0 other fields changed; exactly 1 `UpdateContactEvent` on the target card only. |
+| Linked pair                      | Notes are **per card**. Writing the Google card left the iCloud card's note `missing value`. We choose the target card explicitly. |
+| Automation prompt                | One-time "control Contacts" prompt; warm-up incl. launch 2.0 s. Contacts.app is launched if not running (`--quit-if-launched` quits it after). |
+| CNContactNoteKey                 | Still unreadable without the entitlement (as expected).                                                 |
+
+Not verified by this run: whether the note propagated to iCloud.com / contacts.google.com / iPhone. The S13 linked pair (which got a test note on its Google card) was not cleaned up by `cleanup --spike s12` — run `c2m-spike cleanup --spike s13 --yes`.
+
+Design consequences (architecture §8): read notes per card in one bulk call; a record's Apple note = precedence card (stamped/iCloud first), with differing notes on other cards handled like any single-valued field; write through to every writable card of the record and verify per card; launch Contacts.app hidden and quit it if we launched it; headless runs without Automation permission skip notes with a warning (never prompt).
+
+## S12 raw output
+
+❯ nix develop path:$PWD -c swift build --package-path Spikes
+alias c2m-spike=$PWD/Spikes/.build/debug/c2m-spike
+c2m-spike s12-notes probe --quit-if-launched   # read-only; approve the "control Contacts" prompt
+c2m-spike s12-notes write --yes                # creates a ZZ Spike scratch card
+c2m-spike s12-notes write --yes                # writes a note to it via scripting
+c2m-spike s12-notes write --linked --yes       # optional: creates an iCloud+Google pair; wait ~15 min, re-run
+c2m-spike cleanup --spike s12 --yes
+
+Building for debugging...
+[129 / 131] c2m-spike-product
+
+Build complete! (7.30 sec)
+c2m-spike s12-notes probe  2026-10-22T14:35:59Z
+CNContactStore: underlying cards=3785 unified contacts=2529
+Contacts.app running before: no
+Automation permission (pre-check, no prompt): unknown: Contacts.app not running (procNotFound)
+warm-up `count every person`: 3785 people in 2.04s (includes launch/prompt)
+Automation permission (after warm-up): granted
+
+## Bulk fetch
+`id of every person`:   3785 ids   in 0.24s
+`note of every person`: 3785 notes in 0.28s
+bulk total: 0.52s
+people=3785 non-empty notes=1572 empty/whitespace-only=0 missing value=2213
+non-empty note length (chars): median=49 max=49152
+non-empty notes containing line breaks: 561
+
+## Per-person fetch (`note of person id X`)
+20 calls: min=7.1ms median=8.5ms max=28.1ms mean=9.6ms
+extrapolated per-person read of 3785 people: 36.3s (vs bulk 0.28s)
+
+## AppleScript `id` vs CNContact identifiers
+AppleScript ids: 3785 (distinct 3785)
+format: ends with ":ABPerson"=3785 bare UUID=0 other=0
+CN: underlying=3785 unified=2529 linked (synthesized unified id)=1256
+AS id = card id AND unified id (unlinked card):       1273
+AS id = underlying card id only (member of a link):  2512
+AS id = synthesized unified id only (linked contact): 0
+AS id matches neither:                                0
+CN unified contacts with no AS id:   1256
+CN underlying cards with no AS id:   0
+linked contacts with an AS id equal to their unified id: 0/1256
+Reading: AS persons == CN unified contacts when unifiedOnly ≈ linked count and cardOnly = 0;
+AS persons == underlying cards when cardOnly ≈ 2 x linked count and unifiedOnly = 0.
+Contacts.app running after: yes (launched by this run: yes)
+Contacts.app: terminate requested (--quit-if-launched)
+c2m-spike s12-notes write  2026-10-22T14:36:02Z
+PLAN: s12-notes write: create scratch card
+  - create "ZZ Spike S12 Notes <id>" in iCloud container D72A148B-2A8F-4494-A9A1-D7AD30890905:ABAccount (marker kind solo)
+  - then re-run `c2m-spike s12-notes write` (dry run) and `--yes` to write the note
+  (only cards named "ZZ Spike …" carrying a x-c2mdsync-spike: or x-mdsync-spike: URL are ever modified)
+created S12 card identifier=91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson
+NEXT: c2m-spike s12-notes write          (dry run)
+      c2m-spike s12-notes write --yes
+c2m-spike s12-notes write  2026-10-22T14:36:04Z
+target: single card "ZZ Spike S12 Notes E867"
+  s12/solo card identifier=91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson
+  unified id=91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson
+  unified members: 1 (all harness cards)
+Contacts.app running before: no
+AppleScript persons named "ZZ Spike S12 Notes E867": 1
+  ids: ["91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson"]
+  `person id <91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson>` resolves -> AS id 91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson
+AppleScript target person id: 91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson
+note before (AppleScript): missing value
+CNContactStore can read CNContactNoteKey on this card: no (expected without entitlement)
+PLAN: s12-notes write
+  - re-verify every underlying card (CNContactStore) and the AppleScript person (name prefix + marker URL)
+  - AppleScript: set note of person id "91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson" to <88-char synthetic text>; save
+  - re-read via AppleScript; compare CN fields, identifiers and change history before/after
+  (only cards named "ZZ Spike …" carrying a x-c2mdsync-spike: or x-mdsync-spike: URL are ever modified)
+
+## Write
+set note + save: OK in 23ms
+re-read via AppleScript: MATCHES written text
+
+## CNContactStore view after the AppleScript write
+s12/solo card: identifier unchanged=true other fields changed=0
+s12/solo card found by marker under same id: true
+unified id unchanged: true
+change history since pre-write token (unify=false): 1 events
+  s12/solo card: UpdateContactEvent
+  other contacts with events: 0 (unrelated activity or sync)
+
+Verify off-device (after 1-5 min of sync):
+  - iCloud.com > Contacts > "ZZ Spike S12 Notes E867": is the note there?
+  - iPhone Contacts: same card, Notes field.
+Then: c2m-spike cleanup --spike s12 [--yes]
+c2m-spike s12-notes write --linked  2026-10-22T14:36:09Z
+target: linked pair "ZZ Spike S13 Linked 1A5A"
+  s13/linked-google card identifier=9DE301D0-802D-4273-8598-B98AFE0566E2:ABPerson
+  s13/linked-icloud card identifier=9F4C5B2F-FFAB-413B-888B-DF07E6FAB669:ABPerson
+  unified id=4F0249AF-75DA-4A8E-9A45-A5915AAD7560
+  unified members: 2 (all harness cards)
+Contacts.app running before: yes
+AppleScript persons named "ZZ Spike S13 Linked 1A5A": 2
+  ids: ["9DE301D0-802D-4273-8598-B98AFE0566E2:ABPerson", "9F4C5B2F-FFAB-413B-888B-DF07E6FAB669:ABPerson"]
+  `person id <9DE301D0-802D-4273-8598-B98AFE0566E2:ABPerson>` resolves -> AS id 9DE301D0-802D-4273-8598-B98AFE0566E2:ABPerson
+  `person id <9F4C5B2F-FFAB-413B-888B-DF07E6FAB669:ABPerson>` resolves -> AS id 9F4C5B2F-FFAB-413B-888B-DF07E6FAB669:ABPerson
+  `person id <4F0249AF-75DA-4A8E-9A45-A5915AAD7560>` -> AppleScript error -1728: Can't get person id "4F0249AF-75DA-4A8E-9A45-A5915AAD7560".
+AppleScript target person id: 9DE301D0-802D-4273-8598-B98AFE0566E2:ABPerson
+note before (AppleScript): missing value
+CNContactStore can read CNContactNoteKey on this card: no (expected without entitlement)
+PLAN: s12-notes write
+  - re-verify every underlying card (CNContactStore) and the AppleScript person (name prefix + marker URL)
+  - AppleScript: set note of person id "9DE301D0-802D-4273-8598-B98AFE0566E2:ABPerson" to <88-char synthetic text>; save
+  - re-read via AppleScript; compare CN fields, identifiers and change history before/after
+  (only cards named "ZZ Spike …" carrying a x-c2mdsync-spike: or x-mdsync-spike: URL are ever modified)
+
+## Write
+set note + save: OK in 21ms
+re-read via AppleScript: MATCHES written text
+  `note of person id <9F4C5B2F-FFAB-413B-888B-DF07E6FAB669:ABPerson>`: missing value
+
+## CNContactStore view after the AppleScript write
+s13/linked-google card: identifier unchanged=true other fields changed=0
+s13/linked-icloud card: identifier unchanged=true other fields changed=0
+s13/linked-google card found by marker under same id: true
+s13/linked-icloud card found by marker under same id: true
+unified id unchanged: true
+change history since pre-write token (unify=false): 1 events
+  s13/linked-google card: UpdateContactEvent
+  s13/linked-icloud card: no events
+  other contacts with events: 0 (unrelated activity or sync)
+
+Verify off-device (after 1-5 min of sync):
+  - iCloud.com > Contacts > "ZZ Spike S13 Linked 1A5A": is the note there?
+  - contacts.google.com > "ZZ Spike S13 Linked 1A5A": is the note there (Google calls it Notes)?
+  - iPhone Contacts: same card, Notes field.
+Then: c2m-spike cleanup --spike s12 [--yes]
+PLAN: cleanup (1 cards, 0 scratch groups)
+  - delete "ZZ Spike S12 Notes E867" identifier=91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson
+  (only cards named "ZZ Spike …" carrying a x-c2mdsync-spike: or x-mdsync-spike: URL are ever modified)
+deleted 91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson
