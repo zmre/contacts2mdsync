@@ -60,3 +60,7 @@ clean:
 # Build the app via Nix (impure: needs sandbox = false/relaxed)
 nix-build:
     nix build path:.#default
+
+# Regenerate the app icon set from assets/contact-sync-logo.png
+icons:
+    scripts/make-icons.sh
