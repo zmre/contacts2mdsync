@@ -8,7 +8,8 @@ public import SyncEngine
 ///
 /// Tables: `records` + `record_cards` + `field_hashes` (record map and merge
 /// base), `file_cache`, `groups`, `pending`, `decisions` (mirror of the vault
-/// logs), `reported_problems`, `unapplyable` (M3), `sessions`, `meta`.
+/// logs), `reported_problems`, `unapplyable` (M3), `sessions`,
+/// `session_changes` (v3: per-run change log), `meta`.
 /// Every save is one transaction.
 public final class GRDBSyncStateStore: SyncStateStore {
     /// File name inside the vault's state folder.
@@ -135,6 +136,18 @@ public final class GRDBSyncStateStore: SyncStateStore {
                     ALTER TABLE unapplyable ADD COLUMN attempted TEXT NOT NULL DEFAULT '';
                     ALTER TABLE unapplyable ADD COLUMN observed TEXT NOT NULL DEFAULT '';
                     ALTER TABLE record_cards ADD COLUMN confirmed INTEGER NOT NULL DEFAULT 0;
+                    """)
+        }
+        migrator.registerMigration("v3") { database in
+            // Per-run change log (Activity inspector, Export Log).
+            try database.execute(
+                sql: """
+                    CREATE TABLE session_changes (
+                        session_key TEXT NOT NULL,
+                        position INTEGER NOT NULL,
+                        json TEXT NOT NULL,
+                        PRIMARY KEY (session_key, position)
+                    );
                     """)
         }
         return migrator

@@ -7,7 +7,7 @@ import SwiftUI
 /// `cluster-resolve` decision. Not Duplicates and Ignore for Now stay as
 /// shortcuts.
 struct ClusterDetail: View {
-    let model: AppModel
+    let actions: ClusterActions
     let group: UIDuplicateGroup
     @State private var partition: UIClusterPartition
     @State private var selection = Set<Int>()
@@ -15,10 +15,15 @@ struct ClusterDetail: View {
     @State private var isWorking = false
     @FocusState private var focusedMember: Int?
 
-    init(model: AppModel, group: UIDuplicateGroup) {
-        self.model = model
+    init(actions: ClusterActions, group: UIDuplicateGroup) {
+        self.actions = actions
         self.group = group
         _partition = State(initialValue: group.startingPartition)
+    }
+
+    /// The Duplicates screen: answers go to the decision log, Details to the inspector.
+    init(model: AppModel, group: UIDuplicateGroup) {
+        self.init(actions: ClusterActions(model: model), group: group)
     }
 
     private enum Confirmation: Identifiable {
@@ -39,7 +44,7 @@ struct ClusterDetail: View {
                     ForEach(cards) { card in
                         if let member = card.member {
                             MemberCard(
-                                model: model, group: group, card: card, member: member,
+                                actions: actions, group: group, card: card, member: member,
                                 isSelected: selection.contains(member), badge: partition.badge(for: member),
                                 tint: tint(for: partition.assignment(of: member))
                             ) {
@@ -135,7 +140,7 @@ struct ClusterDetail: View {
                     let ids = group.cardIDs(of: person, in: partition)
                     if partition.members(of: person).count > 1 {
                         Button("Link \(UIClusterPartition.personName(person)) in Contacts…") {
-                            model.openInContacts(cardIDs: ids)
+                            actions.openInContacts(ids)
                         }
                         .controlSize(.small)
                         .help("Open these cards in Contacts, then choose Card ▸ Link Selected Cards")
@@ -162,8 +167,8 @@ struct ClusterDetail: View {
                 Spacer()
                 Button("Not Duplicates") { confirming = .notDuplicates }
                     .help("Every card is a different person (remembered)")
-                Button("Ignore for Now") { model.snooze(group.id) }
-                    .help("Hide until the next sync")
+                Button(actions.ignoreTitle) { actions.ignore(group.id) }
+                    .help(actions.ignoreHelp)
                 if isWorking { ProgressView().controlSize(.small) }
             }
         }
@@ -215,7 +220,7 @@ struct ClusterDetail: View {
 
     private func confirmMessage(_ confirmation: Confirmation) -> String {
         switch confirmation {
-        case .apply: group.applyMessage(partition) + "\nThe next sync applies it."
+        case .apply: group.applyMessage(partition) + "\n" + actions.appliesWhen
         case .notDuplicates: "They won't be flagged again. Each gets its own note on the next sync."
         }
     }
@@ -228,7 +233,32 @@ struct ClusterDetail: View {
             case .apply: partition.decision(itemID: group.id)
             case .notDuplicates: UIDuplicateAction.notDuplicates.decision(itemID: group.id)
             }
-        if let answer { await model.decide([answer]) }
+        if let answer { _ = await actions.decide([answer]) }
+    }
+}
+
+/// What a cluster's buttons do: in Duplicates (decision log, inspector) or
+/// embedded in onboarding (recorded before the first sync, no inspector).
+@MainActor
+struct ClusterActions {
+    var decide: ([UIReviewDecision]) async -> Bool
+    var ignore: (String) -> Void
+    var ignoreTitle = "Ignore for Now"
+    var ignoreHelp = "Hide until the next sync"
+    /// Said after the Apply confirmation's partition summary.
+    var appliesWhen = "The next sync applies it."
+    var openInContacts: ([String]) -> Void
+    var revealInFinder: (String) -> Void
+    /// Details in the inspector (`nil`: no Details button).
+    var inspect: ((UIDuplicateCard, UIDuplicateGroup) -> Void)?
+}
+
+extension ClusterActions {
+    init(model: AppModel) {
+        self.init(
+            decide: { await model.decide($0) }, ignore: { model.snooze($0) },
+            openInContacts: { model.openInContacts(cardIDs: $0) }, revealInFinder: { model.revealInFinder(path: $0) },
+            inspect: { card, group in model.inspect(InspectorItem(card, group: group), open: true) })
     }
 }
 
@@ -236,7 +266,7 @@ struct ClusterDetail: View {
 /// badge, accounts, details (household numbers de-emphasized), its note,
 /// and why it is in the cluster.
 private struct MemberCard: View {
-    let model: AppModel
+    let actions: ClusterActions
     let group: UIDuplicateGroup
     let card: UIDuplicateCard
     let member: Int
@@ -285,14 +315,16 @@ private struct MemberCard: View {
             Spacer(minLength: 4)
             HStack {
                 if !card.cardIDs.isEmpty {
-                    Button("Open") { model.openInContacts(cardIDs: card.cardIDs) }
+                    Button("Open") { actions.openInContacts(card.cardIDs) }
                         .help("Open in Contacts")
                 }
                 if let path = card.path {
-                    Button("Reveal") { model.revealInFinder(path: path) }
+                    Button("Reveal") { actions.revealInFinder(path) }
                         .help("Reveal the note in Finder")
                 }
-                Button("Details") { model.inspect(InspectorItem(card, group: group), open: true) }
+                if let inspect = actions.inspect {
+                    Button("Details") { inspect(card, group) }
+                }
             }
             .controlSize(.small)
         }

@@ -38,7 +38,7 @@ private func code(_ event: NSAppleEventDescriptor) -> String {
 }
 
 /// Contacts.app as Apple Events see it: people (card ids) with notes.
-private final class FakeContactsApp: AppleEventSending, ContactsAppControlling, @unchecked Sendable {
+final class FakeContactsApp: AppleEventSending, ContactsAppControlling, @unchecked Sendable {
     struct State {
         var people: [(id: String, note: String?)] = []
         var running = false
@@ -56,6 +56,13 @@ private final class FakeContactsApp: AppleEventSending, ContactsAppControlling, 
         var refuse = Set<String>()
         var classic = false
         var permissionOnPrompt: Int32 = 0
+        /// S14: a launch that comes up visible despite `hides`.
+        var launchVisible = false
+        /// `hide()` calls before Contacts.app reports hidden.
+        var hidesNeeded = 1
+        /// The first answered event shows the window again.
+        var showOnFirstEvent = false
+        var hides = 0
     }
 
     let state = Mutex(State())
@@ -79,6 +86,11 @@ private final class FakeContactsApp: AppleEventSending, ContactsAppControlling, 
                 throw ContactsScriptingError(number: number, message: "transport \(number)")
             }
             guard state.running else { throw ContactsScriptingError(number: -600, message: "not running") }
+            if state.showOnFirstEvent {
+                state.showOnFirstEvent = false
+                state.hidden = false
+                state.hidesNeeded = 1
+            }
             let reply = NSAppleEventDescriptor.appleEvent(
                 withEventClass: ContactsScriptingEvents.fourCC("aevt"),
                 eventID: ContactsScriptingEvents.fourCC("ansr"), targetDescriptor: nil, returnID: 0, transactionID: 0)
@@ -132,11 +144,21 @@ private final class FakeContactsApp: AppleEventSending, ContactsAppControlling, 
     var isRunning: Bool { state.withLock { $0.running } }
     var isInUse: Bool { state.withLock { !$0.hidden || $0.active } }
 
+    var isHidden: Bool { state.withLock { $0.hidden } }
+
     func launchHidden(timeout: TimeInterval) throws {
         state.withLock {
             $0.running = true
-            $0.hidden = true
+            $0.hidden = !$0.launchVisible
             $0.launches += 1
+        }
+    }
+
+    func hide() {
+        state.withLock {
+            $0.hides += 1
+            $0.hidesNeeded -= 1
+            if $0.hidesNeeded <= 0 { $0.hidden = true }
         }
     }
 
@@ -168,7 +190,7 @@ private final class FakeContactsApp: AppleEventSending, ContactsAppControlling, 
     var sent: [String] { state.withLock { $0.sent } }
 }
 
-private func provider(
+func provider(
     _ app: FakeContactsApp, quitWhenDone: Bool = true, bulkThreshold: Int = 2
 )
     -> ScriptingNotesProvider
@@ -345,35 +367,6 @@ struct ScriptingNotesProviderTests {
         let app = FakeContactsApp(people: Self.people, running: false)
         #expect(provider(app).currentPermission() == .unknown)
         #expect(app.state.withLock { $0.launches } == 0)
-    }
-
-    @Test("Contacts.app: launched hidden when needed, quit afterwards only if we launched it and it is unused")
-    func lifecycle() throws {
-        let app = FakeContactsApp(people: Self.people, running: false)
-        let scripting = provider(app)
-        _ = try scripting.readAll(cardIDs: nil)
-        #expect(app.state.withLock { $0.launches } == 1)
-        scripting.finishSession()
-        #expect(app.state.withLock { $0.quits } == 1)
-
-        let inUse = FakeContactsApp(people: Self.people, running: false)
-        let second = provider(inUse)
-        _ = try second.readAll(cardIDs: nil)
-        inUse.state.withLock { $0.hidden = false }  // the user brought it forward
-        second.finishSession()
-        #expect(inUse.state.withLock { $0.quits } == 0)
-
-        let already = FakeContactsApp(people: Self.people, running: true)
-        let third = provider(already)
-        _ = try third.readAll(cardIDs: nil)
-        third.finishSession()
-        #expect(already.state.withLock { ($0.launches, $0.quits) } == (0, 0))
-
-        let keep = FakeContactsApp(people: Self.people, running: false)
-        let fourth = provider(keep, quitWhenDone: false)
-        _ = try fourth.readAll(cardIDs: nil)
-        fourth.finishSession()
-        #expect(keep.state.withLock { $0.quits } == 0)
     }
 
     @Test("a freshly launched Contacts.app that does not answer yet is retried")

@@ -8,6 +8,7 @@ import SyncTriggers
 struct GeneralSettings: View {
     let model: AppModel
     @AppStorage(AppPreferences.showInMenuBar) private var showInMenuBar = true
+    @AppStorage(AppPreferences.hideDockIconWhenClosed) private var hideDockIcon = true
     @State private var services = BackgroundServices()
     @State private var backgroundHours = UIBackgroundSync.intervals[0]
 
@@ -23,9 +24,14 @@ struct GeneralSettings: View {
             backgroundSection
             Section {
                 Toggle("Show in menu bar", isOn: $showInMenuBar)
-                Text("With the menu bar icon shown, closing the window keeps live sync running.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Toggle("Hide Dock icon when the window is closed", isOn: $hideDockIcon)
+                    .disabled(!showInMenuBar)
+                Text(
+                    "With the menu bar icon shown, closing the window keeps live sync running"
+                        + (hideDockIcon ? ", and the app leaves the Dock until you open the window again." : ".")
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 Toggle("Launch at login", isOn: loginBinding)
                 if services.loginStatus == .requiresApproval {
                     approvalRow
@@ -36,6 +42,8 @@ struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
+        .onChange(of: showInMenuBar) { DockIconController.shared.update() }
+        .onChange(of: hideDockIcon) { DockIconController.shared.update() }
         .onAppear {
             services.refresh()
             if let hours = services.agentHours { backgroundHours = hours }

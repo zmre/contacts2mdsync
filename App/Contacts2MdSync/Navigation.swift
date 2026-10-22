@@ -1,6 +1,7 @@
 import ContactModel
 import Contacts2MdCLI
 import Foundation
+import SyncEngine
 
 /// Top-level sections of the main window (docs/ui.md §1).
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
@@ -75,6 +76,8 @@ struct InspectorItem: Equatable {
     var accounts: String?
     var cardIDs: [String] = []
     var details: [Detail] = []
+    /// A run's changes (Activity), each with Reveal / Open.
+    var changes: [UIActivityChange]?
 }
 
 // MARK: - Inspector items
@@ -127,6 +130,27 @@ extension InspectorItem {
             title: row.title, subtitle: row.side.title, path: row.side == .contacts ? row.path : nil,
             syncID: row.recordID, accounts: row.accountsText, cardIDs: row.side == .markdown ? row.cardIDs : [],
             details: details)
+    }
+
+    /// A run from Activity; `changes` are filled in once loaded.
+    init(_ row: UIActivityRow) {
+        var details = [
+            Detail(label: "Trigger", value: row.isPreview ? "\(row.trigger) · Preview" : row.trigger),
+            Detail(label: "Duration", value: UIFormat.duration(row.duration)),
+        ]
+        if let contacts = row.contacts { details.append(Detail(label: "Contacts C/U/D", value: contacts.text)) }
+        if let markdown = row.markdown { details.append(Detail(label: "Markdown C/U/D", value: markdown.text)) }
+        if row.held > 0 { details.append(Detail(label: "Held", value: "\(row.held) · \(row.holdReason ?? "")")) }
+        if row.review > 0 { details.append(Detail(label: "Review", value: row.review.formatted())) }
+        if row.changeLogID == nil, !row.isPreview {
+            details.append(Detail(label: "", value: "No change list was kept for this run."))
+        } else if let count = row.changeCount, count > SessionChange.perSessionLimit {
+            details.append(
+                Detail(label: "", value: "The first \(SessionChange.perSessionLimit) of \(count) changes are listed."))
+        }
+        self.init(
+            title: UIFormat.relativeDay(row.startedAt), subtitle: "\(row.command) on \(row.deviceName)", path: nil,
+            syncID: nil, accounts: nil, cardIDs: [], details: details, changes: row.changeLogID == nil ? nil : [])
     }
 
     init(_ record: UIConflictRecord) {

@@ -308,14 +308,7 @@ private struct AdvancedSettings: View {
             LabeledContent("Command line") {
                 PathText(model.setup.cliPath).font(.caption.monospaced())
             }
-            HStack {
-                Button("Rescan Everything…") {}
-                    .disabled(true)
-                Button("Reset Sync State…") {}
-                    .disabled(true)
-                Spacer()
-            }
-            .help("Not available yet")
+            MaintenanceSection(model: model)
         }
         .formStyle(.grouped)
     }

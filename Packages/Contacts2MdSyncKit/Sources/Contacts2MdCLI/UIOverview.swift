@@ -245,6 +245,10 @@ public struct UIActivityRow: Identifiable, Hashable, Sendable {
     /// Contact notes this run: `2 → Contacts · 1 → notes`, `skipped`, or
     /// `nil` (notes off, previews, runs before notes existed).
     public var notes: String?
+    /// Changes in the run's change log (`nil`: none recorded).
+    public var changeCount: Int?
+    /// The key of the run's change log (`SessionRecord.changeLogID`).
+    public var changeLogID: String?
 
     /// `2 → Contacts · 1 → notes` / `skipped` for a session's notes counts.
     static func notesText(_ session: SessionRecord) -> String? {
@@ -274,7 +278,7 @@ public struct UIActivityRow: Identifiable, Hashable, Sendable {
                 contacts: split.contacts, markdown: split.markdown, combined: split.combined,
                 adopted: session.adopted, held: split.held, holdReason: split.holdReason,
                 appleRead: split.appleRead, review: session.pendingReview, skipped: session.skipped, result: result,
-                notes: notesText(session))
+                notes: notesText(session), changeCount: session.changeCount, changeLogID: session.changeLogID)
         }
     }
 

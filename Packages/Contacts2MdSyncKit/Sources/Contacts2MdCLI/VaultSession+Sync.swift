@@ -239,8 +239,10 @@ extension VaultSession {
         try prepared.tracker.commit(
             prepared.apple, postWrite: result.postWriteSnapshot.map { ($0, result.postWriteHistoryToken) },
             compared: prepared.apple.isComplete, now: environment.clock.now)
-        try prepared.state.appendSession(
-            syncSession(prepared, command: command, startedAt: startedAt, result: result))
+        let changes = SessionChange.log(result)
+        let record = syncSession(prepared, command: command, startedAt: startedAt, result: result)
+        try prepared.state.appendSession(record, changes: changes)
+        try prepared.state.rememberRenames(prepared.plan, result: result)
         let summary =
             "apple \(result.apple.count) changes, md \(result.markdown.created.count + result.markdown.updated.count) "
             + "writes, \(prepared.plan.markdown.reviews.filter(\.needsDecision).count) pending review"

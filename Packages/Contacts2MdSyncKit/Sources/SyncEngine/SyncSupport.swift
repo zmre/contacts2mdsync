@@ -109,9 +109,10 @@ extension SyncPlanner {
                 default: nil
                 }
             })
-        let export = ExportInputs(
+        var export = ExportInputs(
             snapshot: snapshot, index: index, records: records, config: config, configText: configText,
             decisions: DecisionSet(decisions), reportedProblems: try state.reportedProblemHashes(), now: now)
+        export.knownGroups = try state.loadGroups()
         var inputs = SyncInputs(
             export: export, unapplyable: try state.loadUnapplyable(), vanished: vanished,
             knownMissingNotes: knownMissing, writableContainerIDs: writable,

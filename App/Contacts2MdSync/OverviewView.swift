@@ -11,12 +11,14 @@ struct OverviewView: View {
             Form {
                 statusSection(overview)
                 if !overview.needsReview.isEmpty { needsReviewSection(overview) }
+                if !model.renamedLinks.isEmpty { RenamedLinksSection(model: model) }
                 sinceLastSyncSection(overview)
                 if let session = overview.session { sessionSection(session) }
                 totalsSection(overview)
             }
             .formStyle(.grouped)
             .navigationTitle("Overview")
+            .task { await model.refreshRenamedLinks() }
         }
     }
 

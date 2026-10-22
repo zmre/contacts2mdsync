@@ -14,6 +14,7 @@ struct BuiltNote {
 /// The record-independent tools of the build phase.
 struct BuildTools {
     let resolver: RelationResolver
+    let renamer: RelationRenamer
     let builder: ViewBuilder
     let nameResolver: NameResolver
     let materializer: MarkdownMaterializer
@@ -59,7 +60,8 @@ extension PlanningRun {
             managedTagKeys: config.managedTagKeys,
             tagText: { key in config.groups.first { ComparisonKeys.tag($0.tag) == key }?.tag ?? key })
         return BuildTools(
-            resolver: resolver, builder: builder, nameResolver: nameResolver, materializer: materializer,
+            resolver: resolver, renamer: relationRenamer(resolver), builder: builder, nameResolver: nameResolver,
+            materializer: materializer,
             writer: writePlanner(builder),
             projection: ExportProjection(keyer: planner.keyer, notesAvailable: inputs.snapshot.notesAvailable))
     }
@@ -105,27 +107,55 @@ extension PlanningRun {
     }
 
     /// Record ids by every name they answer to: note titles and aliases, and
-    /// the Apple contacts' name variants (relation names are free text).
+    /// the Apple contacts' name variants (relation names are free text);
+    /// then, at lower priority, the names they answered to before a rename
+    /// (merge bases).
     private func relationResolver() -> RelationResolver {
         var resolver = RelationResolver()
+        var known = Set<UUID>()
+        func add(_ name: String, _ id: UUID) {
+            resolver.add(name, record: id)
+            known.insert(id)
+        }
         for entry in index.contacts {
             guard let id = entry.syncID else { continue }
-            resolver.add(entry.title, record: id)
-            for alias in entry.aliasNames { resolver.add(alias, record: id) }
+            add(entry.title, id)
+            for alias in entry.aliasNames { add(alias, id) }
             resolver.setTitle(entry.title, for: id)
         }
         for candidate in candidates {
             let contactValues = values(candidate.apple)
-            resolver.add(candidate.title, record: candidate.recordID)
-            for variant in TitleGenerator.nameVariants(for: contactValues) {
-                resolver.add(variant, record: candidate.recordID)
-            }
+            add(candidate.title, candidate.recordID)
+            for variant in TitleGenerator.nameVariants(for: contactValues) { add(variant, candidate.recordID) }
             resolver.setTitle(candidate.title, for: candidate.recordID)
             resolver.setAppleName(
                 TitleGenerator.personalName(contactValues.name) ?? TitleGenerator.title(for: contactValues),
                 for: candidate.recordID)
         }
+        for id in known {
+            for key in records[id]?.base?.nameHistoryKeys ?? [] { resolver.addFormer(key: key, record: id) }
+        }
         return resolver
+    }
+
+    /// Former names of records with a contact this run: what other cards'
+    /// relations may still call them (§8 "Apple relation names on other
+    /// cards"): the base's name keys that are not among the record's current
+    /// Apple name variants. An old title kept as a plain alias still
+    /// counts as stale here, so a relation using it follows the rename.
+    private func relationRenamer(_ resolver: RelationResolver) -> RelationRenamer {
+        var stale: [UUID: Set<String>] = [:]
+        for candidate in candidates {
+            guard let base = records[candidate.recordID]?.base else { continue }
+            let contactValues = values(candidate.apple)
+            // The note title is left out: it is markdown-owned and may still
+            // be the old generated title this run regenerates.
+            let names = TitleGenerator.nameVariants(for: contactValues) + [TitleGenerator.title(for: contactValues)]
+            let appleNames = Set(names.map(ComparisonKeys.name))
+            let old = Set(base.nameHistoryKeys).subtracting(appleNames)
+            if !old.isEmpty { stale[candidate.recordID] = old }
+        }
+        return RelationRenamer(resolver: resolver, stale: stale)
     }
 
     /// Two-way merge of one bound record with an existing note.
@@ -134,12 +164,14 @@ extension PlanningRun {
     ) -> CanonicalContact {
         let id = candidate.recordID
         let contact = candidate.apple
-        let existing = MarkdownCodec.normalize(note)
+        var existing = MarkdownCodec.normalize(note)
+        existing.tags = renamingTags(existing.tags)
         let appleImage: ImageState =
             contact.imageUnavailable ? .unknown : contact.imageData.map { .hash(FileStamp.hash($0)) } ?? .none
         let noteImage = markdownImage(existing.image, notePath: candidate.path)
         let previous = notesBase(records[id]?.base)
-        let base = BaseView.of(previous)
+        var base = BaseView.of(previous)
+        base.tags = base.tags.map { Set(renamingTags(Array($0)).map(ComparisonKeys.tag)) }
         var appleView = tools.builder.apple(values(contact), tags: appleTags(contact), image: appleImage)
         // A card whose note could not be read: the body is unknown, not empty.
         if contact.notesUnknown == true { appleView.body = nil }
@@ -166,7 +198,8 @@ extension PlanningRun {
         let plannedImage = applyImage(merge.markdownImage, to: &result, candidate: candidate, current: noteImage.state)
         result.sync = SyncMetadata(id: id, status: existing.sync.status, other: existing.sync.other)
         let imageData = merge.appleImage == nil ? nil : imageBytes(noteImage.path)
-        planAppleWrites(candidate, merge: merge, imageData: imageData, writer: tools.writer)
+        planAppleWrites(
+            candidate, merge: merge, imageData: imageData, writer: tools.writer, renamer: tools.renamer)
         sync?.states[id] = RecordSyncState(
             recordID: id, cardIDs: contact.cardIDs, stampID: contact.stampIDs.first, plannedNote: result,
             existingNote: existing, markdownImage: noteImage.state, plannedImage: plannedImage,
@@ -196,12 +229,13 @@ extension PlanningRun {
     }
 
     private mutating func planAppleWrites(
-        _ candidate: Candidate, merge: MergeResult, imageData: Data?, writer: AppleWritePlanner
+        _ candidate: Candidate, merge: MergeResult, imageData: Data?, writer: AppleWritePlanner,
+        renamer: RelationRenamer
     ) {
         guard var sync else { return }
         let output = writer.plan(
             record: candidate.recordID, contact: candidate.apple, merge: merge, imageData: imageData,
-            index: &sync.unapplyable)
+            index: &sync.unapplyable, renamer: renamer)
         if !output.operations.isEmpty {
             sync.appleChanges.append(
                 AppleRecordChange(
@@ -271,6 +305,10 @@ extension PlanningRun {
         result.notes = sync.inputs.notes
         result.notesBaseline = sync.notesBaseline
         result.removedRecords = sync.removed
+        result.titleRenames = sync.renames.map {
+            TitleRename(recordID: $0.key, oldTitle: $0.value.oldTitle, newTitle: $0.value.newTitle)
+        }
+        .sorted { $0.oldTitle < $1.oldTitle }
         result.appleWritesEnabled = plan.config.appleWrites
         result.stampContacts = plan.config.stampContacts
         applyVerdicts(sync, to: &result)

@@ -71,6 +71,14 @@ public struct RecordBase: Codable, Hashable, Sendable {
     public var imageHash: String?
     /// The title generated from Apple's name at the last sync (title rule).
     public var generatedTitle: String?
+    /// Name keys (folded, as in `fields["name"]`) the record answered to
+    /// before a rename, oldest first, at most `RecordBase.formerNameLimit`.
+    /// Relation names on other contacts' cards that still use one of them
+    /// resolve to this record and are updated to its current name (§8).
+    public var formerNames: [String]?
+
+    /// How many former names a base keeps.
+    public static let formerNameLimit = 8
 
     /// Creates an (M2-style) base.
     public init(fields: [String: [String]] = [:]) { self.fields = fields }
@@ -85,6 +93,15 @@ public struct RecordBase: Codable, Hashable, Sendable {
 
     /// `true` for an M3 merge base.
     public var isMergeBase: Bool { (version ?? 0) >= 2 }
+
+    /// Every name key this record answered to at the last sync or before
+    /// (the personal name and generated title keys, plus former names).
+    public var nameHistoryKeys: [String] {
+        var keys = (formerNames ?? []) + keys("name")
+        if let generatedTitle { keys.append(ComparisonKeys.name(generatedTitle)) }
+        var seen = Set<String>()
+        return keys.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
 }
 
 /// Field-hash helper shared with the state store.

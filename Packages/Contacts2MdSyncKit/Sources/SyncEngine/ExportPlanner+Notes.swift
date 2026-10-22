@@ -10,12 +10,70 @@ extension PlanningRun {
 
     mutating func updateGroups() {
         let original = plan.config
+        followGroupChanges()
         let groups = inputs.snapshot.groups.sorted { $0.name < $1.name }
         for group in groups where plan.config.tag(forGroup: group.name) == nil {
             plan.config.groups.append(GroupTag(group: group.name, tag: VaultConfig.defaultTag(forGroup: group.name)))
         }
         if plan.config != original || inputs.configText == nil {
             plan.configText = plan.config.render(patching: inputs.configText)
+        }
+    }
+
+    /// Apple group renames and deletions since this device's last run, by
+    /// CN group id (architecture §8). A rename moves the `groups:` entry to
+    /// the new name; a tag that was the default for the old name becomes the
+    /// default for the new one (a custom tag is kept), and synced notes get
+    /// the new tag. A deleted group's entry is removed, so its tag is no
+    /// longer managed: it stays in the notes and nothing is removed from them.
+    mutating func followGroupChanges() {
+        guard !inputs.knownGroups.isEmpty else { return }
+        let current = Dictionary(inputs.snapshot.groups.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let currentNames = Set(inputs.snapshot.groups.map(\.name))
+        var handled = Set<String>()
+        for known in inputs.knownGroups.sorted(by: { ($0.name, $0.groupID) < ($1.name, $1.groupID) }) {
+            guard !currentNames.contains(known.name), !handled.contains(known.name),
+                let index = plan.config.groups.firstIndex(where: { $0.group == known.name })
+            else { continue }
+            let entry = plan.config.groups[index]
+            if let group = current[known.groupID] {
+                handled.insert(known.name)
+                renameGroup(entry, at: index, to: group.name)
+            } else if !inputs.knownGroups.contains(where: { $0.name == known.name && current[$0.groupID] != nil }) {
+                handled.insert(known.name)
+                plan.config.groups.remove(at: index)
+                plan.groupChanges.append(GroupChange(kind: .deleted, group: known.name, tag: entry.tag))
+            }
+        }
+    }
+
+    private mutating func renameGroup(_ entry: GroupTag, at index: Int, to name: String) {
+        let oldKey = ComparisonKeys.tag(entry.tag)
+        let sharedTag = plan.config.groups.indices.contains {
+            $0 != index && ComparisonKeys.tag(plan.config.groups[$0].tag) == oldKey
+        }
+        let newTag: String
+        if let mapped = plan.config.tag(forGroup: name) {
+            // The new name is mapped already (another device followed the rename first).
+            newTag = mapped
+            plan.config.groups.remove(at: index)
+        } else {
+            newTag =
+                oldKey == VaultConfig.defaultTag(forGroup: entry.group) && !sharedTag
+                ? VaultConfig.defaultTag(forGroup: name) : entry.tag
+            plan.config.groups[index] = GroupTag(group: name, tag: newTag)
+        }
+        if ComparisonKeys.tag(newTag) != oldKey, !sharedTag { tagRenames[oldKey] = newTag }
+        plan.groupChanges.append(
+            GroupChange(kind: .renamed, group: entry.group, newGroup: name, tag: entry.tag, newTag: newTag))
+    }
+
+    /// Tags renamed with their Apple group (§8), in place, without repeats.
+    func renamingTags(_ tags: [String]) -> [String] {
+        guard !tagRenames.isEmpty else { return tags }
+        var seen = Set<String>()
+        return tags.map { tagRenames[ComparisonKeys.tag($0)] ?? $0 }.filter {
+            seen.insert(ComparisonKeys.tag($0)).inserted
         }
     }
 

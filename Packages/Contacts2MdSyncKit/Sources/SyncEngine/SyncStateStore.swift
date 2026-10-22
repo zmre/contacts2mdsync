@@ -77,6 +77,11 @@ public struct SessionRecord: Codable, Hashable, Sendable {
     /// Per-side counts of a two-way sync (M5; `nil` in older records and
     /// for exports, where `created`/`updated` are markdown counts).
     public var sides: SessionSides?
+    /// Changes this run made (`nil`: none recorded, dry runs, older runs);
+    /// the change log keeps at most `SessionChange.perSessionLimit` of them.
+    public var changeCount: Int?
+    /// The key of this run's change log (`SyncStateStore.sessionChanges(logID:)`).
+    public var changeLogID: String?
 
     /// Creates a session record.
     public init(
@@ -184,9 +189,49 @@ public protocol SyncStateStore: RecordMapStore {
     /// Writes cards refused (M3 sync).
     func loadUnapplyable() throws -> [UnapplyableEntry]
     func saveUnapplyable(_ entries: [UnapplyableEntry]) throws
+    /// Stores a run's change log under `logID` (`SessionRecord.changeLogID`;
+    /// at most `SessionChange.perSessionLimit` entries; the logs of the
+    /// `SessionChange.sessionLimit` most recently stored runs are kept).
+    func appendSessionChanges(_ changes: [SessionChange], logID: String) throws
+    /// A run's change log (empty when none is kept).
+    func sessionChanges(logID: String) throws -> [SessionChange]
+    /// Reset Sync State: forgets records, merge bases, the file cache, the
+    /// review queue, groups, reported problems, unapplyable writes and every
+    /// metadata key except `keepingMetadata`. Keeps sessions, change logs
+    /// and the decision mirror (the decision log lives in the vault).
+    func resetSyncState(keepingMetadata: Set<String>) throws
+    /// Writes a consistent copy of the state to `url` (before a reset).
+    func backup(to url: URL) throws
 }
 
 extension SyncStateStore {
+    /// Appends a session that changed `changes` with its change log.
+    public func appendSession(_ session: SessionRecord, changes: [SessionChange]) throws {
+        var session = session
+        session.changeCount = changes.count
+        if !changes.isEmpty {
+            let id = UUID().uuidString.lowercased()
+            session.changeLogID = id
+            try appendSessionChanges(changes, logID: id)
+        }
+        try appendSession(session)
+    }
+
+    /// The change log of `session` (empty when it kept none).
+    public func sessionChanges(of session: SessionRecord) throws -> [SessionChange] {
+        guard let id = session.changeLogID else { return [] }
+        return try sessionChanges(logID: id)
+    }
+
+    /// Rescan Everything: forgets the file cache, the image hashes and the
+    /// Apple mirror, so the next run re-reads every note and takes a full
+    /// Contacts snapshot. Records, merge bases and the review queue stay.
+    public func clearCaches() throws {
+        try saveFileCache([:])
+        try saveImageHashes([:])
+        try setMetadata(AppleChangeTracker.cacheKey, nil)
+    }
+
     /// Records whose Apple contact went missing, with when that was first
     /// seen (the Apple delete rail's two-snapshot rule), in `meta`.
     public func loadVanished() throws -> [UUID: Date] {
@@ -232,6 +277,8 @@ public final class InMemorySyncStateStore: SyncStateStore {
         var sessions: [SessionRecord] = []
         var metadata: [String: Data] = [:]
         var unapplyable: [UnapplyableEntry] = []
+        var changes: [String: [SessionChange]] = [:]
+        var changeOrder: [String] = []
         var saves = 0
     }
 
@@ -284,5 +331,38 @@ public final class InMemorySyncStateStore: SyncStateStore {
 
     public func saveUnapplyable(_ entries: [UnapplyableEntry]) throws {
         state.withLock { $0.unapplyable = entries }
+    }
+
+    public func appendSessionChanges(_ changes: [SessionChange], logID: String) throws {
+        guard !changes.isEmpty else { return }
+        state.withLock { state in
+            state.changes[logID] = Array(changes.prefix(SessionChange.perSessionLimit))
+            state.changeOrder = state.changeOrder.filter { $0 != logID } + [logID]
+            for key in state.changeOrder.dropLast(SessionChange.sessionLimit) { state.changes[key] = nil }
+            state.changeOrder = Array(state.changeOrder.suffix(SessionChange.sessionLimit))
+        }
+    }
+
+    public func sessionChanges(logID: String) throws -> [SessionChange] {
+        state.withLock { $0.changes[logID] ?? [] }
+    }
+
+    public func resetSyncState(keepingMetadata keys: Set<String>) throws {
+        state.withLock { state in
+            state.records = RecordMap()
+            state.fileCache = [:]
+            state.pending = PendingReviews()
+            state.groups = []
+            state.problems = [:]
+            state.unapplyable = []
+            state.metadata = state.metadata.filter { keys.contains($0.key) }
+        }
+    }
+
+    /// Writes the records and metadata as JSON (in-memory stores have no file).
+    public func backup(to url: URL) throws {
+        let (records, metadata) = state.withLock { ($0.records.records.count, $0.metadata.keys.sorted()) }
+        let summary = ["records": "\(records)", "metadata": metadata.joined(separator: ",")]
+        try JSONEncoder().encode(summary).write(to: url, options: .withoutOverwriting)
     }
 }

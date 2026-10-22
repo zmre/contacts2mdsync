@@ -15,6 +15,9 @@ public struct ExportInputs: Sendable {
     public var reportedProblems: Set<String>
     /// "Now", for card first-seen dates.
     public var now: Date
+    /// Apple groups as this device saw them after its last executed run (CN
+    /// id → name): how Apple group renames and deletions are recognised (§8).
+    public var knownGroups: [GroupBinding] = []
 
     /// Creates inputs.
     public init(
@@ -147,6 +150,8 @@ struct PlanningRun {
     var mergedAway: [UUID: MergedRecord] = [:]
     /// Two-way sync state (`nil` for a one-way export).
     var sync: SyncRun?
+    /// Managed tag key → the tag it is renamed to (an Apple group rename, §8).
+    var tagRenames: [String: String] = [:]
 
     var index: VaultIndex { inputs.index }
     var records: RecordMap { inputs.records }

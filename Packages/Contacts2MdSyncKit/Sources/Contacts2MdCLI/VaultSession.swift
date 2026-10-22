@@ -138,11 +138,12 @@ public struct VaultSession: Sendable {
                 restoreMissing: request.restoreMissing, autoAdopt: request.autoAdopt,
                 allowUndownloaded: request.allowUndownloaded))
         let snapshot = try store.snapshot()
-        var plan = try planner.plan(
-            ExportInputs(
-                snapshot: snapshot, index: index, records: try state.load(), config: config,
-                configText: loaded?.text, decisions: DecisionSet(decisions),
-                reportedProblems: try state.reportedProblemHashes(), now: environment.clock.now))
+        var inputs = ExportInputs(
+            snapshot: snapshot, index: index, records: try state.load(), config: config,
+            configText: loaded?.text, decisions: DecisionSet(decisions),
+            reportedProblems: try state.reportedProblemHashes(), now: environment.clock.now)
+        inputs.knownGroups = try state.loadGroups()
+        var plan = try planner.plan(inputs)
         // Command-line options changed the config even if groups did not.
         if let loaded, config != loaded.config, plan.configText == nil {
             plan.configText = plan.config.render(patching: loaded.text)
@@ -252,8 +253,13 @@ public struct VaultSession: Sendable {
                 GroupBinding(
                     groupID: $0.id, containerID: $0.containerID, name: $0.name, tag: plan.config.tag(forGroup: $0.name))
             })
-        try prepared.state.appendSession(
-            session(prepared, command: command, startedAt: startedAt, result: result, stamped: outcome.stamped))
+        let changes =
+            SessionChange.log(result)
+            + outcome.stampedRequests.map {
+                SessionChange(side: .apple, verb: "stamped", title: $0.title, fields: ["stamp"], recordID: $0.recordID)
+            }
+        let record = session(prepared, command: command, startedAt: startedAt, result: result, stamped: outcome.stamped)
+        try prepared.state.appendSession(record, changes: changes)
         // Keep the lease `beginExport` took fresh after a long export (a no-op when it is not ours).
         if let device = try? environment.device() {
             _ = try? LeaseManager(fs: prepared.fs, device: device, clock: environment.clock).heartbeat()

@@ -1,3 +1,4 @@
+import Contacts2MdCLI
 import SwiftUI
 
 /// The inspector (⌥⌘I): card summary, file, sync id, accounts, and
@@ -34,13 +35,24 @@ struct InspectorView: View {
                         }
                     }
                 }
-                Section {
-                    Button("Open in Contacts") { model.openInContacts(cardIDs: item.cardIDs) }
-                        .disabled(item.cardIDs.isEmpty)
-                    Button("Reveal in Finder") {
-                        if let path = item.path { model.revealInFinder(path: path) }
+                if let changes = item.changes {
+                    Section("Changes") {
+                        if changes.isEmpty {
+                            Text("Nothing changed.").foregroundStyle(.secondary)
+                        }
+                        ForEach(changes) { change in
+                            ChangeRow(model: model, change: change)
+                        }
                     }
-                    .disabled(item.path == nil)
+                } else {
+                    Section {
+                        Button("Open in Contacts") { model.openInContacts(cardIDs: item.cardIDs) }
+                            .disabled(item.cardIDs.isEmpty)
+                        Button("Reveal in Finder") {
+                            if let path = item.path { model.revealInFinder(path: path) }
+                        }
+                        .disabled(item.path == nil)
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -48,6 +60,31 @@ struct InspectorView: View {
             ContentUnavailableView(
                 "No Selection", systemImage: "sidebar.trailing",
                 description: Text("Select a contact, file or card to see its details."))
+        }
+    }
+}
+
+/// One change of a run: what changed where, with Reveal / Open.
+private struct ChangeRow: View {
+    let model: AppModel
+    let change: UIActivityChange
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(change.text).textSelection(.enabled)
+            HStack {
+                Text(change.side).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if let path = change.path {
+                    Button("Reveal") { model.revealInFinder(path: path) }
+                        .help("Reveal in Finder")
+                }
+                if !change.cardIDs.isEmpty {
+                    Button("Open") { model.openInContacts(cardIDs: change.cardIDs) }
+                        .help("Open in Contacts")
+                }
+            }
+            .controlSize(.small)
         }
     }
 }

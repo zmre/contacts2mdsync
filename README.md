@@ -76,20 +76,29 @@ Releases are Developer ID signed and notarized by `scripts/release.sh`, locally 
 The same commands run from the app binary (`Contacts2MdSync.app/Contents/MacOS/Contacts2MdSync <command>`, or `contacts2md` from the nix package, which execs it) or, for development, `swift run contacts2md …`. Run through the app binary, they use the app's Contacts permission and the notes folder chosen in the app, so `--root` can be left out.
 
 ```sh
-contacts2md status                          # vault, notes, Contacts access, last export, pending reviews
-contacts2md plan                            # dry run: what export would write
-contacts2md export --yes                    # write notes (existing notes are backed up first)
-contacts2md export --yes --backup           # … and save a vCard backup of all contacts
-contacts2md export --yes --stamp            # … and stamp contacts with their sync id (the only Contacts write)
+contacts2md status                          # vault, switches, notes, lease/devices, last sync, pending reviews
+contacts2md export --yes                    # first export on this Mac (one-way; existing notes backed up first)
+contacts2md plan                            # dry run of a two-way sync (both sides, conflicts, held changes)
+contacts2md sync                            # two-way sync; decisions needed are skipped and printed as warnings
+contacts2md sync --full                     # … ignoring change history (full Contacts read)
+contacts2md watch                           # live sync in the foreground until Ctrl-C
+contacts2md config --apple-writes enabled   # allow writes to Apple Contacts (default: disabled)
+contacts2md config --stamp-contacts true    # add sync ids to contacts (only needed for several Macs)
+contacts2md config --notes on               # sync Contacts notes via Contacts.app (grant permission in the app first)
 contacts2md review list                     # items that need a decision, with ids and choices
-contacts2md review decide dup-1a2b3c4d5e distinct
-contacts2md review adopt-all                # adopt every pending one-to-one note match
+contacts2md review decide <dup-id> --group 1,2 --group 3 --exclude 4
+contacts2md review decide <conflict-id> markdown
+contacts2md lease status                    # which Mac is syncing this folder
+contacts2md rescan                          # forget caches; next run re-reads everything
+contacts2md reset-state --yes               # back up and clear this Mac's sync state (decisions kept)
 contacts2md plan --root ~/Notes/Contacts    # any command: use another folder
 ```
 
+Exit codes for `sync`: 0 clean, 1 items await review, 2 Apple writes held by the change limit (`--max-apple-changes N`), 3 not configured / no permission, 4 safety breaker tripped, 5 error. Add `--json` for machine-readable output.
+
 - Existing hand-written `type: person|organization` notes are matched to contacts. On the first export, unambiguous email/phone + name matches are adopted (the note gains a `c2mdsync.id` and Apple's data; your text, title, filename and extra values stay). Anything less certain is listed for review and blocks creating a duplicate.
 - Notes can be moved into any subfolder; they are updated in place.
-- Possible duplicates (e.g. the same person in iCloud and Google, not linked) get one note and a `WARNING duplicate` line until you decide.
+- Possible duplicates (same name, or a shared email with matching names — never a shared phone alone) get one note and a `WARNING duplicate` line until you decide which cards are the same person, which are different, and which not to sync.
 - Decisions are stored in the notes folder (`.c2mdsync/devices/<device>/decisions.jsonl`) so every Mac sees them.
 
 Exit codes: 0 clean, 1 done but items await review, 2 Apple writes held back by the change limit (M3), 3 not configured, folder or Contacts permission missing, 4 safety breaker tripped (M3), 5 error, 64 bad command line. Details are in [docs/architecture.md §15](docs/architecture.md#15-headless-cli-cron--launchd).

@@ -24,7 +24,7 @@ public enum CLIExitCode: Int32, Sendable {
 public enum Contacts2MdCLI {
     /// First arguments that select the CLI in the app binary.
     public static let subcommandNames: Set<String> = [
-        "status", "plan", "sync", "watch", "export", "review", "config", "lease", "help",
+        "status", "plan", "sync", "watch", "export", "review", "config", "lease", "rescan", "reset-state", "help",
     ]
 
     /// `true` when `arguments` (without the executable path) ask for the CLI.
@@ -79,7 +79,7 @@ struct RootCommand: ParsableCommand {
             """,
         subcommands: [
             StatusCommand.self, PlanCommand.self, SyncCommand.self, WatchCommand.self, ExportCommand.self,
-            ReviewCommand.self, ConfigCommand.self, LeaseCommand.self,
+            ReviewCommand.self, ConfigCommand.self, LeaseCommand.self, RescanCommand.self, ResetStateCommand.self,
         ]
     )
 }

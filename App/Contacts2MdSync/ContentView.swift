@@ -26,7 +26,7 @@ struct ContentView: View {
                 }
                 .frame(minWidth: 560, minHeight: 420)
             } else {
-                SetupView(model: model.setup)
+                SetupView(model: model.setup, live: model.live)
                     .frame(minWidth: 560, minHeight: 520)
             }
         }

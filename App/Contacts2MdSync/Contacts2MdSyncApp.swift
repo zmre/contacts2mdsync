@@ -14,6 +14,10 @@ struct Contacts2MdSyncApp: App {
             ContentView(model: model)
         }
         .commands {
+            CommandGroup(after: .importExport) {
+                Button("Export Log…") { Task { await model.exportLog() } }
+                    .disabled(!model.isConfigured)
+            }
             CommandGroup(after: .toolbar) {
                 Button(model.isInspectorPresented ? "Hide Inspector" : "Show Inspector") {
                     model.isInspectorPresented.toggle()
@@ -51,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        DockIconController.shared.start()
         Task { await model.launch() }
     }
 
@@ -74,9 +79,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 enum AppPreferences {
     /// Settings ▸ General ▸ Show in menu bar (default on).
     static let showInMenuBar = "showInMenuBar"
+    /// Settings ▸ General ▸ Hide Dock icon when the window is closed (default
+    /// on; applies while the menu bar icon is shown).
+    static let hideDockIconWhenClosed = "hideDockIconWhenClosed"
     static let mainWindowID = "main"
 
     static var isMenuBarShown: Bool {
         UserDefaults.standard.object(forKey: showInMenuBar) as? Bool ?? true
+    }
+
+    static var hidesDockIconWhenClosed: Bool {
+        UserDefaults.standard.object(forKey: hideDockIconWhenClosed) as? Bool ?? true
     }
 }

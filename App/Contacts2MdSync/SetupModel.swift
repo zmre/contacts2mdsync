@@ -8,102 +8,6 @@ import Observation
 import SyncEngine
 import VaultIndex
 
-/// Counts shown in the read-only preview (onboarding step 3).
-struct PreviewSummary: Sendable, Equatable {
-    var contactsRead: Int
-    /// Card counts per account (`iCloud 1,031`, `Google 217`, …).
-    var accounts: [AccountCount]
-    var groups: Int
-    var matched: Int
-    var toAdopt: Int
-    var toCreate: Int
-    var markdownOnly: Int
-    var duplicates: Int
-    var possibleMatches: Int
-    var otherReviews: Int
-    var firstExport: Bool
-
-    init(_ prepared: PreparedExport) {
-        let plan = prepared.plan
-        contactsRead = plan.appleContactCount
-        let kinds = prepared.snapshot.contacts.flatMap(\.cards).map(\.accountKind.displayName)
-        accounts = Dictionary(grouping: kinds, by: { $0 }).map { AccountCount(name: $0.key, count: $0.value.count) }
-            .sorted { ($1.count, $0.name) < ($0.count, $1.name) }
-        groups = plan.config.groups.count
-        matched = plan.unchanged + plan.updates.filter { $0.kind == .update || $0.kind == .pathFixup }.count
-        toAdopt = plan.adoptions.count
-        toCreate = plan.creates.count
-        markdownOnly = plan.markdownOnly
-        var duplicates = 0
-        var matches = 0
-        for review in plan.reviews {
-            switch review {
-            case .duplicateCluster, .mergeRecords: duplicates += 1
-            case .possibleMatch: matches += 1
-            default: break
-            }
-        }
-        self.duplicates = duplicates
-        possibleMatches = matches
-        otherReviews = plan.reviews.count - duplicates - matches
-        firstExport = prepared.firstExport
-    }
-}
-
-/// Whether the Contacts notes field is readable (needs an Apple entitlement).
-enum NotesAccess: Sendable {
-    case checking
-    case available
-    case unavailable
-    case unknown
-
-    var description: String {
-        switch self {
-        case .checking: "Checking…"
-        case .available: "Available"
-        case .unavailable: "Unavailable"
-        case .unknown: "Unknown"
-        }
-    }
-}
-
-/// Cards in one account kind.
-struct AccountCount: Sendable, Equatable, Hashable {
-    var name: String
-    var count: Int
-}
-
-/// What an export run did (onboarding step 5).
-struct OutcomeSummary: Sendable, Equatable {
-    var created: Int
-    var adopted: Int
-    var updated: Int
-    var contactsBackup: String?
-    var notesBackup: String?
-    var failures: [String]
-    var pendingReview: Int
-
-    init(_ outcome: ExportOutcome, plan: ExportPlan) {
-        created = outcome.result.created.count
-        adopted = outcome.result.updated.filter { $0.kind == .adopt }.count
-        updated = outcome.result.updated.count - adopted
-        contactsBackup = outcome.backup?.url.path(percentEncoded: false)
-        notesBackup = outcome.result.noteBackup?.path(percentEncoded: false)
-        failures = outcome.result.failures.map { "\($0.path): \($0.message)" }
-        pendingReview = plan.reviews.count
-    }
-}
-
-/// Result of a quick folder scan (onboarding step 2).
-struct FolderScan: Sendable, Equatable {
-    var markdownFiles: Int
-    var contactNotes: Int
-    var configured: Bool
-    var defaultFolder: String?
-    /// This device's state for the vault (configured vaults only).
-    var status: StoredStatus?
-}
-
 /// Drives onboarding: Contacts access, notes folder (security-scoped
 /// bookmark), read-only preview, and the first export (never stamps).
 ///
@@ -118,6 +22,12 @@ final class SetupModel {
     private(set) var folderError: String?
     private(set) var scan: FolderScan?
     private(set) var preview: PreviewSummary?
+    /// Step 4: the preview's duplicate clusters (cluster partition).
+    private(set) var duplicates: [UIDuplicateGroup] = []
+    /// Clusters skipped one by one, or all of them (Skip for Now): each
+    /// yields one note until answered in Review.
+    private(set) var skippedDuplicates: Set<String> = []
+    private(set) var duplicatesSkipped = false
     private(set) var outcome: OutcomeSummary?
     private(set) var isBusy = false
     private(set) var errorMessage: String?
@@ -126,6 +36,8 @@ final class SetupModel {
     /// The saved folder could not be opened (moved, deleted, stale bookmark).
     private(set) var folderUnavailable: String?
 
+    /// The preview's review items (answers are recorded against them).
+    @ObservationIgnored private var previewItems: [ReviewItem] = []
     @ObservationIgnored private var resolvedRoot: ResolvedRoot?
     @ObservationIgnored private let bookmark = RootBookmark(directory: CLIEnvironment.live().stateDirectory)
 
@@ -133,7 +45,15 @@ final class SetupModel {
     var canRequestAccess: Bool { accessStatus == .notDetermined }
     var isConfigured: Bool { scan?.configured == true || outcome != nil }
     var canPreview: Bool { isAuthorized && rootURL != nil && folderError == nil && !isBusy }
-    var canExport: Bool { canPreview && preview != nil }
+    var canExport: Bool { canPreview && preview != nil && duplicatesSettled }
+
+    /// Clusters still waiting for an answer in step 4.
+    var openDuplicates: [UIDuplicateGroup] {
+        duplicatesSkipped ? [] : duplicates.filter { !skippedDuplicates.contains($0.id) }
+    }
+
+    /// Step 4 is done: no clusters, every one answered or skipped.
+    var duplicatesSettled: Bool { openDuplicates.isEmpty }
 
     /// The binary that also runs the command line.
     var cliPath: String { Bundle.main.executablePath ?? "Contacts2MdSync.app/Contents/MacOS/Contacts2MdSync" }
@@ -212,7 +132,7 @@ final class SetupModel {
         } catch {
             errorMessage = "Could not remember this folder: \(error.localizedDescription)"
         }
-        preview = nil
+        clearPreview()
         outcome = nil
         await rescan()
     }
@@ -227,7 +147,7 @@ final class SetupModel {
             settings.defaultFolder = folder
             try bookmark.saveSettings(settings)
             defaultFolder = folder
-            preview = nil
+            clearPreview()
         } catch {
             folderError = "Use a folder path inside the notes root, like Inbox or People/New."
         }
@@ -258,12 +178,64 @@ final class SetupModel {
         isBusy = true
         defer { isBusy = false }
         do {
-            preview = try await Self.preview(root: rootURL, defaultFolder: defaultFolder)
+            apply(try await Self.preview(root: rootURL, defaultFolder: defaultFolder))
             errorMessage = nil
         } catch {
             preview = nil
+            duplicates = []
+            previewItems = []
             errorMessage = String(describing: error)
         }
+    }
+
+    private func clearPreview() {
+        preview = nil
+        duplicates = []
+        previewItems = []
+        skippedDuplicates = []
+        duplicatesSkipped = false
+    }
+
+    private func apply(_ result: PreviewResult) {
+        preview = result.summary
+        duplicates = result.duplicates
+        previewItems = result.items
+        skippedDuplicates.formIntersection(result.duplicates.map(\.id))
+    }
+
+    // MARK: - Step 4: duplicates
+
+    /// Records a cluster answer (the folder may have no config yet), then
+    /// previews again so the answer shows in the counts.
+    func recordDuplicate(_ answers: [UIReviewDecision]) async -> Bool {
+        guard let rootURL else { return false }
+        isBusy = true
+        defer { isBusy = false }
+        do {
+            try await Self.record(answers, items: previewItems, root: rootURL)
+            apply(try await Self.preview(root: rootURL, defaultFolder: defaultFolder))
+            errorMessage = nil
+            return true
+        } catch {
+            errorMessage = String(describing: error)
+            return false
+        }
+    }
+
+    /// Skips one cluster: it yields one note and waits in Review.
+    func skipDuplicate(_ id: String) { skippedDuplicates.insert(id) }
+
+    /// Skip for Now: every cluster yields one note and waits in Review.
+    func skipAllDuplicates() { duplicatesSkipped = true }
+
+    /// Opens cards in Contacts (Link Selected Cards there, then Refresh Preview).
+    func openInContacts(_ cardIDs: [String]) {
+        for url in UIFormat.contactsURLs(cardIDs: cardIDs) { NSWorkspace.shared.open(url) }
+    }
+
+    func revealInFinder(_ path: String) {
+        guard let rootURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([rootURL.appending(path: path)])
     }
 
     // MARK: - Step 5: export
@@ -276,7 +248,7 @@ final class SetupModel {
             outcome = try await Self.export(root: rootURL, defaultFolder: defaultFolder)
             errorMessage = nil
             await rescan()
-            preview = try? await Self.preview(root: rootURL, defaultFolder: defaultFolder)
+            if let result = try? await Self.preview(root: rootURL, defaultFolder: defaultFolder) { apply(result) }
         } catch {
             errorMessage = String(describing: error)
         }
@@ -311,12 +283,26 @@ final class SetupModel {
             configured: config != nil, defaultFolder: config?.defaultFolder, status: status)
     }
 
+    /// What a preview found.
+    struct PreviewResult: Sendable {
+        var summary: PreviewSummary
+        var duplicates: [UIDuplicateGroup]
+        var items: [ReviewItem]
+    }
+
     @concurrent
-    nonisolated private static func preview(root: URL, defaultFolder: String) async throws -> PreviewSummary {
+    nonisolated private static func preview(root: URL, defaultFolder: String) async throws -> PreviewResult {
         let session = VaultSession(root: root, environment: environment())
         let prepared = try session.prepare(ExportRequest(defaultFolder: defaultFolder), forWriting: false)
         try session.recordPlan(prepared, command: "plan", startedAt: Date())
-        return PreviewSummary(prepared)
+        return PreviewResult(
+            summary: PreviewSummary(prepared), duplicates: UIOnboardingDuplicates.groups(prepared, now: Date()),
+            items: prepared.plan.reviews)
+    }
+
+    @concurrent
+    nonisolated private static func record(_ answers: [UIReviewDecision], items: [ReviewItem], root: URL) async throws {
+        try UIVaultReader(root: root, environment: environment()).recordPreview(answers, items: items)
     }
 
     /// Re-plans for writing, takes the local lock and the vault lease, and

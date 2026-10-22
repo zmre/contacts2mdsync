@@ -1,4 +1,4 @@
-internal import Foundation
+public import Foundation
 internal import GRDB
 public import SyncEngine
 public import VaultIndex
@@ -218,5 +218,65 @@ extension GRDBSyncStateStore {
             try String.fetchAll(database, sql: "SELECT json FROM sessions ORDER BY id DESC LIMIT ?", arguments: [limit])
                 .compactMap { try? decoder.decode(SessionRecord.self, from: Data($0.utf8)) }
         }
+    }
+
+    // MARK: - Change log
+
+    public func appendSessionChanges(_ changes: [SessionChange], logID: String) throws {
+        guard !changes.isEmpty else { return }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        try queue.write { database in
+            try database.execute(sql: "DELETE FROM session_changes WHERE session_key = ?", arguments: [logID])
+            for (position, change) in changes.prefix(SessionChange.perSessionLimit).enumerated() {
+                try database.execute(
+                    sql: "INSERT INTO session_changes (session_key, position, json) VALUES (?, ?, ?)",
+                    arguments: [logID, position, utf8(try encoder.encode(change))])
+            }
+            // Keep the logs of the most recently stored runs.
+            try database.execute(
+                sql: """
+                    DELETE FROM session_changes WHERE session_key NOT IN
+                    (SELECT session_key FROM session_changes GROUP BY session_key ORDER BY MAX(rowid) DESC LIMIT ?)
+                    """,
+                arguments: [SessionChange.sessionLimit])
+        }
+    }
+
+    public func sessionChanges(logID: String) throws -> [SessionChange] {
+        let decoder = JSONDecoder()
+        return try queue.read { database in
+            try String.fetchAll(
+                database, sql: "SELECT json FROM session_changes WHERE session_key = ? ORDER BY position",
+                arguments: [logID]
+            )
+            .compactMap { try? decoder.decode(SessionChange.self, from: Data($0.utf8)) }
+        }
+    }
+
+    // MARK: - Reset
+
+    public func resetSyncState(keepingMetadata keys: Set<String>) throws {
+        try queue.write { database in
+            for table in [
+                "record_cards", "field_hashes", "records", "file_cache", "groups", "pending", "reported_problems",
+                "unapplyable",
+            ] {
+                try database.execute(sql: "DELETE FROM \(table)")
+            }
+            let kept = try String.fetchAll(database, sql: "SELECT key FROM meta").filter { !keys.contains($0) }
+            for key in kept { try database.execute(sql: "DELETE FROM meta WHERE key = ?", arguments: [key]) }
+        }
+    }
+
+    /// A consistent copy through SQLite's online backup.
+    public func backup(to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard !FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else {
+            throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: url.path(percentEncoded: false)])
+        }
+        let destination = try DatabaseQueue(path: url.path(percentEncoded: false))
+        try queue.backup(to: destination)
+        try destination.close()
     }
 }

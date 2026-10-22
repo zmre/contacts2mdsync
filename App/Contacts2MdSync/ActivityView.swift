@@ -4,10 +4,11 @@ import SwiftUI
 /// Activity (docs/ui.md §8): runs from this Mac's state (syncs and exports
 /// from the app, live sync — Live, Launch, Wake, Sweep, Rescan — the command
 /// line and schedules; previews on request), plus contact notes that could
-/// not be read.
+/// not be read. Selecting a run lists its changes in the inspector.
 struct ActivityView: View {
     let model: AppModel
     @State private var showPreviews = false
+    @State private var selectedID: UIActivityRow.ID?
 
     private var rows: [UIActivityRow] { model.activityRows.filter { showPreviews || !$0.isPreview } }
     private var issues: [UIProblemNote] { model.queues?.invalidNotes ?? [] }
@@ -33,11 +34,19 @@ struct ActivityView: View {
                     .toggleStyle(.checkbox)
                     .help("Include dry runs (checks that wrote nothing)")
             }
+            ToolbarItem {
+                Button("Export Log…", systemImage: "square.and.arrow.up") { Task { await model.exportLog() } }
+                    .help("Save this Mac's activity, with each run's changes, as text or JSON")
+            }
+        }
+        .onChange(of: selectedID) {
+            guard let row = rows.first(where: { $0.id == selectedID }) else { return }
+            Task { await model.inspectActivity(row) }
         }
     }
 
     private var table: some View {
-        Table(rows) {
+        Table(rows, selection: $selectedID) {
             TableColumn("Time") { row in
                 Text(UIFormat.relativeDay(row.startedAt)).monospacedDigit()
                     .foregroundStyle(row.isPreview ? .secondary : .primary)

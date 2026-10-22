@@ -37,7 +37,8 @@ struct AppleWritePlanner {
     }
 
     func plan(
-        record: UUID, contact: AppleContact, merge: MergeResult, imageData: Data?, index: inout UnapplyableIndex
+        record: UUID, contact: AppleContact, merge: MergeResult, imageData: Data?, index: inout UnapplyableIndex,
+        renamer: RelationRenamer = .none
     ) -> Output {
         guard let target = target(of: contact) else {
             var output = Output()
@@ -49,6 +50,7 @@ struct AppleWritePlanner {
         for (field, slots) in merge.lists {
             for slot in slots where slot.changesApple { writes.apply(slot, field: field) }
         }
+        writes.renameRelations(renamer)
         writes.body(merge)
         writes.image(merge, data: imageData)
         writes.groups(merge)
@@ -238,6 +240,28 @@ private struct RecordWrites {
             else { continue }
             list.append(AppleListElement(label: element.label, value: element.value))
             lists[target.id, default: [:]][field] = list
+        }
+    }
+
+    /// Relation names that still use another record's old name (§8): the
+    /// name is replaced in place on every writable card holding it (same
+    /// element, same key, so the merge sees no change). A card that refused
+    /// the new name before is not asked again.
+    mutating func renameRelations(_ renamer: RelationRenamer) {
+        for card in writable {
+            var list = elements(.relationships, card: card.id)
+            var changed = false
+            for position in list.indices {
+                guard case .relation(let name, let type, let label) = list[position].value,
+                    let newName = renamer.newName(for: name),
+                    !blocks(
+                        card.id, "relationships|\(key(list[position], .relationships))",
+                        "=\(ComparisonKeys.name(newName))")
+                else { continue }
+                list[position].value = .relation(name: newName, type: type, label: label)
+                changed = true
+            }
+            if changed { lists[card.id, default: [:]][.relationships] = list }
         }
     }
 

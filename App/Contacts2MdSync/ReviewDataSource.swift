@@ -44,6 +44,20 @@ protocol ReviewDataSource: Sendable {
     func setVaultOptions(_ options: UIVaultOptions, root: URL) async throws
     /// Gives this Mac's vault lease up (live sync not running); the lease afterwards.
     func releaseLease(root: URL) async throws -> LeaseStatus
+    /// Rescan Everything: forgets this Mac's caches (the next run reads everything).
+    func rescanEverything(root: URL) async throws -> RescanOutcome
+    /// Reset Sync State: backup, then forgets this Mac's sync state for the vault.
+    func resetSyncState(root: URL) async throws -> StateResetOutcome
+    /// The change log of one run (Activity inspector).
+    func sessionChanges(of session: SessionRecord, root: URL) async throws -> [SessionChange]
+    /// File ▸ Export Log…: this Mac's runs with their change logs.
+    func activityLog(format: UIActivityLogFormat, root: URL) async throws -> String
+    /// Renamed contacts still linked by their old title from other notes.
+    func renamedLinks(root: URL) async throws -> [UIRenamedLinks]
+    /// Update Links (user action): rewrites those links; returns the notes rewritten.
+    func updateLinks(_ links: UIRenamedLinks, root: URL) async throws -> [String]
+    /// Stops reporting a rename.
+    func dismissRename(_ rename: TitleRename, root: URL) async throws
 }
 
 /// The live engine through `UIVaultReader`.
@@ -79,4 +93,31 @@ struct LiveReviewDataSource: ReviewDataSource {
 
     @concurrent
     func releaseLease(root: URL) async throws -> LeaseStatus { try reader(root).releaseLease() }
+
+    @concurrent
+    func rescanEverything(root: URL) async throws -> RescanOutcome { try reader(root).rescanEverything() }
+
+    @concurrent
+    func resetSyncState(root: URL) async throws -> StateResetOutcome { try reader(root).resetSyncState() }
+
+    @concurrent
+    func sessionChanges(of session: SessionRecord, root: URL) async throws -> [SessionChange] {
+        try reader(root).sessionChanges(of: session)
+    }
+
+    @concurrent
+    func activityLog(format: UIActivityLogFormat, root: URL) async throws -> String {
+        try reader(root).activityLog(format: format)
+    }
+
+    @concurrent
+    func renamedLinks(root: URL) async throws -> [UIRenamedLinks] { try reader(root).renamedLinks() }
+
+    @concurrent
+    func updateLinks(_ links: UIRenamedLinks, root: URL) async throws -> [String] {
+        try reader(root).updateLinks(links)
+    }
+
+    @concurrent
+    func dismissRename(_ rename: TitleRename, root: URL) async throws { try reader(root).dismissRename(rename) }
 }

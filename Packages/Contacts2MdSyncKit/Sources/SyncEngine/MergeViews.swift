@@ -144,8 +144,11 @@ struct FieldView: Sendable {
 /// names and markdown `[[Title]]` links compare by record id (architecture
 /// §7: element key = type + target uuid or name key).
 struct RelationResolver: Sendable {
-    /// Name key → record ids answering to it.
+    /// Name key → record ids answering to it now (titles, aliases, Apple name variants).
     private var recordsByName: [String: Set<UUID>] = [:]
+    /// Name key → record ids that answered to it before a rename (merge
+    /// bases); consulted only when no record answers to the name now.
+    private var formerByName: [String: Set<UUID>] = [:]
     /// Record → note title (markdown display).
     private var titles: [UUID: String] = [:]
     /// Record → Apple display name (written to other cards' relations).
@@ -160,18 +163,54 @@ struct RelationResolver: Sendable {
         recordsByName[key, default: []].insert(record)
     }
 
+    /// Adds a name key the record answered to before a rename.
+    mutating func addFormer(key: String, record: UUID) {
+        guard !key.isEmpty else { return }
+        formerByName[key, default: []].insert(record)
+    }
+
     mutating func setTitle(_ title: String, for record: UUID) { titles[record] = title }
     mutating func setAppleName(_ name: String, for record: UUID) { appleNames[record] = name }
 
-    /// The record a name (or `[[link]]` target) means, when exactly one.
+    /// The record a name (or `[[link]]` target) means, when exactly one:
+    /// by current names, else (no current match at all) by former names.
     func record(named name: String) -> UUID? {
         let target = Wikilink.target(of: name) ?? name
-        guard let records = recordsByName[ComparisonKeys.name(target)], records.count == 1 else { return nil }
-        return records.first
+        let key = ComparisonKeys.name(target)
+        let records = recordsByName[key] ?? formerByName[key] ?? []
+        return records.count == 1 ? records.first : nil
     }
 
     func title(of record: UUID) -> String? { titles[record] }
     func appleName(of record: UUID) -> String? { appleNames[record] ?? titles[record] }
+
+    /// The Apple name set for the record this run (no fallback to the title).
+    func currentAppleName(of record: UUID) -> String? { appleNames[record] }
+}
+
+/// Relation names on Apple cards that still use a record's old name
+/// (`CNContactRelation` is name-only, architecture §8): such a name is
+/// rewritten to the record's current Apple display name. Only names that
+/// resolve to a record through a former name are touched, so names the user
+/// chose (a nickname, an alias, "Mom") are never rewritten, and a rewritten
+/// name resolves to the same record (same element key: nothing churns).
+struct RelationRenamer: Sendable {
+    let resolver: RelationResolver
+    /// Record → name keys it answered to before (merge base) that it no longer answers to.
+    let stale: [UUID: Set<String>]
+
+    /// No renames.
+    static let none = RelationRenamer(resolver: RelationResolver(), stale: [:])
+
+    /// The name to write instead of `name`, or `nil` to keep it.
+    func newName(for name: String) -> String? {
+        let key = ComparisonKeys.name(name)
+        guard let record = resolver.record(named: name), stale[record]?.contains(key) == true,
+            let current = resolver.currentAppleName(of: record), ComparisonKeys.name(current) != key,
+            resolver.record(named: current) == record
+        else { return nil }
+        return current
+    }
 }
 
 /// Builds field views with the record-independent context of a run.

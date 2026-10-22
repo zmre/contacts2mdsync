@@ -127,6 +127,7 @@ struct Reporter {
             note("\(plan.moves.count) notes moved since the last export; updated in place (--verbose lists them)")
         }
         for review in plan.reviews { self.review(review) }
+        groupChanges(plan.groupChanges)
         for text in plan.warnings { warning("title", text) }
         for problem in plan.newProblems {
             warning("yaml", "\(problem.path): \(problem.problem) — not a contact note; reported once, never written")
@@ -141,6 +142,13 @@ struct Reporter {
             note(
                 "decisions: \(plan.excludedByDecision) contacts excluded (sync only), "
                     + "\(plan.ignoredCandidates) notes ignored")
+        }
+    }
+
+    /// Apple groups renamed (a note line) or deleted (a warning) since the last run.
+    private func groupChanges(_ changes: [GroupChange]) {
+        for change in changes {
+            if change.kind == .deleted { warning("group", change.summary) } else { note(change.summary) }
         }
     }
 

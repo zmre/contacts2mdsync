@@ -41,6 +41,8 @@ final class AppModel {
     /// How the last Sync Now ended (lease, lock and breaker banners).
     private(set) var lastOutcome: UISyncOutcome?
     private(set) var snoozed: Set<String> = []
+    /// Renamed contacts still linked by their old title from other notes (Overview).
+    var renamedLinks: [UIRenamedLinks] = []
     var errorMessage: String?
     var selection: SidebarItem? = .overview
     var inspected: InspectorItem?
@@ -157,7 +159,8 @@ final class AppModel {
 
     /// A coordinator run finished or was blocked: fresh stored data, then a dry run.
     private func liveRunEnded() async {
-        if let summary = live.state.lastSummary, summary != handledSummary {
+        let finished = live.state.lastSummary.map { $0 != handledSummary } ?? false
+        if finished, let summary = live.state.lastSummary {
             // A run finished (not just blocked): Ignore for Now lasts until the next sync.
             handledSummary = summary
             lastFailures = summary.failures
@@ -167,6 +170,7 @@ final class AppModel {
             }
         }
         await reload()
+        if finished { await refreshRenamedLinks() }
         await check()
     }
 
@@ -234,6 +238,7 @@ final class AppModel {
                 }
             }
             await reload()
+            await refreshRenamedLinks()
             // The first export makes this Mac ready for live sync.
             let catchingUp = await hostLiveSync() && live.effectiveSettings.liveSync
             if !catchingUp { await check() }

@@ -80,6 +80,24 @@ extension FakeContactStore {
         }
     }
 
+    /// Renames a group (same id), as in Contacts.app.
+    public func renameGroup(_ groupID: String, to name: String) {
+        state.withLock { state in
+            guard let index = state.groups.firstIndex(where: { $0.id == groupID }) else { return }
+            state.groups[index].name = name
+            state.history.append((nil, .group))
+        }
+    }
+
+    /// Deletes a group, as in Contacts.app: its members leave it.
+    public func deleteGroup(_ groupID: String) {
+        state.withLock { state in
+            state.groups.removeAll { $0.id == groupID }
+            for index in state.contacts.indices { state.contacts[index].groupIDs.removeAll { $0 == groupID } }
+            state.history.append((nil, .group))
+        }
+    }
+
     /// Adds a contact (created in Contacts.app).
     public func add(_ contact: AppleContact) {
         state.withLock { state in

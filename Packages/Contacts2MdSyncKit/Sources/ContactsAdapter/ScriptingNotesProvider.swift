@@ -218,6 +218,26 @@
             guard !app.isRunning else { return }
             try app.launchHidden(timeout: launchTimeout)
             session.withLock { $0.launchedByUs = true }
+            keepHidden()
+        }
+
+        /// How long `keepHidden` keeps checking, and how often.
+        static let hideWindow: TimeInterval = 1
+        static let hideStep: TimeInterval = 0.05
+
+        /// Hides a Contacts.app this provider launched until macOS reports it
+        /// hidden (up to `hideWindow`). Spike S14 saw a fresh launch report
+        /// `hidden = false` despite `hides = true`, so a window could flash.
+        /// Never touches a Contacts.app the user opened, and never activates it.
+        private func keepHidden() {
+            guard session.withLock({ $0.launchedByUs }), app.isRunning else { return }
+            app.hide()
+            var waited: TimeInterval = 0
+            while !app.isHidden, waited < Self.hideWindow {
+                sleep(Self.hideStep)
+                waited += Self.hideStep
+                app.hide()
+            }
         }
 
         /// Running, permitted, and answering events.
@@ -244,6 +264,8 @@
                 do {
                     _ = try ContactsScriptingEvents.result(
                         of: sender.send(ContactsScriptingEvents.countPeople(), timeout: eventTimeout))
+                    // The first answered event can bring a window up again (S14).
+                    if session.withLock({ $0.launchedByUs }), !app.isHidden { app.hide() }
                     break
                 } catch let error as ContactsScriptingError where [-600, -609, -1708].contains(error.number) {
                     guard Date() < deadline else {

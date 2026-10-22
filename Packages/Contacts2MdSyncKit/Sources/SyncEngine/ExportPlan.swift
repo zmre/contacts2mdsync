@@ -351,6 +351,8 @@ public struct ExportPlan: Sendable {
     public var skipped: [SkippedContact] = []
     /// Non-blocking observations (duplicate titles, …).
     public var warnings: [String] = []
+    /// Apple groups renamed or deleted since this device's last run (§8).
+    public var groupChanges: [GroupChange] = []
     /// Informational lines (moves, decisions applied, …).
     public var notes: [String] = []
     /// Non-contact notes with invalid frontmatter not reported before.

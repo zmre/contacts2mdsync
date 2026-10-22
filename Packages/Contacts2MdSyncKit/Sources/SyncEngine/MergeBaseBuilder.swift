@@ -15,6 +15,7 @@ struct MergeBaseBuilder {
     /// Apple's values (for the generated title and name keys).
     let appleValues: CanonicalContact
     let old: BaseView
+    let previous: RecordBase?
     let aliases: [String: ScalarAlias]
     let notesSynced: Bool
 
@@ -31,6 +32,7 @@ struct MergeBaseBuilder {
         self.markdown = markdown
         self.appleValues = appleValues
         self.old = BaseView.of(previous)
+        self.previous = previous
         self.aliases = aliases
         self.notesSynced = notesSynced
     }
@@ -47,10 +49,21 @@ struct MergeBaseBuilder {
         builder.base.generatedTitle = TitleGenerator.title(for: appleValues)
         let names = [MatchKeys.nameKey(appleValues), ComparisonKeys.name(TitleGenerator.title(for: appleValues))]
         builder.base.fields["name"] = Array(Set(names.compactMap { $0 })).sorted()
+        builder.base.formerNames = Self.formerNames(previous: previous, current: builder.base.keys("name"))
         builder.base.unknown = builder.unknown.isEmpty ? nil : builder.unknown.sorted()
         builder.base.labels = builder.labels.isEmpty ? nil : builder.labels
         builder.base.displays = builder.displays.isEmpty ? nil : builder.displays
         return builder.base
+    }
+
+    /// The previous base's name keys that are no longer current, appended to
+    /// its former names (oldest dropped beyond the limit).
+    static func formerNames(previous: RecordBase?, current: [String]) -> [String]? {
+        guard let previous else { return nil }
+        let currentKeys = Set(current)
+        var former = previous.nameHistoryKeys.filter { !currentKeys.contains($0) }
+        if former.count > RecordBase.formerNameLimit { former.removeFirst(former.count - RecordBase.formerNameLimit) }
+        return former.isEmpty ? nil : former
     }
 
     private mutating func scalars() {

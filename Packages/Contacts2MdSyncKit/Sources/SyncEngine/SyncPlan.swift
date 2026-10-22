@@ -210,6 +210,9 @@ public struct SyncPlan: Sendable {
 
     // Bookkeeping for the executor.
     var removedRecords = Set<UUID>()
+    /// Notes whose title this run regenerates (Apple's name changed, §7):
+    /// their old titles stay as aliases; links elsewhere can follow (§8).
+    public var titleRenames: [TitleRename] = []
     var unapplyableKept: [UnapplyableEntry] = []
     var newUnapplyable: [UnapplyableEntry] = []
     var vanished: [UUID: Date] = [:]

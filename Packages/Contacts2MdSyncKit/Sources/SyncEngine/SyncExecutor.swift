@@ -21,8 +21,7 @@ public struct SyncResult: Sendable {
     /// token read just before it (the Apple mirror after a run that wrote).
     public var postWriteSnapshot: AppleSnapshot?
     public var postWriteHistoryToken: Data?
-    /// `true` when notes were synced this run (read before and, after Apple
-    /// writes, read again); the notes base was then refreshed.
+    /// Notes were synced this run (read, and re-read after Apple writes); their base was refreshed.
     public var notesSynced = false
 
     /// Creates an empty result.
@@ -299,6 +298,7 @@ public struct SyncExecutor: Sendable {
         for id in plan.removedRecords.union(deleted) { map[id] = nil }
         map.lastExport = now
         try state.save(map)
+        try state.saveGroups(after: plan, result: result)
         try state.saveUnapplyable(unapplyable)
         try state.saveVanished(plan.vanished)
         try NotesSyncState.record(plan.notes, notesSynced: result.notesSynced, in: state)

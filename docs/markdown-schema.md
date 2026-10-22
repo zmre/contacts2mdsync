@@ -245,6 +245,7 @@ mbr resolves `to: "[[X]]"` by **global name** (title → alias → filename stem
 - New Apple groups appear as new managed tags. New groups from markdown are created only via the UI ("Create Apple group from tag").
 - Contacts with no iCloud/Local card can't join groups; the tag stays in markdown and the UI shows a warning (no flapping).
 - A tag added in markdown adds the contact's iCloud (or On My Mac) card to the group with that name; a removed tag removes the contact from it.
+- A group renamed in Contacts keeps its entry under the new name: a default tag follows the name (`Family: family` → `Relatives: relatives`), a custom tag stays; synced notes get the new tag in place. A group deleted in Contacts leaves the map, so its tag stays in the notes as an ordinary (unmanaged) tag. Renaming a tag in markdown does not rename the group: it is a removed managed tag plus a new tag (architecture §8).
 
 ## 8. Vault layout
 

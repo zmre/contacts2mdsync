@@ -102,6 +102,8 @@ struct CLITests {
         #expect(Contacts2MdCLI.isCLIInvocation(["config"]))
         #expect(Contacts2MdCLI.isCLIInvocation(["review", "list"]))
         #expect(Contacts2MdCLI.isCLIInvocation(["watch"]))
+        #expect(Contacts2MdCLI.isCLIInvocation(["rescan"]))
+        #expect(Contacts2MdCLI.isCLIInvocation(["reset-state", "--yes"]))
     }
 
     @Test("plan prints the dry run with stable prefixes and writes nothing")

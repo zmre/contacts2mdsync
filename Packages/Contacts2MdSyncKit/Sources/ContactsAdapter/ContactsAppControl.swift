@@ -24,9 +24,14 @@
         var isRunning: Bool { get }
         /// The user is using Contacts.app: it is visible (not hidden) or frontmost.
         var isInUse: Bool { get }
+        /// Every running instance of Contacts.app is hidden.
+        var isHidden: Bool { get }
         /// Launches Contacts.app hidden and without activating it, and waits until
         /// it finished launching.
         func launchHidden(timeout: TimeInterval) throws
+        /// Hides Contacts.app without activating it (S14: a fresh launch can be
+        /// visible for a moment despite `hides`).
+        func hide()
         /// Asks Contacts.app to quit.
         func quit()
     }
@@ -67,6 +72,12 @@
         public var isRunning: Bool { !instances.isEmpty }
 
         public var isInUse: Bool { instances.contains { !$0.isHidden || $0.isActive } }
+
+        public var isHidden: Bool { instances.allSatisfy(\.isHidden) }
+
+        public func hide() {
+            for app in instances where !app.isHidden { _ = app.hide() }
+        }
 
         public func launchHidden(timeout: TimeInterval) throws {
             guard
