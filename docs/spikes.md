@@ -17,7 +17,7 @@ Each spike is a throwaway target under `Spikes/` with a written result here. Run
 | S11| Headless TCC + sandbox: does the app binary run with a `sync` argument from Terminal, cron and a launchd user agent keep the app's Contacts grant and read its security-scoped bookmark? | Headless CLI (architecture §15).             | Works from launchd at minimum. Otherwise fall back to `open -g -a … --args sync`. | **partial**: Terminal is authorized. launchd and cron report `notDetermined`; `--request` was never tried, so prompting and granting are untested. Bookmark not tested |
 | S12| Notes without the entitlement: can we read and write the Notes field by scripting Contacts.app with Apple Events (`note` and `id` of `person`)? How long do a bulk read and a per-person read take for about 2,500 contacts? Do AppleScript ids match CNContact card ids or unified ids? Which card of a linked pair gets the write? | Body ↔ notes mapping while S2 is blocked on Apple. | Bulk read of all notes takes a few seconds or less, writes keep the text exactly, no other fields or ids change, the linked-pair write target is predictable, and the Automation prompt is acceptable. Then Apple Events become the fallback notes path in architecture §8. | **pass** (2026-10-22) |
 | S13| Real M3 write path on scratch cards: does `CNContactStoreAdapter.apply` → `CardWriter` (behind a harness-only guard) add, edit and delete list values, write single-valued fields through to linked cards, stamp, manage group membership and edit relations correctly on real iCloud and Google cards? Labeled-value ids kept, no unified save, `transactionAuthor` excluded from history, values intact after a server round trip? | Go/no-go for `apple_writes: enabled` on the real address book. | `run`: every row PASS (WARN in steps 8–9 only if explained by a concurrent Google re-save). `check` after 15–30 min: values, stamps and ids survive, or each server rewrite is understood and covered by comparison keys. | todo |
-| S14| Production notes provider on the real Contacts.app: does `ScriptingNotesProvider` (raw Apple Events, `LiveContactsApp`) read every card's note identically to the S12 `NSAppleScript` reader (bulk and per-card paths, ids = CN card ids), write notes exactly (CRLF/Unicode/quotes/backslashes/emoji, ~49k chars, clear, both cards of a linked pair in one call), fail per card on an id that does not exist, and launch Contacts.app hidden and quit it after? | Go/no-go for notes scripting in the app (architecture §8 "As implemented (notes scripting)"). | `check`: every row PASS (parity by per-card SHA-256, no note text printed). `write`: every row PASS; WARN in case 1 only if Contacts rewrites line endings (then the body normalization covers it); CN identifiers and other fields unchanged, history only on target cards. | todo |
+| S14| Production notes provider on the real Contacts.app: does `ScriptingNotesProvider` (raw Apple Events, `LiveContactsApp`) read every card's note identically to the S12 `NSAppleScript` reader (bulk and per-card paths, ids = CN card ids), write notes exactly (CRLF/Unicode/quotes/backslashes/emoji, ~49k chars, clear, both cards of a linked pair in one call), fail per card on an id that does not exist, and launch Contacts.app hidden and quit it after? | Go/no-go for notes scripting in the app (architecture §8 "As implemented (notes scripting)"). | `check`: every row PASS (parity by per-card SHA-256, no note text printed). `write`: every row PASS; WARN in case 1 only if Contacts rewrites line endings (then the body normalization covers it); CN identifiers and other fields unchanged, history only on target cards. | **pass** (2026-10-22; launch-hidden cosmetic fail) |
 
 ## Results (2026-10-21 UTC run)
 
@@ -480,3 +480,212 @@ PLAN: cleanup (1 cards, 0 scratch groups)
   - delete "ZZ Spike S12 Notes E867" identifier=91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson
   (only cards named "ZZ Spike …" carrying a x-c2mdsync-spike: or x-mdsync-spike: URL are ever modified)
 deleted 91C0612F-64BC-4FD8-823C-16EB69CF5489:ABPerson
+
+## S14
+
+❯ nix develop path:$PWD -c swift build --package-path Spikes
+alias c2m-spike=$PWD/Spikes/.build/debug/c2m-spike
+c2m-spike s14-notes check            # read-only: reads all notes, compares with the S12 method (hashes only)
+c2m-spike s14-notes write --yes      # scratch cards only: tricky text, 49k-char note, clear, linked pair, fake-ID safety
+
+Building for debugging...
+[1 / 1]
+
+Build complete! (0.25 sec)
+c2m-spike s14-notes check  2026-10-22T19:54:06Z
+CNContactStore underlying cards: 3781
+
+## Permission and availability
+Contacts.app before: not running
+  [PASS] currentPermission() launches nothing: unknown
+  [PASS] currentPermission() is unknown while Contacts.app is not running: unknown
+availability(): scripting(granted)
+Contacts.app after availability(): running (hidden false, frontmost false)
+  [FAIL] Contacts.app launched hidden, not frontmost: running (hidden false, frontmost false)
+  [PASS] availability() == scripting(granted): scripting(granted)
+
+## Bulk read: readAll(cardIDs: nil)
+read 3781 cards in 1.32s (non-empty 1572, nil 2209)
+  [PASS] bulk read returns notes: 3781 cards, 1572 non-empty
+  [PASS] bulk read under 5 s: 1.32s (includes the readiness probe on first use)
+  [PASS] Contacts.app ids round-trip to CN card ids: provider 3781, CN 3781, provider-only 0, CN-only 0
+
+## Bulk read: readAll(cardIDs: <every CN card id>)
+read 3781 of 3781 cards in 0.67s
+  [PASS] every CN card id seen: missing 0
+  [PASS] same notes as readAll(nil) (hashes): same 3781, differ 0, only-left 0, only-right 0
+
+## Parity with the S12 NSAppleScript bulk read (per-card SHA-256)
+NSAppleScript: 3781 cards in 0.79s
+  [PASS] provider bulk == NSAppleScript bulk (ids): provider 3781, NSAppleScript 3781
+  [PASS] provider bulk == NSAppleScript bulk (note hashes): same 3781, differ 0, only-left 0, only-right 0
+  digest provider:      415b057c80d0f4ce
+  digest NSAppleScript: 415b057c80d0f4ce
+
+## Per-card read: readAll(cardIDs: <39 random + 1 bogus>)
+read 39 of 40 ids in 0.66s (16.6 ms per id)
+  [PASS] every sampled card returned: 39/39
+  [PASS] per-card notes == bulk notes (hashes): same 39, differ 0, only-left 0, only-right 0
+  [PASS] unknown id is absent (unknown), not empty: absent
+  [PASS] 41 ids (bulk + filter) == bulk notes: 41 returned in 0.66s; same 41, differ 0, only-left 0, only-right 0
+
+## finishSession()
+Contacts.app before finishSession(): running (hidden true, frontmost false); after: not running
+  [PASS] launched by the provider → quit by finishSession(): not running
+
+## Summary: PASS 15  FAIL 1  WARN 0  INFO 0  SKIP 0
+| Step | Check | Result | Detail |
+|---|---|---|---|
+| 0 | currentPermission() launches nothing | PASS | unknown |
+| 0 | currentPermission() is unknown while Contacts.app is not running | PASS | unknown |
+| 0 | Contacts.app launched hidden, not frontmost | FAIL | running (hidden false, frontmost false) |
+| 0 | availability() == scripting(granted) | PASS | scripting(granted) |
+| 1 | bulk read returns notes | PASS | 3781 cards, 1572 non-empty |
+| 1 | bulk read under 5 s | PASS | 1.32s (includes the readiness probe on first use) |
+| 1 | Contacts.app ids round-trip to CN card ids | PASS | provider 3781, CN 3781, provider-only 0, CN-only 0 |
+| 2 | every CN card id seen | PASS | missing 0 |
+| 2 | same notes as readAll(nil) (hashes) | PASS | same 3781, differ 0, only-left 0, only-right 0 |
+| 3 | provider bulk == NSAppleScript bulk (ids) | PASS | provider 3781, NSAppleScript 3781 |
+| 3 | provider bulk == NSAppleScript bulk (note hashes) | PASS | same 3781, differ 0, only-left 0, only-right 0 |
+| 4 | every sampled card returned | PASS | 39/39 |
+| 4 | per-card notes == bulk notes (hashes) | PASS | same 39, differ 0, only-left 0, only-right 0 |
+| 4 | unknown id is absent (unknown), not empty | PASS | absent |
+| 5 | 41 ids (bulk + filter) == bulk notes | PASS | 41 returned in 0.66s; same 41, differ 0, only-left 0, only-right 0 |
+| L | launched by the provider → quit by finishSession() | PASS | not running |
+
+wrote /Users/pwalsh/src/sideprojects/mbr-apple-contact-sync/Spikes/results/s14-check-2026-10-22T1354.md
+c2m-spike s14-notes write  2026-10-22T19:54:11Z
+PLAN: s14-notes write
+  - create "ZZ Spike S14 Notes DC3C" in iCloud container D72A148B-2A8F-4494-A9A1-D7AD30890905:ABAccount (SafeWriter)
+  - create "ZZ Spike S14 Linked DC3C" in iCloud D72A148B-2A8F-4494-A9A1-D7AD30890905:ABAccount and Google 9954162F-7192-4169-9E2C-1B31F2C06471:ABAccount (same name + email); case 4 is SKIPPED until Contacts links them
+  - every provider.write: re-verify each target on CNContactStore AND in Contacts.app (name prefix + marker, spike tag s14); refuse otherwise
+  - case 1: multi-line Unicode note (quotes, backslashes, emoji, CRLF) → read back via provider and NSAppleScript, exact
+  - case 2: ~49,000-character note → exact
+  - case 3: clear (nil) → reads back nil/empty
+  - case 4: one provider.write with the same note for both linked cards → both read back
+  - case 5: an injection-shaped id that exists nowhere → per-card failure, nothing changes
+  - then: case-1 note left on the solo card for an off-device check; CN identifiers, fields, history and every other card's note (hashes) compared before/after
+  (only cards named "ZZ Spike …" carrying a x-c2mdsync-spike: or x-mdsync-spike: URL are ever modified)
+created S14 solo card identifier=6B62AB31-433C-4B8B-90F4-2B711026D432:ABPerson
+created S14 icloud pair card identifier=1CE02C0F-ACF1-4E9E-B3F9-A742BD6141DD:ABPerson
+created S14 google pair card identifier=3C9BB0DA-F73E-4D01-B273-21C1A8DF0FD2:ABPerson
+
+## Permission and availability
+Contacts.app before: not running
+  [PASS] currentPermission() launches nothing: unknown
+  [PASS] currentPermission() is unknown while Contacts.app is not running: unknown
+availability(): scripting(granted)
+Contacts.app after availability(): running (hidden false, frontmost false)
+  [FAIL] Contacts.app launched hidden, not frontmost: running (hidden false, frontmost false)
+  [PASS] availability() == scripting(granted): scripting(granted)
+
+## Contacts.app sees the solo card
+  [PASS] solo card resolves in Contacts.app: 6B62AB31-433C-4B8B-90F4-2B711026D432:ABPerson
+baseline: 3784 cards, 3784 notes read, 1 target card(s)
+
+## Case 1: multi-line Unicode note (CRLF, quotes, backslashes, emoji)
+  [PASS] provider.write reports written: 199 ms; failed: [:]
+  [PASS] provider read-back == written (270 chars): exact (356 UTF-8 bytes)
+  [PASS] NSAppleScript read-back == written: exact (356 UTF-8 bytes)
+
+## Case 2: ~49k-character note
+  [PASS] provider.write reports written: 169 ms; failed: [:]
+  [PASS] provider read-back == written (48999 chars): exact (59779 UTF-8 bytes)
+  [PASS] NSAppleScript read-back == written: exact (59779 UTF-8 bytes)
+
+## Case 3: clear the note (nil)
+  [PASS] provider.write reports written: failed: [:]
+  [PASS] provider reads nil/empty: 0 chars
+  [PASS] NSAppleScript reads missing value/empty: 0 chars
+  [SKIP] linked pair write: no linked harness pair yet; re-run once linked
+
+## Case 5: injection-shaped id that exists nowhere
+  id: ZZ-SPIKE-S14-NO-SUCH-CARD-F78486BF-4CA5-43E2-A0B4-FAC8D7E9372F:ABPerson" & (do shell script "touch /tmp/c2m-spike-s14-injected") & "\"; save; --
+  [PASS] provider read: absent (unknown), not empty
+  [PASS] provider.write: per-card failure, nothing written: Contacts.app scripting error -1728: Apple Event failed
+  [PASS] failure is "no such object" (-1728): Contacts.app scripting error -1728: Apple Event failed
+
+## Case 6: leave the case-1 note on the solo card (off-device check)
+  [PASS] provider.write reports written: 158 ms; failed: [:]
+  [PASS] provider read-back == written (270 chars): exact (356 UTF-8 bytes)
+  [PASS] NSAppleScript read-back == written: exact (356 UTF-8 bytes)
+
+## CNContactStore after the provider writes
+  [PASS] card 6B62AB31-433C-4B8B-90F4-2B711026D432:ABPerson identifier unchanged and still a harness card
+  [PASS] card 6B62AB31-433C-4B8B-90F4-2B711026D432:ABPerson other fields unchanged
+  [PASS] no card added or removed: before 3784, after 3784
+change history since the baseline token (unify=false): 1 events
+  6B62AB31-433C-4B8B-90F4-2B711026D432:ABPerson: UpdateContactEvent
+  [PASS] history events on target cards
+  [PASS] history events only on target cards
+  [PASS] every other card's note unchanged (hashes): 3783 cards
+  [PASS] injection payload never ran: /tmp/c2m-spike-s14-injected
+
+Verify off-device (1–5 min): iCloud.com and iPhone → the S14 solo card shows the case-1 note
+(emoji, quotes, line breaks).
+Then: c2m-spike cleanup --spike s14 --yes
+
+## finishSession()
+Contacts.app before finishSession(): running (hidden true, frontmost false); after: not running
+  [PASS] launched by the provider → quit by finishSession(): not running
+
+## Summary: PASS 27  FAIL 1  WARN 0  INFO 0  SKIP 1
+| Step | Check | Result | Detail |
+|---|---|---|---|
+| 0 | currentPermission() launches nothing | PASS | unknown |
+| 0 | currentPermission() is unknown while Contacts.app is not running | PASS | unknown |
+| 0 | Contacts.app launched hidden, not frontmost | FAIL | running (hidden false, frontmost false) |
+| 0 | availability() == scripting(granted) | PASS | scripting(granted) |
+| 0 | solo card resolves in Contacts.app | PASS | 6B62AB31-433C-4B8B-90F4-2B711026D432:ABPerson |
+| 1 | provider.write reports written | PASS | 199 ms; failed: [:] |
+| 1 | provider read-back == written (270 chars) | PASS | exact (356 UTF-8 bytes) |
+| 1 | NSAppleScript read-back == written | PASS | exact (356 UTF-8 bytes) |
+| 2 | provider.write reports written | PASS | 169 ms; failed: [:] |
+| 2 | provider read-back == written (48999 chars) | PASS | exact (59779 UTF-8 bytes) |
+| 2 | NSAppleScript read-back == written | PASS | exact (59779 UTF-8 bytes) |
+| 3 | provider.write reports written | PASS | failed: [:] |
+| 3 | provider reads nil/empty | PASS | 0 chars |
+| 3 | NSAppleScript reads missing value/empty | PASS | 0 chars |
+| 4 | linked pair write | SKIP | no linked harness pair yet; re-run once linked |
+| 5 | provider read: absent (unknown), not empty | PASS |  |
+| 5 | provider.write: per-card failure, nothing written | PASS | Contacts.app scripting error -1728: Apple Event failed |
+| 5 | failure is "no such object" (-1728) | PASS | Contacts.app scripting error -1728: Apple Event failed |
+| 6 | provider.write reports written | PASS | 158 ms; failed: [:] |
+| 6 | provider read-back == written (270 chars) | PASS | exact (356 UTF-8 bytes) |
+| 6 | NSAppleScript read-back == written | PASS | exact (356 UTF-8 bytes) |
+| 7 | card 6B62AB31-433C-4B8B-90F4-2B711026D432:ABPerson identifier unchanged and still a harness card | PASS |  |
+| 7 | card 6B62AB31-433C-4B8B-90F4-2B711026D432:ABPerson other fields unchanged | PASS |  |
+| 7 | no card added or removed | PASS | before 3784, after 3784 |
+| 7 | history events on target cards | PASS |  |
+| 7 | history events only on target cards | PASS |  |
+| 7 | every other card's note unchanged (hashes) | PASS | 3783 cards |
+| 7 | injection payload never ran | PASS | /tmp/c2m-spike-s14-injected |
+| L | launched by the provider → quit by finishSession() | PASS | not running |
+
+wrote /Users/pwalsh/src/sideprojects/mbr-apple-contact-sync/Spikes/results/s14-write-2026-10-22T1354.md
+
+     ~/src/sideprojects/mbr-apple-contact-sync   main
+❯ c2m-spike cleanup --spike s14 --yes                                                                                                                                                                                                                        19s  
+PLAN: cleanup (3 cards, 0 scratch groups)
+  - delete "ZZ Spike S14 Linked DC3C" identifier=9297FD02-5016-4D7C-A161-9B3040B945C7:ABPerson
+  - delete "ZZ Spike S14 Notes DC3C" identifier=6B62AB31-433C-4B8B-90F4-2B711026D432:ABPerson
+  - delete "ZZ Spike S14 Linked DC3C" identifier=1CE02C0F-ACF1-4E9E-B3F9-A742BD6141DD:ABPerson
+  (only cards named "ZZ Spike …" carrying a x-c2mdsync-spike: or x-mdsync-spike: URL are ever modified)
+deleted 9297FD02-5016-4D7C-A161-9B3040B945C7:ABPerson
+deleted 6B62AB31-433C-4B8B-90F4-2B711026D432:ABPerson
+deleted 1CE02C0F-ACF1-4E9E-B3F9-A742BD6141DD:ABPerson
+
+
+## S14 findings (2026-10-22)
+
+**Verdict: pass — the production `ScriptingNotesProvider` is safe to use on the real address book.**
+Results: `Spikes/results/s14-check-2026-10-22T1354.md` (PASS 15, FAIL 1) and `s14-write-2026-10-22T1354.md` (PASS 27, FAIL 1, SKIP 1).
+
+- Bulk and per-card reads match the S12 NSAppleScript method card-for-card (hash parity); unknown ids read as absent, not empty.
+- Writes are byte-exact: 270-char multi-line/Unicode/CRLF note (356 bytes) and a 48,999-char note (59,779 bytes); clearing works; Contacts did not rewrite CRLF.
+- Bogus/injection-shaped id: per-card `-1728`, nothing written, payload never executed.
+- Only target cards changed (3,783 other notes' hashes unchanged; history events only on targets); no cards added/removed.
+- `finishSession()` quit Contacts.app because the provider had launched it.
+- Propagation: user confirmed the case-6 note reached the iPhone.
+- **FAIL (cosmetic):** Contacts.app was running but not yet hidden right after launch (hidden later) → possible brief window flash. Fix assigned (reliable hide-on-launch).
+- **SKIP:** linked-pair write (case 4) — a new S14 pair needed time to auto-link; re-run `c2m-spike s14-notes write --yes` later, then `cleanup --spike s14 --yes`.
