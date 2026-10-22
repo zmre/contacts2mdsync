@@ -688,4 +688,5 @@ Results: `Spikes/results/s14-check-2026-10-22T1354.md` (PASS 15, FAIL 1) and `s1
 - `finishSession()` quit Contacts.app because the provider had launched it.
 - Propagation: user confirmed the case-6 note reached the iPhone.
 - **FAIL (cosmetic):** Contacts.app was running but not yet hidden right after launch (hidden later) → possible brief window flash. Fix assigned (reliable hide-on-launch).
-- **SKIP:** linked-pair write (case 4) — a new S14 pair needed time to auto-link; re-run `c2m-spike s14-notes write --yes` later, then `cleanup --spike s14 --yes`.
+- **SKIP:** linked-pair write (case 4) — the new S14 pair hadn't auto-linked yet; cards were then cleaned up, so case 4 was not run (S12 already showed notes are per card; write-through is covered by engine tests).
+- Cleanup found all 3 S14 cards by marker, including the Google card whose id had changed after creation (`3C9BB0DA…` → `9297FD02…`) — another confirmation of Google id churn and that marker/stamp re-location handles it.
