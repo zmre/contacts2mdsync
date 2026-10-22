@@ -24,22 +24,25 @@ App/
   Contacts2MdSync/                  SwiftUI app: views, AppModel, bookmarks; hosts the SyncTriggers coordinator
 Packages/Contacts2MdSyncKit/
   ContactModel/     value types, normalization, comparison keys, label map,
-                    ContactStore seam + Apple snapshot types                 (Foundation only)
+                    ContactStore + NotesProvider seams, Apple snapshot types (Foundation only)
   PhoneNumberKeys/  PhoneKeyer backed by PhoneNumberKit (E.164)
   MarkdownCodec/    frontmatter split, YAML parse (Yams), span-patching emitter, filenames
   ContactsShim/     Objective-C: @try/@catch wrappers (change history, notes probe, vCard) → NSError
-  ContactsAdapter/  CNContactStore ⇄ ContactModel, snapshot, groups, stamp, history
+  ContactsAdapter/  CNContactStore ⇄ ContactModel, snapshot, groups, stamp, history;
+                    notes providers: ScriptingNotesProvider (Apple Events to Contacts.app,
+                    ContactsScriptingEvents, ContactsAppControl), EntitlementNotesProvider
   VaultIndex/       VaultFS seam + LocalVaultFS, incremental scan (file cache), id/title/alias/stem indexes
   SyncEngine/       ExportPlanner/Executor, Matching, Clustering, RecordMap, SyncStateStore, DecisionLog (M1–M2);
                     SyncPlanner, RecordMerger, Diff3, AppleWritePlanner, SyncExecutor, LeaseManager,
-                    LocalLock, SyncScope (M3); LeaseKeeper, decision-log merging, iCloud file versions (M6)
+                    LocalLock, SyncScope (M3); LeaseKeeper, decision-log merging, iCloud file versions (M6);
+                    NotesBridgedStore, NotesSync (notes through Contacts.app scripting, §8)
   SyncStateDB/      SyncStateStore on SQLite (GRDB), M1 records.json import
   SyncTriggers/     live sync (M5): SyncCoordinator actor, trigger sources (Contacts notification,
                     FSEvents, wake, sweep, launch), OwnWriteRegistry, per-device TriggerSettings (no SwiftUI)
   Contacts2MdCLI/   CLI library + VaultSession (shared with the app): status / plan / export / review (M1–M2),
-                    sync / config (M3), watch + VaultSyncRunner (M5), see §15
+                    sync / config (M3), watch + VaultSyncRunner (M5), NotesSettings (per Mac), see §15
   contacts2md/      dev executable wrapping Contacts2MdCLI (the app binary runs the same CLI)
-  SyncTestSupport/  FakeContactStore, InMemoryVault, fixtures (~60 contacts), golden-file helper,
+  SyncTestSupport/  FakeContactStore, FakeNotesProvider, InMemoryVault, fixtures (~60 contacts), golden-file helper,
                     SimulatedICloud + SimulatedContactsCloud (multi-device replicas with delay, M6)
 ```
 
@@ -70,6 +73,16 @@ protocol ContactStore: Sendable {                      // ContactModel
                                                        // delete, addMember, removeMember (M3)
   func changes(since token: Data?, excluding authors: [String]) throws -> HistoryResult
   func exportVCards() throws -> Data                   // vCard backup before Apple writes
+}
+
+protocol NotesProvider: Sendable {                     // ContactModel; notes per underlying card (§8)
+  var source: NotesSource { get }                      // .entitlement | .scripting
+  func availability() -> NotesAvailability             // .entitlement | .scripting(permission) | .unavailable
+  func currentPermission() -> NotesPermission          // no launch, no prompt
+  func requestPermission() -> NotesAvailability        // shows the macOS prompt; app Settings only
+  func readAll(cardIDs: [String]?) throws -> [String: String?]   // nil = every card; absent = unknown
+  func write(_ notes: [String: String?]) throws -> NotesWriteResult   // nil or "" clears
+  func finishSession()                                 // quit Contacts.app if this run launched it
 }
 
 protocol VaultFS: Sendable {                           // VaultIndex; rooted at construction
@@ -118,7 +131,7 @@ struct CanonicalContact {
   var relationships: [RelationshipRef]           // type, label, target: .record(UUID) | .name(String), attrs
   var tags: OrderedSet<String>
   var image: ImageRef?                           // sha256 + ext
-  var body: String?                              // ↔ CNContact.note when entitled
+  var body: String?                              // ↔ CNContact.note (entitlement) or Contacts.app scripting
   var passthrough: [String: YAMLNode]            // unknown keys, untouched
 }
 ```
@@ -134,7 +147,7 @@ Every value carries a **display form** (exactly as written) and a **comparison k
 | name / title | NFC, case-folded, diacritic-folded (matching only)                               |
 | date         | `YYYY-MM-DD` or `--MM-DD`; calendar ignored                                      |
 | social / im  | (service, username), both lowercased; a synthesized `urlString` is ignored       |
-| body         | `\r\n`→`\n`, trailing whitespace trimmed                                         |
+| body         | `\r\n` and a lone `\r` → `\n`; leading blank lines and trailing whitespace trimmed |
 | tag          | mbr normalization: trim, lowercase, spaces → `_`                                 |
 | image        | sha256 of `imageData`; unavailable data with a thumbnail = *unknown*             |
 | merge scalar | trimmed NFC text, case kept (a capitalization fix is a change); birthday as ISO   |
@@ -374,7 +387,7 @@ A conflict never blocks the record's other fields. Resolutions are applied on th
 - **Lists** are merged in slots. Each base element is one slot. For each side the merger notes whether the element was kept, relabeled, edited or removed. A removed element and an added element with the same label on one side count as an edit. With an M2 base, whose labels are unknown, the only removed/added pair on a side also counts as an edit. Elements added on either side get their own slots. The note keeps its order, and Apple additions are appended. A Contacts-side edit replaces the markdown element in place.
 - **Label conflicts** offer Keep Contacts and Keep Markdown only. Keep Both would need the same value twice under one comparison key. A delete against an edit, or two different edits, offer Keep Both where both sides still have a value.
 - **Tags** use a three-way set merge over managed tags. Without a base the result is the union.
-- **Body** is merged only when notes are available. The merger runs a line diff3 against the base body. Overlapping hunks conflict, and Keep Both writes the markdown text, a `---` line, then the Contacts text.
+- **Body** is merged only when notes are synced (§8). The merger runs a line diff3 against the base body. Overlapping hunks conflict, and Keep Both writes the markdown text, a `---` line, then the Contacts text. A body pushed to Contacts is written through to every writable card whose note differs (notes are per card). A body without a base (first sync with notes, adopted notes) follows the first-bind rule; this is the enablement migration in §8.
 - **Image** compares hashes. A thumbnail-only Apple image, a URL, a missing file or an evicted iCloud file is unknown and never compared.
 - **Title** is regenerated only when Apple's name changed this run and the title still equals the title generated at the last sync (`RecordBase.generatedTitle`; for M2 bases the folded name keys). The old title becomes a plain alias, and `to: "[[Old]]"` links in other synced notes that resolve to the record are rewritten.
 
@@ -396,7 +409,61 @@ In M3 both sides' targets resolve to record ids through note titles, aliases and
 
 In M3 a managed tag added in markdown adds the contact's first iCloud or On My Mac card to a group with that name in the same container. A removed tag removes every card of the contact in that group's container. A tag that no card can carry stays in markdown and is reported once (`WARNING blocked`). Group renames in Apple are not followed yet: a renamed group appears as a new group with a new tag.
 
-**Notes** — feature-detected at runtime (`capabilities.notesAvailable`): probe-fetch one card with `CNContactNoteKey`, then check `isKeyAvailable(CNContactNoteKey)`. An un-entitled build gets no error: the fetch succeeds and the key is silently missing (spike S2, macOS 27). Error 102 is still treated as unavailable in case an entitled-but-revoked build reports it. Never read `.note` without the `isKeyAvailable` check: an unfetched key raises `CNContactPropertyNotFetchedException`. When unavailable, the body is markdown-only and the body field is excluded from merge. Ad-hoc/Nix-built binaries will never have it; the notarized Developer ID release will once Apple approves the request.
+**Notes** — a record's body maps to the Contacts note when notes are synced on this Mac. There are two sources, chosen per run (`VaultSession.notesSetup`):
+
+1. **The notes entitlement** (`com.apple.developer.contacts.notes`), when present: `CNContactNoteKey` in the snapshot, `.note` edits in the same save request as every other field. Feature-detected at runtime (`capabilities.notesAvailable`): probe-fetch one card with `CNContactNoteKey`, then check `isKeyAvailable(CNContactNoteKey)`. An un-entitled build gets no error: the fetch succeeds and the key is silently missing (spike S2, macOS 27). Error 102 is still treated as unavailable in case an entitled-but-revoked build reports it. Never read `.note` without the `isKeyAvailable` check: an unfetched key raises `CNContactPropertyNotFetchedException`. Ad-hoc/Nix-built binaries never have it; the notarized Developer ID release will once Apple approves the request (still not granted).
+2. **Contacts.app scripting** (Apple Events, [spike S12](spikes.md#s12-findings-2026-10-22)), when the entitlement is missing, this Mac's `notes_sync` setting is on, and macOS reports the Automation permission for Contacts as granted. The permission is checked when the run first reads notes, not before: a run that reads no notes (an incremental run with nothing touched) never launches Contacts.app.
+
+Otherwise the body is markdown-only and excluded from the merge. Notes wanted but not permitted are *skipped* for the run with a warning; that is not the same as off (below).
+
+### As implemented (notes scripting)
+
+**Provider seam.** `NotesProvider` (ContactModel) reads and writes notes per underlying card: `availability()`, `currentPermission()` (no side effects), `requestPermission()`, `readAll(cardIDs:)` (card id → text; `nil` = every card; a card the provider did not see is *absent*, never reported as empty), `write(_:)` (per card; `nil` or `""` clears; per-card failures in the result), `finishSession()`. ContactsAdapter has `ScriptingNotesProvider` and `EntitlementNotesProvider`; the latter exists for status and one-off use, since with the entitlement the snapshot already carries notes. Tests use `FakeNotesProvider` over the fake store's card notes.
+
+**Apple Events.** `ScriptingNotesProvider` sends raw Apple Events with object specifiers (`ContactsScriptingEvents`), the same events AppleScript sends. It does not use `NSAppleScript` (the S12 spike did): `NSAppleScript` belongs on the main thread, and syncs run on background threads in the app. Raw events also take explicit timeouts (60 s per event) and go through an injectable `AppleEventSending`, so tests never send one. Codes come from `Contacts.app/Contents/Resources/Contacts.sdef`: class `person` = `azf4`, property `note` = `az37`, property `id` = `ID  `, `save` = `core`/`save`. Card ids travel as descriptors and are never spliced into script source. Events are sent with `neverInteract`.
+
+- Contacts.app's `person` is an underlying card and its `id` is the CNContact card identifier (S12: 3,785 of 3,785). Notes are per card.
+- **Bulk read**: `id of every person`, `note of every person`, then the ids again. If the two id lists differ (a person was added or removed in between), the read is retried, at most 3 times; then it fails. About 0.5 s for 3,785 cards. `missing value` reads as no note.
+- **Partial read**: up to 40 cards one event each (≈9 ms per card), more as one bulk read filtered to the cards. A card that does not resolve (`-1728`) is left out (unknown).
+- **Write**: `set note of person id X to T`, then `save`, card by card; then the written cards are read back and compared after line-ending normalization. A card that kept a different note, or does not resolve, is a per-card failure.
+- **Errors**: `-600`, `-609`, `-1708`, `-1712`, `-1743`, `-1744` and `-903` concern the session (permission, Contacts.app not reachable, timeout) and become `NotesUnavailableError`. Any other error concerns one card.
+
+**Permission.** `AEDeterminePermissionToAutomateTarget` for `com.apple.AddressBook`: `0` granted, `-1743` denied, `-1744` not decided yet, `-600` Contacts.app not running. Because macOS answers only for a running app, the first notes read of a run (and `availability()`) launches Contacts.app first when needed, then checks; without permission the read fails with `NotesUnavailableError(permissionDenied:)` and the run skips notes with the permission warning. A refusal is remembered for 15 minutes in the process (`NotesRefusalMemo`): while Contacts.app is not running, the next runs skip notes without launching it just to be told again; `requestPermission()` and a granted check clear it. While notes are skipped, the cached mirror has no notes, so runs read Contacts with a full snapshot (`notes turned on or off`) until notes can be read again. Sync never prompts. Only `requestPermission()` (Settings ▸ Advanced ▸ Contact notes, a user action) asks with `askUserIfNeeded = true`. The app declares `NSAppleEventsUsageDescription` and the entitlements `com.apple.security.automation.apple-events` and `com.apple.security.temporary-exception.apple-events = [com.apple.AddressBook]` (sandboxed, hardened runtime).
+
+**Contacts.app lifecycle.** When Contacts.app is not running, the provider launches it hidden and without activating it (`NSWorkspace.OpenConfiguration`: `activates = false`, `hides = true`, not added to recent items), waits until it finished launching, and retries a cheap `count every person` until it answers (15 s). After the run, `finishSession()` quits it only if this provider launched it, it is still hidden and not frontmost (the user is not using it), and `quit_contacts_after_sync` is on (the default). The session ends through `NotesRunHandle.finish()` at the end of `executeSync` and `recordSyncPlan`, and at the latest when the prepared run is released.
+
+**The bridge.** `NotesBridgedStore` (SyncEngine) is a `ContactStore` that wraps the Contacts.framework store and adds notes:
+
+- `snapshot()` reads the framework snapshot, then every note in one bulk read. `refetch` and `fetch` read only the cards of the contacts they return. Each card's note goes into its `values.body`.
+- The record's Contacts note is the note of the first card in precedence order that has one (stamped, iCloud, other writable, read-only, ties by card id), as for every single-valued field. A different note on another card does not count, so a linked card that disagrees never causes ping-pong.
+- A card missing from the read makes that contact's notes unknown (`AppleContact.notesUnknown`). The merge then leaves the body alone on both sides and the base keeps its body; an unknown note is never read as empty.
+- `apply` takes the `.note` edits out of the batch, saves the rest through the framework store, then writes each note to its card (for a created contact, to the new card). Before any note is written, the notes about to be overwritten are saved to `<state>/<vault_id>/backups/apple-notes-<time>.json` (last 10 kept): the vCard backup cannot hold them without the entitlement. A failed backup writes no note.
+- `AppleWritePlanner` writes a pushed body through to **every** writable card whose note differs, not only to cards that already have one.
+
+**Failures.**
+
+- A failed read (no permission, Contacts.app not answering, the bulk read never settling) leaves the run without notes: `snapshot.notesAvailable = false`, the plan is a *skipped* notes run with a warning, and nothing about bodies changes on either side.
+- A write that fails for the whole session reports those operations as failed. They are retried next run, since the base is unchanged.
+- A card that refuses its note keeps the operation applied. The executor's post-write snapshot re-reads every note in bulk, and its verification marks `body` unapplyable for that card (not retried until either side changes). Notes are verified only when that re-read succeeded. A note for a newly created card that fails never fails the create; the next sync writes it.
+
+**Own writes.** Contacts.app saves are not tagged with our `transactionAuthor`, so author exclusion does not apply. The executor reads the history token after the Apple batch, notes included, so the events of our note writes are older than the token the next run starts from (S12: one `UpdateContactEvent` on the target card, recorded when `save` returns). As a second line, `NotesOwnWrites` remembers (card id, hash of the text) for 30 s. If a late event makes the next run re-read that card and the note hashes to what we wrote, it is counted as our own echo (`ownWritesSeen`); the merge finds no change because the base was refreshed from the same text. The registry never replaces a read: the user may edit the same note in Contacts right after our write, and only a read sees that edit.
+
+**Incremental runs** (§10). The history marks a card changed when its note changes in Contacts, so the patch re-reads that contact, and the bridge re-reads only its cards' notes. Records whose markdown changed are re-read the same way. The mirror (`meta.apple_cache`) carries the notes and `notesAvailable`. When the run expects notes and the cache was made without them, or the other way round, the run takes a full snapshot (reason `notes turned on or off`).
+
+**Enablement migration.** There is no body base when notes start: the first sync with notes on this Mac, or the first after notes were off. The device state keeps `meta.notes_source`, the source of the last executed sync that synced notes. A sync with notes off (setting off, no provider) removes it; a skipped run leaves it alone, so a headless run without permission does not reset the base. With notes active and no `notes_source`, the run is a *fresh start* (`NotesStatus.freshStart`): every record's stored body base is dropped for the merge and the body follows the first-bind rule:
+
+| Markdown body | Contacts note | Result |
+|---------------|---------------|--------|
+| empty | non-empty | the note goes into markdown |
+| non-empty | empty | the markdown body goes into Contacts (an Apple change: counts toward the blast radius, held while `apple_writes` is disabled) |
+| equal (by comparison key) | | adopted as the base, nothing written |
+| non-empty | non-empty, different | conflict: Keep Contacts / Keep Markdown / Keep Both |
+
+The plan carries a `NotesBaseline` for every record merged without a body base: bodies into markdown, bodies into Contacts (title, path, characters, lines), kept-both, already equal, conflicts. `contacts2md plan` prints it with every markdown body bound for Contacts and its size; the app shows it before the first notes sync. Records that get a body base later (an adopted hand-written note) appear in it too. Held or conflicting records keep no body base, so they show again on the next run.
+
+**Long notes.** Notes are never truncated. S12 saw up to 49,152 characters. Diff3 handles them line by line (the LCS table is bounded at 4 million cells; beyond that the whole text is one hunk). `\r\n` and lone `\r` are normalized for comparison. A pulled note replaces the body after the blank lines it started with.
+
+**Not covered.** The first export (`export`) does not read notes; the first sync after it takes them. Whether notes propagate to iCloud.com and Google after a scripted write is not verified (S12). The raw Apple Events have not yet run against the real Contacts.app (S12 used `NSAppleScript`).
 
 ## 9. Safety rails
 
@@ -405,9 +472,11 @@ In M3 a managed tag added in markdown adds the contact's first iCloud or On My M
 | Apple delete             | uuid must be missing in 2 full snapshots ≥ 10 min apart and unmatched by cascade → queued for user. On confirm: markdown file moved to Trash. |
 | Markdown delete          | file gone (not dataless) → queued. Options: Restore File (re-export), Unlink (keep contact, clear stamp), Delete iCloud card (destructive confirm). |
 | Mass-vanish breaker      | > 10 records or > 5 % vanish from either side in one run → halt everything, ask. Covers iCloud toggled off, account removed, root unmounted/evicted. |
-| Blast radius             | > 25 Apple changes in one run → show plan, require approval.                                         |
+| Blast radius             | > 25 Apple changes in one run → show plan, require approval. A record whose body goes into Contacts notes counts once, like any update (the notes enablement migration can push many). |
 | Create gate              | §6 — any match ≥ 0.5 blocks auto-create.                                                             |
 | Backups                  | vCard of whole store before any Apple write session; keep 10.                                        |
+| Notes backup             | with Contacts.app scripting, the notes about to be overwritten are saved to `backups/apple-notes-<time>.json` before any note write (the vCard has no notes without the entitlement); keep 10. No backup, no note write. |
+| Unknown notes            | a card Contacts.app scripting did not see makes the contact's note unknown, never empty; a failed notes read skips notes for the run (§8). |
 | File writes              | `NSFileCoordinator`, temp file + `replaceItemAt`, CAS on (mtime, size, sha), skip identical bytes, re-parse before write. |
 | Invalid YAML             | never written; listed in Activity.                                                                   |
 | Unapplyable fields       | fields Apple refuses or that don't stick are recorded and not retried until they change.            |
@@ -429,6 +498,7 @@ A card id that vanishes while its stamp shows up on another card is identifier c
 - **Markdown**: canonical-model hash vs base (bytes never compared directly). FSEvents (file-level) triggers a debounced run. Own writes are remembered as (path, sha) for 30 s and ignored.
 - **Apple**: full snapshot diff through M4 (thousands of contacts ≈ 1 s). From M5 the ObjC-shimmed change-history enumerator narrows the set; history fetch excludes `com.zmre.contacts2mdsync.*` authors (spike S3: works); a `DropEverything` event, a nil token, or error 603/604 → full snapshot. `DropEverything` is the main reset signal: a garbage token raised no error and no exception, it just returned `DropEverything` plus the full snapshot (S3). Group events arrive even with `includeGroupChanges = false`, so events are filtered by type. Saves made by Google sync after our own writes (for example, replacing a card we created) are not authored by us and show up as changes; comparison keys and the stamp-based re-fetch absorb them. `CNContactStoreDidChange` is only a debounced "go look" signal.
 - **Server echo** (iCloud/Google reformatting our writes) is neutralized by comparison keys plus refreshing the base from a post-write re-fetch.
+- **Notes through Contacts.app scripting** (§8): Contacts.app's saves carry no `transactionAuthor` of ours, so author exclusion does not cover them. The token read after the Apple batch (notes included) does; a late echo is recognized by `NotesOwnWrites` (card id and text hash, 30 s) but still read. A history event on a card triggers the re-read of that card's note, and only of the notes of re-read contacts.
 - Combined debounce ≈ 3 s; `SyncCoordinator` actor guarantees one run at a time.
 
 ### Triggers while the app is running
@@ -589,7 +659,7 @@ macOS ties both Contacts permission (TCC) and the sandboxed security-scoped fold
 | `contacts2md plan`            | Dry run: what a sync would change, plus what would be skipped                 |
 | `contacts2md sync`            | Run one sync cycle unattended                                                |
 | `contacts2md export` (M1)     | One-way Apple → markdown; dev/testing                                        |
-| `contacts2md config` (M3)     | Show or set `apple_writes` and `stamp_contacts`                              |
+| `contacts2md config` (M3)     | Show or set `apple_writes` and `stamp_contacts`; `--notes on|off` (this Mac) |
 | `contacts2md lease` (M6)      | Show, take over or release the vault lease                                   |
 
 Flags: `--quiet` (warnings and errors only), `--json` (one JSON document on stdout for scripting), `--verbose`.
@@ -640,6 +710,7 @@ common: --quiet  --verbose
 contacts2md sync   [--root <dir>] [--max-apple-changes N] [--allow-mass-vanish] [--allow-undownloaded] [--take-over]
 contacts2md plan   [--root <dir>] [--one-way] [--max-apple-changes N] [export options]
 contacts2md config [--root <dir>] [--apple-writes enabled|disabled] [--stamp-contacts true|false]
+                   [--notes on|off] [--quit-contacts true|false]     # notes: this Mac only
 contacts2md review decide <item-id> <choice>
 common: --quiet  --verbose  --json
 ```
@@ -681,6 +752,24 @@ contacts2md sync      # as a follower: dry run, info lines, exit 0
 - Review choices: iCloud versions `keep-current | keep-other:N`.
 - `export --yes [--take-over]` takes the local lock and the lease after planning, like `sync` (§11 "Exports take the lease too"). While another device leads: `note     following <name>: it leads syncing for this vault until <time>[ (stale: …)]; export skipped (nothing written). …`, exit 0. Another run holding the lock: a note, exit 0. `--take-over` requires `--yes` (exit 64 otherwise).
 
+**Contacts notes (notes scripting) as implemented** (§8):
+
+```
+contacts2md config [--root <dir>] [--notes on|off]   # this Mac's setting, not the vault config
+```
+
+- `--notes` writes `notes_sync` (`"on"`/`"off"`) to `<state>/notes.json`, next to `triggers.json`, together with `quit_contacts_after_sync` (default true). It is per Mac because the Automation permission is. `--quit-contacts true|false` sets `quit_contacts_after_sync`. `config` prints `wrote    settings notes_sync=on  quit_contacts_after_sync=true (this Mac)` and `notes    notes_sync=on  source=Contacts.app scripting  permission=granted  quit_contacts_after_sync=true` (`source=off (bodies are markdown-only)` when off; `source=Contacts entitlement` without the permission and quit fields when entitled). Turning it on without permission adds a note: the command line never asks; allow it in the app (Settings ▸ Advanced ▸ Contact notes), or in System Settings ▸ Privacy & Security ▸ Automation when denied. It also points at `contacts2md plan` to preview the first notes sync. The permission shown is read without launching Contacts.app, so it can be `unknown`.
+- `status` prints the same `notes` line.
+- `plan` and `sync`, after the `apple` line:
+  - `notes    Contacts.app scripting: first notes sync on this Mac; every body is merged without a base`, then `notes    12 into markdown, 3 into Contacts (largest 4,812 chars: Jane Doe), 140 already equal, 2 conflicts` on a fresh start; later only when records without a body base move or conflict (`notes    Contacts.app scripting; no notes base yet: …`).
+  - `notes    apple  <title>  (markdown body → Contacts: <n> chars, <l> lines)  <path>` for every markdown body bound for Contacts; with `--verbose` also `notes    md     <path>  (Contacts note → markdown: <n> chars)`.
+  - `note     <n> markdown bodies held for Contacts — <reason>` when Apple writes are held.
+  - `update apple <title>  (body 1,234 chars)` (or `body cleared`) instead of a bare `body`.
+  - `WARNING  notes      Automation permission for Contacts not granted; notes skipped` when notes are on but not permitted, or `… Contacts notes could not be read (…); notes skipped`. Not a change on either side; the exit code is unaffected.
+  - After a sync: `WARNING  notes      note for card <id> not kept: …` per refused card; with `--verbose`, `notes    read N bulk + M cards, own echoes K, written W`.
+- `--json` adds the setting `notes` (`entitlement`, `scripting`, `skipped` or `off`); `config` and `status` add `notes_sync` and `notes_source`.
+- Sessions record `sides.notes` and `sides.notes_to_contacts` / `notes_to_markdown`; `SyncRunSummary` carries `notesToContacts`, `notesToMarkdown` and `notesWarning` for the app.
+
 ### What runs vs. what is skipped
 
 | Situation                                                  | Headless behavior                                                                  |
@@ -697,6 +786,7 @@ contacts2md sync      # as a follower: dry run, info lines, exit 0
 | Another device holds the lease                             | Dry run only (M6: status and review queue refreshed here, nothing written), info line, exit 0. `export --yes` writes nothing either (note, exit 0) |
 | GUI instance on this Mac is syncing                        | Wait up to 60 s for the local lock, then no-op as above                            |
 | Not configured / first sync not done                       | Error, exit 3                                                                      |
+| `notes_sync: on` without Automation permission for Contacts | Notes skipped (never prompts), `WARNING notes`, no body change on either side, exit code unaffected |
 
 Headless runs never resolve anything on the user's behalf. Queued items show up in the GUI's Review badges exactly as if the GUI had found them.
 

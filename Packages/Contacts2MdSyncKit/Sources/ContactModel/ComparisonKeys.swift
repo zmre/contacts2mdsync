@@ -96,11 +96,16 @@ public enum ComparisonKeys {
     /// Date: `YYYY-MM-DD` or `--MM-DD` (see `PartialDate.iso`).
     public static func date(_ value: PartialDate) -> String { value.iso }
 
-    /// Body: `\r\n` → `\n`, trailing whitespace trimmed.
+    /// Body: `\r\n` and a lone `\r` → `\n` (Contacts may convert line
+    /// endings), leading blank lines and trailing whitespace trimmed (the
+    /// blank line after the frontmatter, and Contacts trimming a note).
     public static func body(_ value: String?) -> String {
         guard let value else { return "" }
-        var text = value.replacingOccurrences(of: "\r\n", with: "\n")
+        var text = value.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         while let last = text.last, last.isWhitespace { text.removeLast() }
+        while let newline = text.firstIndex(of: "\n"), text[..<newline].allSatisfy(\.isWhitespace) {
+            text.removeSubrange(...newline)
+        }
         return text
     }
 

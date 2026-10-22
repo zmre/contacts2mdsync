@@ -160,6 +160,9 @@ public struct VaultSyncRunner: SyncRunner {
             + (plan.markdown.configText == nil ? 0 : 1)
         summary.pendingReview = plan.markdown.reviews.filter(\.needsDecision).count
         summary.conflicts = plan.conflicts.count
+        let notes = NotesCounts(planned: plan)
+        (summary.notesToContacts, summary.notesToMarkdown) = (notes.toContacts, notes.toMarkdown)
+        summary.notesWarning = plan.notes.skipped
         return summary
     }
 
@@ -185,6 +188,9 @@ public struct VaultSyncRunner: SyncRunner {
         summary.conflicts = plan.conflicts.count
         summary.failures =
             result.markdown.failures.map { "\($0.path): \($0.message)" } + result.appleFailures
+        let notes = NotesCounts(result)
+        (summary.notesToContacts, summary.notesToMarkdown) = (notes.toContacts, notes.toMarkdown)
+        summary.notesWarning = plan.notes.skipped ?? prepared.notes.bridge?.log.writeWarnings.first
         return summary
     }
 }

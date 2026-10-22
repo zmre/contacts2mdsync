@@ -64,6 +64,10 @@ public struct UIConflictField: Identifiable, Hashable, Sendable {
     public var options: [UIConflictResolution]
     /// `phones[mobile]`, for help text.
     public var fieldPath: String
+    /// Whole texts of a note body conflict (`contacts`/`markdown` are then
+    /// previews), for the line comparison; `nil` for other fields.
+    public var contactsText: String?
+    public var markdownText: String?
 
     /// Builds the row for `conflict`.
     public init(_ conflict: SyncConflict) {
@@ -77,6 +81,8 @@ public struct UIConflictField: Identifiable, Hashable, Sendable {
         contacts = Self.text(conflict.apple, withLabel: labelsDiffer)
         markdown = Self.text(conflict.markdown, withLabel: labelsDiffer)
         options = conflict.options.map(UIConflictResolution.init)
+        contactsText = conflict.apple.text
+        markdownText = conflict.markdown.text
     }
 
     /// Creates a field (previews and tests).
@@ -198,5 +204,72 @@ extension UIConflictRecord {
         fields.filter { $0.options.contains(preferred) }.map {
             UIConflictChoice(recordID: id, fieldID: $0.id, resolution: preferred)
         }
+    }
+}
+
+// MARK: - Line comparison (note bodies)
+
+/// One line of a two-text comparison.
+public struct UIDiffLine: Identifiable, Hashable, Sendable {
+    public enum Side: Hashable, Sendable {
+        /// In both texts.
+        case both
+        /// Only in the markdown body.
+        case markdown
+        /// Only in the Contacts note.
+        case contacts
+    }
+
+    public var id: Int
+    public var side: Side
+    public var text: String
+}
+
+/// A line diff of a note body conflict (markdown first, then Contacts), for
+/// the Conflicts view: common lines once, lines only on one side marked.
+/// Longest-common-subsequence on lines; above `maxCells` (very long notes)
+/// the texts are shown one after the other without alignment.
+public enum UITextDiff {
+    static let maxCells = 4_000_000
+
+    public static func lines(markdown: String, contacts: String) -> [UIDiffLine] {
+        let left = split(markdown)
+        let right = split(contacts)
+        var result: [(UIDiffLine.Side, String)] = []
+        if left.count * right.count > maxCells {
+            result = left.map { (.markdown, $0) } + right.map { (.contacts, $0) }
+        } else {
+            var table = [[Int]](repeating: [Int](repeating: 0, count: right.count + 1), count: left.count + 1)
+            for row in stride(from: left.count - 1, through: 0, by: -1) {
+                for column in stride(from: right.count - 1, through: 0, by: -1) {
+                    table[row][column] =
+                        left[row] == right[column]
+                        ? table[row + 1][column + 1] + 1 : max(table[row + 1][column], table[row][column + 1])
+                }
+            }
+            var (row, column) = (0, 0)
+            while row < left.count || column < right.count {
+                if row < left.count, column < right.count, left[row] == right[column] {
+                    result.append((.both, left[row]))
+                    row += 1
+                    column += 1
+                } else if column == right.count
+                    || (row < left.count && table[row + 1][column] >= table[row][column + 1])
+                {
+                    result.append((.markdown, left[row]))
+                    row += 1
+                } else {
+                    result.append((.contacts, right[column]))
+                    column += 1
+                }
+            }
+        }
+        return result.enumerated().map { UIDiffLine(id: $0.offset, side: $0.element.0, text: $0.element.1) }
+    }
+
+    private static func split(_ text: String) -> [String] {
+        let normalized = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        return normalized.isEmpty
+            ? [] : normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     }
 }

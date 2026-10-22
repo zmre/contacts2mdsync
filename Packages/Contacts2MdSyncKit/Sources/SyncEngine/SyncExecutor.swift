@@ -21,6 +21,9 @@ public struct SyncResult: Sendable {
     /// token read just before it (the Apple mirror after a run that wrote).
     public var postWriteSnapshot: AppleSnapshot?
     public var postWriteHistoryToken: Data?
+    /// `true` when notes were synced this run (read before and, after Apple
+    /// writes, read again); the notes base was then refreshed.
+    public var notesSynced = false
 
     /// Creates an empty result.
     public init() {}
@@ -129,6 +132,7 @@ public struct SyncExecutor: Sendable {
         if let postSnapshot, let context = plan.context {
             result.newUnapplyable = verify(plan, applied: appliedUpdates, after: postSnapshot, context: context)
         }
+        result.notesSynced = plan.notes.isActive && (postSnapshot?.notesAvailable ?? true)
         try saveState(
             plan, result: result,
             outcome: Outcome(
@@ -215,8 +219,10 @@ public struct SyncExecutor: Sendable {
                     let afterCard = after.cards.first(where: { $0.id == cardID }),
                     let afterValues = after.values(of: afterCard)
                 else { continue }
+                let notesRead = snapshot.notesAvailable && after.notesUnknown != true  // notes verified only if re-read
+                let checked = notesRead ? edits : edits.filter { if case .note = $0 { false } else { true } }
                 entries += Verifier(builder: context.builder, record: record, card: cardID).check(
-                    edits, before: beforeValues, after: afterValues)
+                    checked, before: beforeValues, after: afterValues)
             case .addMember(let cardID, let groupID):
                 guard let after = byCard[cardID], !after.groupIDs.contains(groupID),
                     let name = groupNames[groupID], let tag = context.config.tag(forGroup: name)
@@ -273,6 +279,8 @@ public struct SyncExecutor: Sendable {
                     created[id].flatMap { byCard[$0] } ?? record.cardIDs.lazy.compactMap { byCard[$0] }.first
                     ?? byStamp[id]
                 apple = located ?? apple
+                // Notes not re-read after the writes: the body base stays as it was.
+                if snapshot?.notesAvailable == false { apple?.notesUnknown = true }
             }
             guard let apple else { continue }  // a create that did not happen
             binding.unifiedID = apple.unifiedID
@@ -293,6 +301,7 @@ public struct SyncExecutor: Sendable {
         try state.save(map)
         try state.saveUnapplyable(unapplyable)
         try state.saveVanished(plan.vanished)
+        try NotesSyncState.record(plan.notes, notesSynced: result.notesSynced, in: state)
     }
 
     /// Entries kept plus new ones (one per record, card and field; new wins).
@@ -316,7 +325,8 @@ public struct SyncExecutor: Sendable {
         var index = UnapplyableIndex(unapplyable.filter { $0.recordID == record.recordID })
         return MergeBaseBuilder(
             apple: appleView, markdown: markdownView, appleValues: values, previous: record.previousBase,
-            aliases: index.aliases(record: record.recordID), notesSynced: builder.notesAvailable
+            aliases: index.aliases(record: record.recordID),
+            notesSynced: builder.notesAvailable && apple.notesUnknown != true
         ).build()
     }
 }

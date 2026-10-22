@@ -54,6 +54,14 @@ public struct CLIEnvironment: Sendable {
     public var waitForInterrupt: @Sendable (SyncCoordinator) -> Void
     /// `watch`: debounce and sweep timing.
     public var triggerClock: any TriggerClock
+    /// Contacts notes through Contacts.app scripting for this Mac's notes
+    /// settings (architecture §8); `nil` when not available (tests without a
+    /// fake). Only used without the notes entitlement. Never prompts.
+    public var makeNotesProvider: @Sendable (NotesSettings) -> (any NotesProvider)?
+    /// Notes this process wrote through Contacts.app, shared by every run of
+    /// the process (the app, `watch`), so the echo of our own write is not
+    /// read back as a change.
+    public var notesOwnWrites: NotesOwnWrites
 
     /// Creates an environment.
     public init(
@@ -79,8 +87,12 @@ public struct CLIEnvironment: Sendable {
         makeTriggerSources: @escaping @Sendable (URL, OwnWriteRegistry) -> [any SyncTriggerSource] =
             CLIEnvironment.liveTriggerSources,
         waitForInterrupt: @escaping @Sendable (SyncCoordinator) -> Void = CLIEnvironment.waitForControlC,
-        triggerClock: any TriggerClock = SystemTriggerClock()
+        triggerClock: any TriggerClock = SystemTriggerClock(),
+        makeNotesProvider: @escaping @Sendable (NotesSettings) -> (any NotesProvider)? = { _ in nil },
+        notesOwnWrites: NotesOwnWrites = NotesOwnWrites()
     ) {
+        self.makeNotesProvider = makeNotesProvider
+        self.notesOwnWrites = notesOwnWrites
         self.makeTriggerSources = makeTriggerSources
         self.waitForInterrupt = waitForInterrupt
         self.triggerClock = triggerClock
@@ -160,7 +172,8 @@ public struct CLIEnvironment: Sendable {
             makeStateStore: openStateStore,
             device: { try DeviceIdentityFile(directory: state).loadOrCreate() },
             rootAccess: .bookmark(RootBookmark(directory: state)),
-            trigger: "CLI"
+            trigger: "CLI",
+            makeNotesProvider: { settings in ScriptingNotesProvider(quitWhenDone: settings.quitContactsAfterSync) }
         )
     }
 }

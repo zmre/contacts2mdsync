@@ -206,7 +206,8 @@ extension Reporter {
     }
 
     private static func describe(_ change: AppleRecordChange) -> String {
-        let fields = change.fields.filter { $0 != "stamp" }
+        let detail = bodyDetail(change)
+        let fields = change.fields.filter { $0 != "stamp" }.map { $0 == "body" ? detail ?? $0 : $0 }
         return fields.isEmpty || change.kind != .update
             ? change.title : "\(change.title)  (\(fields.joined(separator: ", ")))"
     }

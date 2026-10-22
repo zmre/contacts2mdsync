@@ -66,6 +66,8 @@ struct SyncRun {
     var context: SyncContext?
     /// Image hashes used this run (cached or computed).
     var imageHashes: [String: ImageHashEntry] = [:]
+    /// Bodies merged without a notes base.
+    var notesBaseline = NotesBaseline()
 
     init(options: SyncOptions, inputs: SyncInputs) {
         self.options = options

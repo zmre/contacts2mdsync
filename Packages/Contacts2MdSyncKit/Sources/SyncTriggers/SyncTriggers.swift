@@ -152,6 +152,13 @@ public struct SyncRunSummary: Hashable, Sendable, Codable {
     public var conflicts = 0
     /// Write failures (`path: message`, `title: message`).
     public var failures: [String] = []
+    /// Records whose markdown body went into Contacts notes, and Contacts
+    /// notes that went into markdown (included in the counts above).
+    public var notesToContacts = 0
+    public var notesToMarkdown = 0
+    /// Notes wanted but skipped this run (no Automation permission, a failed
+    /// read), or note writes that failed: the first warning.
+    public var notesWarning: String?
 
     /// Creates a summary.
     public init(kind: SyncRunKind, startedAt: Date, finishedAt: Date, appleFull: Bool, appleRead: String) {
@@ -177,6 +184,10 @@ public struct SyncRunSummary: Hashable, Sendable, Codable {
             "apple c/u/d \(appleCreated)/\(appleUpdated)/\(appleDeleted)"
             + "  md c/u/d \(markdownCreated)/\(markdownUpdated)/\(markdownTrashed)  review \(pendingReview)"
         if appleHeld > 0 { text += "  held \(appleHeld)" }
+        if notesToContacts + notesToMarkdown > 0 {
+            text += "  notes →contacts \(notesToContacts) →md \(notesToMarkdown)"
+        }
+        if notesWarning != nil { text += "  notes skipped" }
         if !failures.isEmpty { text += "  failures \(failures.count)" }
         return text
     }

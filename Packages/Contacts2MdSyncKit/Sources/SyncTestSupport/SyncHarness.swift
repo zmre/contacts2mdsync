@@ -50,6 +50,8 @@ public final class SyncHarness: Sendable {
     /// history and the cached snapshot like `VaultSession`; `nil` takes a
     /// plain full snapshot without touching the cache.
     public let appleMode: AppleReadMode?
+    /// Notes through (fake) Contacts.app scripting, when enabled.
+    private let notesBridge = Mutex<NotesBridgedStore?>(nil)
 
     /// Creates a world whose vault is configured with `apple_writes` and
     /// `stamp_contacts` as given (the vault id and region are fixed).
@@ -138,7 +140,40 @@ public final class SyncHarness: Sendable {
 
     /// The change tracker runs use (history acceleration, architecture §10).
     public var tracker: AppleChangeTracker {
-        AppleChangeTracker(store: store, state: state, deviceID: device.id)
+        AppleChangeTracker(store: notesSetup.store, state: state, deviceID: device.id)
+    }
+
+    // MARK: - Notes through Contacts.app scripting
+
+    /// Turns on notes through `provider` (like `notes_sync: on` on this Mac):
+    /// runs read and write notes through a `NotesBridgedStore` over `store`
+    /// while the provider reports the permission as granted, and skip notes
+    /// with a warning otherwise.
+    public func enableScriptedNotes(_ provider: FakeNotesProvider, bulkThreshold: Int = 40) {
+        let clock = self.clock
+        notesBridge.withLock {
+            $0 = NotesBridgedStore(
+                inner: store, provider: provider, bulkThreshold: bulkThreshold, now: { clock.now })
+        }
+    }
+
+    /// Turns scripted notes off again (`notes_sync: off`).
+    public func disableScriptedNotes() { notesBridge.withLock { $0 = nil } }
+
+    /// The bridge in use (scripted notes on).
+    public var bridge: NotesBridgedStore? { notesBridge.withLock { $0 } }
+
+    /// The store a run uses and how it handles notes (as `VaultSession` decides).
+    public var notesSetup: (store: any ContactStore, status: NotesStatus) {
+        guard let bridge else { return (store, .off) }
+        switch bridge.provider.availability() {
+        case .entitlement, .scripting(.granted): return (bridge, NotesStatus(source: .scripting))
+        default:
+            return (
+                store,
+                NotesStatus(source: nil, skipped: "Automation permission for Contacts not granted; notes skipped")
+            )
+        }
     }
 
     /// Gathers and plans a sync (writes only the observations, like `plan`).
@@ -157,6 +192,8 @@ public final class SyncHarness: Sendable {
         let loaded = try VaultConfig.load(from: vault)
         var mode = mode
         var reason = FullSnapshotReason.requested
+        let notes = notesSetup
+        let tracker = AppleChangeTracker(store: notes.store, state: state, deviceID: device.id)
         while true {
             let source: AppleSource =
                 mode.map {
@@ -164,16 +201,17 @@ public final class SyncHarness: Sendable {
                         AppleReadRequest(
                             tracker: tracker, mode: $0, fullReason: reason,
                             deleteConfirmInterval: options.deleteConfirmInterval))
-                } ?? .snapshot(store)
+                } ?? .snapshot(notes.store)
             let gathered = try SyncPlanner.gather(
-                fs: vault, state: state, config: (try config, loaded?.text), now: clock.now, apple: source)
+                fs: vault, state: state, config: (try config, loaded?.text), now: clock.now, apple: source,
+                notes: notes.status)
             let plan = try SyncPlanner(fs: vault, keyer: keyer, ids: ids, options: options).plan(
                 gathered.including(device).inputs)
             if SyncPlanner.needsImages(plan, read: gathered.apple) {
                 (mode, reason) = (.full, .imagesNeeded)
                 continue
             }
-            return Planned(plan: plan, index: gathered.index, apple: gathered.apple)
+            return Planned(plan: plan, index: gathered.index, apple: gathered.apple, store: notes.store)
         }
     }
 
@@ -182,6 +220,8 @@ public final class SyncHarness: Sendable {
         public var plan: SyncPlan
         public var index: VaultIndex
         public var apple: AppleRead
+        /// The store the run read (the notes bridge when scripted notes are on).
+        public var store: any ContactStore
     }
 
     /// The outcome of one sync.
@@ -201,14 +241,14 @@ public final class SyncHarness: Sendable {
         try SyncPlanner.recordObservations(plan, index: index, state: state, now: clock.now)
         guard plan.breaker == nil else { return Run(plan: plan, result: nil, apple: gathered.apple) }
         let executor = SyncExecutor(
-            fs: vault, store: store, state: state, clock: clock,
+            fs: vault, store: gathered.store, state: state, clock: clock,
             noteBackups: NoteBackup(directory: backupDirectory, clock: clock),
             author: SyncEngine.transactionAuthor(deviceID: device.id))
         let backups = VCardBackup(directory: backupDirectory, clock: clock)
         let result = try executor.execute(plan) { try backups.backup(store) }
         try state.saveFileCache(index.fileCache.merging(result.markdown.writtenCache) { _, new in new })
         if mode ?? appleMode != nil {
-            try tracker.commit(
+            try AppleChangeTracker(store: gathered.store, state: state, deviceID: device.id).commit(
                 gathered.apple, postWrite: result.postWriteSnapshot.map { ($0, result.postWriteHistoryToken) },
                 compared: gathered.apple.isComplete, now: clock.now)
         }

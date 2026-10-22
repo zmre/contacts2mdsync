@@ -67,9 +67,9 @@ extension RecordMerger {
         }
         let choice = conflict(
             ConflictSpec(
-                field: "body", base: baseText.map { ConflictSide(value: Self.preview($0)) },
-                apple: ConflictSide(value: Self.preview(appleBody)),
-                markdown: ConflictSide(value: Self.preview(markdownBody)), appleState: appleBody,
+                field: "body", base: baseText.map { ConflictSide(value: Self.preview($0), text: $0) },
+                apple: ConflictSide(value: Self.preview(appleBody), text: appleBody),
+                markdown: ConflictSide(value: Self.preview(markdownBody), text: markdownBody), appleState: appleBody,
                 markdownState: markdownBody, options: [.keepApple, .keepMarkdown, .keepBoth]))
         switch choice {
         case .keepApple?: setBody(appleBody, apple: false, markdown: true)

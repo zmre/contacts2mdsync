@@ -138,7 +138,7 @@ struct MainView: View {
         case .blastRadius(let count, let limit):
             Button("Apply Anyway…") { confirming = .applyAnyway(count: count, limit: limit) }
                 .disabled(busy)
-        case .appleWritesDisabled, .identity:
+        case .appleWritesDisabled, .identity, .notesSkipped:
             SettingsLink { Text("Open Settings…") }
         case .waitingForDevice(let name, _, let expires), .leaderElsewhere(let name, let expires, _):
             Button("Take Over…") { confirming = .takeOver(device: name, expires: expires) }

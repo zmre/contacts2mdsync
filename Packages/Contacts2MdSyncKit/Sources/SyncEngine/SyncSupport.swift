@@ -71,9 +71,13 @@ extension SyncPlanner {
     /// Scans the vault, reads Apple as `apple` says (history-accelerated
     /// through a tracker, architecture §10, or a plain full snapshot), and
     /// loads this device's state.
+    ///
+    /// `notes` says how this run handles Contacts notes (`source` set: the
+    /// store reads them); `freshStart` is filled in from this device's
+    /// state, and a run whose notes read failed is turned into a skipped one.
     public static func gather(
         fs: any VaultFS, state: any SyncStateStore, config loaded: (config: VaultConfig, text: String?), now: Date,
-        apple: AppleSource
+        apple: AppleSource, notes: NotesStatus = .off
     ) throws -> GatheredSync {
         let (config, configText) = loaded
         let store = apple.store
@@ -92,7 +96,8 @@ extension SyncPlanner {
                 records: records,
                 vaultTouchedRecords: changedRecords(before: previousCache, after: index.fileCache),
                 settingsKey: AppleChangeTracker.settingsKey(configText: configText, decisions: decisions),
-                vanished: vanished, now: now, deleteConfirmInterval: request.deleteConfirmInterval)
+                vanished: vanished, now: now, deleteConfirmInterval: request.deleteConfirmInterval,
+                notesExpected: try? store.capabilities.notesAvailable)
             read = try request.tracker.read(mode: request.mode, context: context, fullReason: request.fullReason)
         }
         let snapshot = read.snapshot
@@ -119,6 +124,7 @@ extension SyncPlanner {
             uniquingKeysWith: { first, _ in first })
         inputs.imageHashes = try state.loadImageHashes()
         inputs.appleSnapshotComplete = read.isComplete
+        inputs.notes = NotesSyncState.status(notes, read: snapshot, state: state)
         return GatheredSync(
             inputs: inputs, index: index, decisions: decisions, decisionProblems: problems, apple: read)
     }

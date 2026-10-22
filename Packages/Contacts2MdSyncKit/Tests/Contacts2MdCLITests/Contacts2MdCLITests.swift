@@ -23,6 +23,8 @@ final class CLIHarness: Sendable {
     let ids = SequentialIDGenerator()
     let device: DeviceIdentity
     let clock = TestClock(start: Date(timeIntervalSince1970: 1_800_000_000))
+    /// Contacts.app scripting over `store` (used once `notes_sync` is on).
+    let notes: FakeNotesProvider
 
     init(
         store: FakeContactStore = Fixtures.store(), vault: InMemoryVault = InMemoryVault(),
@@ -31,6 +33,7 @@ final class CLIHarness: Sendable {
         self.store = store
         self.vault = vault
         self.device = device
+        notes = FakeNotesProvider(store: store)
         stateDirectory = FileManager.default.temporaryDirectory.appending(path: "c2m-cli-\(UUID().uuidString)")
     }
 
@@ -44,6 +47,7 @@ final class CLIHarness: Sendable {
         let store = self.store
         let vault = self.vault
         let device = self.device
+        let notes = self.notes
         return CLIEnvironment(
             makeStore: { store },
             makeVault: { _ in vault },
@@ -61,7 +65,8 @@ final class CLIHarness: Sendable {
             leaseSettle: 0,
             sleep: { _ in },
             makeTriggerSources: sources,
-            waitForInterrupt: waitForInterrupt
+            waitForInterrupt: waitForInterrupt,
+            makeNotesProvider: { _ in notes }
         )
     }
 

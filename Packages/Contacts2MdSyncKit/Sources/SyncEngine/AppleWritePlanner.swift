@@ -165,14 +165,15 @@ private struct RecordWrites {
         }
     }
 
-    /// The note (notes entitlement only; the merge produces nothing otherwise).
+    /// The note (only when notes are synced; the merge produces nothing
+    /// otherwise): written through to **every** writable card whose note
+    /// differs, because notes are per card (spike S12) and a stale note on a
+    /// linked card would otherwise surface again when precedence changes.
     mutating func body(_ merge: MergeResult) {
         guard let body = merge.appleBody else { return }
         for card in writable {
             let current = ComparisonKeys.body(contact.values(of: card)?.body)
-            guard card.id == target.id || !current.isEmpty, current != (body ?? ""),
-                !blocks(card.id, "body", "text")
-            else { continue }
+            guard current != (body ?? ""), !blocks(card.id, "body", "text") else { continue }
             add(.note(body), to: card.id, field: "body")
         }
     }

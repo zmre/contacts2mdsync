@@ -35,7 +35,10 @@ struct SyncPropertyTests {
         var cards: [String]
     }
 
-    static func world(stamps: Bool, notes: Bool) throws -> (SyncHarness, [Person]) {
+    /// With `scripted`, the store has no notes entitlement and notes go
+    /// through a `FakeNotesProvider` (Contacts.app scripting), turned on
+    /// after the first export: the first sync is the enablement migration.
+    static func world(stamps: Bool, notes: Bool, scripted: Bool = false) throws -> (SyncHarness, [Person]) {
         var contacts: [AppleContact] = []
         var people: [Person] = []
         let names = ["Ada", "Ben", "Cleo", "Dov", "Eva", "Fin", "Gus"]
@@ -62,10 +65,11 @@ struct SyncPropertyTests {
         contacts.append(linked)
         people.append(Person(slug: "ann", path: "Inbox/Ann One.md", cards: ["ann:icloud", "ann:google"]))
         let world = SyncHarness(
-            contacts: contacts, notesEntitled: notes, appleWrites: true, stampContacts: stamps)
+            contacts: contacts, notesEntitled: notes && !scripted, appleWrites: true, stampContacts: stamps)
         world.store.setSynthesizeLinkedIDs(true)
         world.store.setNormalizePhonesOnSave(true)
         try world.export()
+        if scripted { world.enableScriptedNotes(FakeNotesProvider(store: world.store), bulkThreshold: 3) }
         try world.sync(Self.options)
         return (world, people)
     }
@@ -150,15 +154,28 @@ struct SyncPropertyTests {
         "random edits on both sides × rounds → one sync reaches a fixpoint, no duplicates, no data loss",
         arguments: [(false, false), (true, false), (false, true), (true, true)])
     func randomRounds(stamps: Bool, notes: Bool) throws {
+        try Self.rounds(stamps: stamps, notes: notes, scripted: false)
+    }
+
+    @Test(
+        "notes through Contacts.app scripting: random edits → fixpoint, no duplicates, no data loss",
+        arguments: [false, true])
+    func randomRoundsScripted(stamps: Bool) throws {
+        try Self.rounds(stamps: stamps, notes: true, scripted: true)
+    }
+
+    static func rounds(stamps: Bool, notes: Bool, scripted: Bool) throws {
         var totals = Totals()
         for seed in UInt64(1)...4 {
             var mutator = Mutator(
-                random: SeededRandom(seed: seed &* 7919 &+ (stamps ? 1 : 0) &+ (notes ? 2 : 0)), notes: notes)
-            let (world, people) = try Self.world(stamps: stamps, notes: notes)
+                random: SeededRandom(
+                    seed: seed &* 7919 &+ (stamps ? 1 : 0) &+ (notes ? 2 : 0) &+ (scripted ? 4 : 0)),
+                notes: notes)
+            let (world, people) = try Self.world(stamps: stamps, notes: notes, scripted: scripted)
             let contactCount = world.store.contacts.count
             var pending = Set<String>()
             for round in 0..<10 {
-                let context = "seed \(seed) round \(round) stamps \(stamps) notes \(notes)"
+                let context = "seed \(seed) round \(round) stamps \(stamps) notes \(notes) scripted \(scripted)"
                 let before = Dictionary(uniqueKeysWithValues: people.map { ($0.slug, Self.appleKeys(world, $0)) })
                 for _ in 0..<Int.random(in: 3...12, using: &mutator.random) { try mutator.edit(world, people) }
                 let edited = Dictionary(

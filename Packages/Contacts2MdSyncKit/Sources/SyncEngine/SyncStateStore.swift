@@ -115,6 +115,12 @@ public struct SessionSides: Codable, Hashable, Sendable {
     public var heldReason: String?
     /// `full` or `incremental` (how Apple Contacts was read).
     public var appleRead: String?
+    /// Notes this run: `entitlement`, `scripting`, `skipped` or `nil` (off).
+    public var notes: String?
+    /// Records whose markdown body was written to Contacts notes / whose
+    /// Contacts note was written to markdown (`nil`: notes off, or older runs).
+    public var notesToContacts: Int?
+    public var notesToMarkdown: Int?
 
     /// Creates counts.
     public init(
@@ -143,6 +149,9 @@ public struct SessionSides: Codable, Hashable, Sendable {
         case held
         case heldReason = "held_reason"
         case appleRead = "apple_read"
+        case notes
+        case notesToContacts = "notes_to_contacts"
+        case notesToMarkdown = "notes_to_markdown"
     }
 }
 

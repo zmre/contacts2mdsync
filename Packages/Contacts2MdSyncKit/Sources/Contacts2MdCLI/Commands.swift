@@ -249,11 +249,15 @@ struct LeaseCommand: ParsableCommand, EnvironmentCommand {
 struct ConfigCommand: ParsableCommand, EnvironmentCommand {
     static let configuration = CommandConfiguration(
         commandName: "config",
-        abstract: "Show or change the vault's sync switches in .c2mdsync/config.yaml.",
+        abstract: "Show or change the vault's sync switches in .c2mdsync/config.yaml (and this Mac's notes setting).",
         discussion: """
             apple_writes: lets `sync` write to Apple Contacts (default disabled). \
             stamp_contacts: stamps each synced contact with its record id (default false; needed only when \
-            several devices sync one vault).
+            several devices sync one vault). \
+            notes: sync Contacts notes with note bodies through Contacts.app scripting on this Mac (default \
+            off; a per-Mac setting, not in the vault config). It needs the Automation permission for \
+            Contacts, which only the app asks for (Settings ▸ Advanced ▸ Contact notes); without it syncs \
+            skip notes with a warning. Builds with the notes entitlement always sync notes.
             """)
 
     @OptionGroup var options: RootOptions
@@ -264,9 +268,15 @@ struct ConfigCommand: ParsableCommand, EnvironmentCommand {
     @Option(name: .long, help: "true | false")
     var stampContacts: Switch?
 
+    @Option(name: .long, help: "on | off (this Mac: Contacts notes through Contacts.app scripting)")
+    var notes: Switch?
+
+    @Option(name: .long, help: "true | false (this Mac: quit Contacts.app after a sync that opened it; default true)")
+    var quitContacts: Switch?
+
     func run(in environment: CLIEnvironment) -> CLIExitCode {
         Session(options: options, environment: environment, command: "config")
-            .config(appleWrites: appleWrites, stampContacts: stampContacts)
+            .config(appleWrites: appleWrites, stampContacts: stampContacts, notes: notes, quitContacts: quitContacts)
     }
 }
 

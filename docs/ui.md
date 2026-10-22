@@ -132,6 +132,7 @@ Step 5 — Confirm
 
 - "Needs Review" appears only when something is pending; otherwise the header reads "✓ In sync. Nothing needs your attention."
 - "Since Last Sync" is computed continuously from a dry-run, so it shows what the next sync will do.
+- Contact notes (§9 Advanced): when notes are synced, the live run summary line mentions how many bodies went each way (`notes →contacts 2 →md 1`, or `notes skipped`). When the latest check skipped notes, a warning banner says "Contact notes were skipped: this Mac does not allow Contacts2MdSync to control Contacts. Allow it in Settings ▸ Advanced ▸ Contact notes." (or "Contact notes were skipped this time: <reason>." for a failed read) with [Open Settings…].
 - During sync: toolbar shows `ProgressView` + "Syncing… 312 of 1,248" and a Stop button.
 - Another device holds the lease:
 
@@ -165,6 +166,7 @@ Step 5 — Confirm
 
 - PREVIOUS column in secondary text; character-level diff highlights for scalars, set diff for multi-value.
 - "Keep Both" only for multi-value fields and the notes body.
+- Notes body conflicts ("Notes") show the first line of each side plus a [Compare…] button. It opens a scrollable line diff of the markdown body against the Contacts note: lines only in markdown marked −, lines only in Contacts marked +, shared lines plain. Keep Contacts / Keep Markdown / Keep Both work as for other fields; Keep Both writes the markdown text, a `---` line, then the Contacts text, to both sides.
 - Batch: multi-select in the middle list → Resolve Selected → confirmation ("Apply 'Prefer Markdown' to 3 contacts (4 fields)?").
 - Keys: ↑↓ contacts, ⌘1/⌘2/⌘3 choose, ⌘↩ apply.
 
@@ -244,15 +246,16 @@ Deleted in Markdown
 ## 8. Activity
 
 ```
-│ Time            │ Device       │ Trigger │ Contacts C/U/D │ Markdown C/U/D │ Review │ Result │
-│ Today 10:42 AM  │ MacBook Pro  │ Live    │     0/2/0      │     1/5/1      │   3    │  ✓     │
-│ Today  8:01 AM  │ iPad         │ Manual  │     0/0/0      │     0/1/0      │   —    │  ✓     │
-│ Yesterday 6:12P │ MacBook Pro  │ Live    │       —        │       —        │   —    │  ⚠ 1   │
-│ Yesterday 3:00A │ MacBook Pro  │ CLI     │     0/0/0      │     2/0/0      │   2    │  ⚠ 2   │
+│ Time            │ Device       │ Trigger │ Contacts C/U/D │ Markdown C/U/D │ Notes                  │ Review │ Result │
+│ Today 10:42 AM  │ MacBook Pro  │ Live    │     0/2/0      │     1/5/1      │ 2 → Contacts · 1 → notes│   3    │  ✓     │
+│ Today  8:01 AM  │ iPad         │ Manual  │     0/0/0      │     0/1/0      │ —                      │   —    │  ✓     │
+│ Yesterday 6:12P │ MacBook Pro  │ Live    │       —        │       —        │ skipped                │   —    │  ⚠ 1   │
+│ Yesterday 3:00A │ MacBook Pro  │ CLI     │     0/0/0      │     2/0/0      │ 0 → Contacts · 2 → notes│   2    │  ⚠ 2   │
 ```
 
 - Inspector lists each change ("Updated Jane Doe.md — job, phone") with Reveal / Open.
 - Trigger is Manual, Live, Launch, Wake, Sweep or CLI. Items a CLI run skipped show up in Review badges like any others.
+- Notes: bodies written into Contacts notes and into markdown notes that run; `skipped` (tooltip: why, e.g. "Automation permission for Contacts not granted") when notes are on but were not read; `—` when notes are off or for runs from before notes.
 - Warnings expand inline ("34 files not downloaded from iCloud Drive; skipped").
 - File ▸ Export Log…
 
@@ -282,11 +285,27 @@ Scope     (Planned — shown disabled)
           Include   ○ All contacts  ○ Only these groups…
           Exclude   Groups: [ + ]   Contacts: [ + ]
 
-Advanced  Contact notes      ◦ Not available — notes stay markdown-only
+Advanced  Contact notes
+            Source           ● Contacts.app scripting      (Entitlement / Contacts.app scripting / Off)
+            [◉] Sync notes through Contacts.app            (hidden when the entitlement is present)
+            Automation permission  Granted  [Check Again]  (Not asked yet [Ask Again] / Denied [Open Privacy
+                                                            Settings…] / Not known until Contacts.app runs [Ask Again])
+            [◉] Quit Contacts.app after syncing when it was opened for the sync
+            (footer) Without Apple's notes entitlement, Contacts2MdSync can sync note bodies by
+            controlling Contacts.app: during a sync it opens Contacts.app hidden, reads every card's
+            note in one go, writes changed notes card by card, and quits it again. Scheduled and
+            command-line syncs never ask; without permission they skip notes.
           Sync lease         Held by: none · [Take Over…]
           Backups            10 kept · [Show in Finder]
           [Rescan Everything…]  [Reset Sync State…]
 ```
+
+**Turning on contact notes.** The toggle opens a sheet first: Contacts2MdSync will control Contacts.app to read and write the Notes field of each card; macOS asks once ("Contacts2MdSync wants to control Contacts"); during a sync Contacts.app is opened hidden and quit afterwards if the sync opened it and you are not using it; the first sync with notes merges every body without a base, and you see what it will do before it runs. [Cancel] [Continue]. Continue saves `notes_sync: on` and triggers the macOS prompt (the only place the app asks; syncs never prompt). Then:
+
+- **Granted**: an enablement summary from the next check: "12 notes go into markdown, 3 markdown bodies go into Contacts (largest 4,812 characters), 140 already match, 2 conflicts to resolve", with a scrollable list of the markdown bodies going into Contacts (title, path, size). If Apple writes are off, it says the bodies wait until they are on. [Later] [Sync Now].
+- **Denied**: "Allow it in System Settings ▸ Privacy & Security ▸ Automation ▸ Contacts2MdSync ▸ Contacts, then sync again." [Open Privacy Settings…]. The setting stays on; syncs skip notes with a warning until it is allowed.
+
+Turning it off saves at once. The next sync with notes starts without a base again.
 
 ## 10. Menu bar extra
 
@@ -404,6 +423,8 @@ Every review answer is a decision appended to `.c2mdsync/devices/<device>/decisi
 - **iCloud versions** (`version-…` items) appear in Duplicates as a group: the Current card and one card per version, with the device that saved it, when, and the changed keys. Keep Current / Keep This Version record `keep-current` / `keep-other:N`; the leader applies the choice on its next sync.
 
 **Keep This File** (merge records: one linked contact carrying several sync ids). The answer is the item's `keep:N` choice, recorded as a `merge-keep` decision. The confirmation names the note that stays synced and the others, which the next sync detaches (`c2mdsync.status: detached`, left in place, nothing deleted), and says their sync ids are removed from the contact's cards, or that the removal is held while Apple writes are off.
+
+**Contact notes (notes scripting).** Settings ▸ Advanced ▸ Contact notes is built as in §9: the source (entitlement, Contacts.app scripting, off), the `notes_sync` toggle (saved to `<state>/notes.json` through `NotesSettingsStore`, shared with `contacts2md config --notes`), the Automation permission read without launching Contacts.app (`ScriptingNotesProvider.currentPermission()`), the prompt through `requestPermission()` on Continue, the quit toggle (`quit_contacts_after_sync`), and the enablement summary from the plan's `NotesBaseline`. Activity's Notes column reads `SessionRecord.sides` (`notes`, `notes_to_contacts`, `notes_to_markdown`); live runs report `SyncRunSummary.notesToContacts` / `notesToMarkdown` / `notesWarning`. Body conflicts carry both full texts for Compare…. Never verified against a real Contacts.app (architecture §8 "Not covered").
 
 **Still pending.**
 

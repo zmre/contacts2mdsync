@@ -46,9 +46,21 @@ struct MarkdownMaterializer {
             if let value = merge.markdownScalars[field] { set(field, value, in: &result) }
         }
         if let tags = merge.markdownTags { result.tags = self.tags(note.tags, final: tags) }
-        if let body = merge.markdownBody { result.body = body.map { $0 + "\n" } }
+        if let body = merge.markdownBody { result.body = body.map { Self.leadingBlankLines(note.body) + $0 + "\n" } }
         let rename = retitle(&result, original: note, merge: merge, base: base)
         return (result, rename)
+    }
+
+    /// The blank lines a body starts with (kept when the body is replaced,
+    /// so the gap after the frontmatter stays as the user wrote it).
+    static func leadingBlankLines(_ body: String?) -> String {
+        var prefix = ""
+        var rest = Substring(body ?? "")
+        while let newline = rest.firstIndex(of: "\n"), rest[..<newline].allSatisfy(\.isWhitespace) {
+            prefix += "\n"
+            rest = rest[rest.index(after: newline)...]
+        }
+        return prefix
     }
 
     // MARK: - Scalars

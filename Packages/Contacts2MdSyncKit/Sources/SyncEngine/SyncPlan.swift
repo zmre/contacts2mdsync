@@ -80,6 +80,9 @@ public struct SyncInputs: Sendable {
     /// history (an incremental run): Apple deletions are then neither
     /// recorded, confirmed nor counted by the breaker (architecture §9, §10).
     public var appleSnapshotComplete = true
+    /// How this run handles Contacts notes (architecture §8). With
+    /// `freshStart`, every record's body merges without a base.
+    public var notes: NotesStatus = .off
 
     /// Creates inputs.
     public init(
@@ -199,6 +202,11 @@ public struct SyncPlan: Sendable {
     public var stampContacts = false
     /// Records possibly deleted in Contacts, waiting for a second snapshot.
     public var awaitingDeleteConfirmation: [String] = []
+    /// How this run handles Contacts notes.
+    public var notes: NotesStatus = .off
+    /// Bodies merged without a notes base (the enablement migration on the
+    /// first sync with notes; adopted notes later).
+    public var notesBaseline = NotesBaseline()
 
     // Bookkeeping for the executor.
     var removedRecords = Set<UUID>()

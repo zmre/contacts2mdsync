@@ -138,6 +138,10 @@ struct Session {
                 excludeGlobs: loaded?.config.excludePaths ?? [], cache: (try? state?.loadFileCache()) ?? [:])
             let needsReview = reportNotes(index)
             let hasAccess = try reportApple()
+            if hasAccess {
+                reportNotesSetting(
+                    VaultSession(root: root.url, environment: environment).notesSourceStatus(), changed: false)
+            }
             report.info("summary  \(String(format: "%.1fs", elapsed))")
             guard hasAccess, loaded != nil else { return .notRunnable }
             return needsReview || pendingCount > 0 ? .needsReview : .success
@@ -191,7 +195,8 @@ struct Session {
     private func reportApple() throws -> Bool {
         do {
             let store = try environment.makeStore()
-            let notes = try store.capabilities.notesAvailable ? "available" : "unavailable (no entitlement)"
+            let notes =
+                try store.capabilities.notesAvailable ? "available" : "unavailable (no entitlement; see `notes` below)"
             let snapshot = try store.snapshot()
             let linked = snapshot.contacts.filter { $0.cards.count > 1 }.count
             report.info(

@@ -46,12 +46,31 @@ public struct PreparedSync: Sendable {
     /// How Apple Contacts was read (full snapshot or history-incremental).
     public let apple: AppleRead
     let tracker: AppleChangeTracker
+    /// The notes side of the run (provider session, bridge log).
+    public let notes: NotesRunHandle
 
     /// The Apple snapshot the plan was made from (read-only; no second read
     /// of Contacts needed for review details). After an incremental read it
     /// is the cached snapshot patched with the re-read contacts, and images
     /// of contacts that were not re-read have no bytes (`imageUnavailable`).
     public var snapshot: AppleSnapshot { apple.snapshot }
+}
+
+/// How many records' bodies moved in a run.
+struct NotesCounts {
+    var toContacts: Int
+    var toMarkdown: Int
+
+    init(_ result: SyncResult) {
+        toContacts = result.apple.filter { $0.kind == .update && $0.fields.contains("body") }.count
+        toMarkdown = result.markdown.updated.filter { $0.changedFields.contains("body") }.count
+    }
+
+    init(planned plan: SyncPlan) {
+        toContacts =
+            plan.appleWritesAllowed ? plan.apple.filter { $0.kind == .update && $0.fields.contains("body") }.count : 0
+        toMarkdown = plan.markdown.updates.filter { $0.changedFields.contains("body") }.count
+    }
 }
 
 /// Why a sync did not start.
@@ -123,7 +142,8 @@ extension VaultSession {
                 description:
                     "first sync not done on this Mac: run it in Contacts2MdSync (or `contacts2md export --yes`) once")
         }
-        let store = try environment.makeStore()
+        let notes = notesSetup(for: try environment.makeStore(), backups: directory.appending(path: "backups"))
+        let store = notes.store
         let state = try environment.makeStateStore(directory)
         guard try state.load().lastExport != nil else {
             throw VaultNotReady(
@@ -140,12 +160,16 @@ extension VaultSession {
         var mode = request.appleMode
         var fullReason = FullSnapshotReason.requested
         while true {
-            let gathered = try SyncPlanner.gather(
+            var gathered = try SyncPlanner.gather(
                 fs: fs, state: state, config: (config, text), now: environment.clock.now,
                 apple: .tracked(
                     AppleReadRequest(
                         tracker: tracker, mode: mode, fullReason: fullReason,
-                        deleteConfirmInterval: options.deleteConfirmInterval)))
+                        deleteConfirmInterval: options.deleteConfirmInterval)),
+                notes: notes.status)
+            if gathered.inputs.notes.skipped != nil, let log = notes.handle.bridge?.log {
+                gathered.inputs.notes.skipped = Self.skipWarning(log) ?? gathered.inputs.notes.skipped
+            }
             try state.saveDecisionMirror(gathered.decisions)
             progress(.planning)
             let plan = try SyncPlanner(fs: fs, keyer: keyer, ids: environment.ids, options: options).plan(
@@ -157,7 +181,7 @@ extension VaultSession {
             return PreparedSync(
                 fs: fs, store: store, state: state, stateDirectory: directory, index: gathered.index,
                 decisions: gathered.decisions, decisionProblems: gathered.decisionProblems, config: config,
-                plan: plan, apple: gathered.apple, tracker: tracker)
+                plan: plan, apple: gathered.apple, tracker: tracker, notes: notes.handle)
         }
     }
 
@@ -176,6 +200,7 @@ extension VaultSession {
     /// mirror advances too (it describes Contacts, not what was synced),
     /// unless a breaker tripped.
     public func recordSyncPlan(_ prepared: PreparedSync, command: String, startedAt: Date) throws {
+        defer { prepared.notes.finish() }
         try SyncPlanner.recordObservations(
             prepared.plan, index: prepared.index, state: prepared.state, now: environment.clock.now)
         if prepared.plan.breaker == nil {
@@ -191,6 +216,7 @@ extension VaultSession {
     public func executeSync(
         _ prepared: PreparedSync, command: String, startedAt: Date, onBackup: (BackupReceipt) -> Void = { _ in }
     ) throws -> SyncResult {
+        defer { prepared.notes.finish() }
         let device = try environment.device()
         let backups = prepared.stateDirectory.appending(path: "backups")
         let executor = SyncExecutor(
@@ -252,6 +278,12 @@ extension VaultSession {
             markdownDeleted: result?.trashed.count ?? 0,
             held: plan.appleHold == nil ? 0 : plan.apple.count, heldReason: plan.appleHold?.reason,
             appleRead: prepared.apple.isComplete ? "full" : "incremental")
+        record.sides?.notes = plan.notes.source?.rawValue ?? (plan.notes.skipped == nil ? nil : "skipped")
+        if plan.notes.isActive, let result {
+            let counts = NotesCounts(result)
+            record.sides?.notesToContacts = counts.toContacts
+            record.sides?.notesToMarkdown = counts.toMarkdown
+        }
         return record
     }
 

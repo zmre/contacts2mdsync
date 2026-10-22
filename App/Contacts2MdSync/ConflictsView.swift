@@ -135,8 +135,15 @@ private struct ConflictDetail: View {
     let canApply: Bool
     let apply: () async -> Void
     let skip: () -> Void
+    @State private var comparing: BodyComparison?
 
     var body: some View {
+        content.sheet(item: $comparing) { comparison in
+            BodyComparisonView(comparison: comparison) { comparing = nil }
+        }
+    }
+
+    private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 4) {
@@ -169,7 +176,16 @@ private struct ConflictDetail: View {
                             }
                             Text(field.previous ?? "—").foregroundStyle(.secondary)
                             Text(field.contacts)
-                            Text(field.markdown)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(field.markdown)
+                                if let contacts = field.contactsText, let markdown = field.markdownText {
+                                    Button("Compare…") {
+                                        comparing = BodyComparison(contacts: contacts, markdown: markdown)
+                                    }
+                                    .controlSize(.small)
+                                    .help("Show both notes line by line")
+                                }
+                            }
                         }
                         GridRow {
                             Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
@@ -217,6 +233,78 @@ private struct ConflictDetail: View {
     private func chooseAll(_ resolution: UIConflictResolution) {
         for field in record.fields where field.options.contains(resolution) {
             choices[field.id] = resolution
+        }
+    }
+}
+
+/// Both texts of a note body conflict.
+private struct BodyComparison: Identifiable {
+    let id = UUID()
+    let contacts: String
+    let markdown: String
+}
+
+/// A note body conflict line by line: lines in both texts once, lines only
+/// in the markdown body marked −, lines only in the Contacts note marked +.
+/// Scrolls for long notes (Contacts notes reach ~50,000 characters).
+private struct BodyComparisonView: View {
+    let comparison: BodyComparison
+    let done: () -> Void
+
+    private var lines: [UIDiffLine] {
+        UITextDiff.lines(markdown: comparison.markdown, contacts: comparison.contacts)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Notes: Markdown vs Contacts").font(.title3.weight(.semibold))
+            HStack(spacing: 16) {
+                Label("only in Markdown", systemImage: "minus.square.fill").foregroundStyle(.red)
+                Label("only in Contacts", systemImage: "plus.square.fill").foregroundStyle(.green)
+            }
+            .font(.caption)
+            ScrollView([.vertical, .horizontal]) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(lines) { line in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(marker(line.side)).foregroundStyle(.secondary)
+                            Text(line.text.isEmpty ? " " : line.text).textSelection(.enabled)
+                        }
+                        .font(.body.monospaced())
+                        .padding(.horizontal, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(background(line.side))
+                    }
+                }
+            }
+            .frame(minHeight: 280)
+            .background(.background)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            HStack {
+                Text("Keep Both writes the markdown text, a --- line, then the Contacts text, to both sides.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Done", action: done).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 620, idealWidth: 720, minHeight: 420, idealHeight: 560)
+    }
+
+    private func marker(_ side: UIDiffLine.Side) -> String {
+        switch side {
+        case .both: " "
+        case .markdown: "−"
+        case .contacts: "+"
+        }
+    }
+
+    private func background(_ side: UIDiffLine.Side) -> Color {
+        switch side {
+        case .both: .clear
+        case .markdown: .red.opacity(0.12)
+        case .contacts: .green.opacity(0.12)
         }
     }
 }

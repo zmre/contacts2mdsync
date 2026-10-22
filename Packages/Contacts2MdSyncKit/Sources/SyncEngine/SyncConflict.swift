@@ -6,11 +6,15 @@ public struct ConflictSide: Codable, Hashable, Sendable {
     public var value: String?
     /// The element label (multi-value fields).
     public var label: String?
+    /// The whole text when `value` is only a preview (note bodies), for a
+    /// line-by-line comparison.
+    public var text: String?
 
     /// Creates a side.
-    public init(value: String?, label: String? = nil) {
+    public init(value: String?, label: String? = nil, text: String? = nil) {
         self.value = value
         self.label = label
+        self.text = text
     }
 
     /// `"value"` / `label: "value"` / `(absent)`.

@@ -36,6 +36,8 @@ public enum FullSnapshotReason: String, Hashable, Sendable, Codable {
     case cacheInconsistent = "cache-inconsistent"
     /// The plan needs image bytes of a contact the history did not touch.
     case imagesNeeded = "images-needed"
+    /// Notes were turned on or off (or skipped) since the cached snapshot.
+    case notesChanged = "notes-changed"
 
     /// Short text for output.
     public var text: String {
@@ -52,6 +54,7 @@ public enum FullSnapshotReason: String, Hashable, Sendable, Codable {
         case .deleteConfirmationDue: "deletion due for confirmation"
         case .cacheInconsistent: "cache inconsistent"
         case .imagesNeeded: "images needed"
+        case .notesChanged: "notes turned on or off"
         }
     }
 }
@@ -115,12 +118,17 @@ public struct AppleReadContext: Sendable {
     public var vanished: [UUID: Date]
     public var now: Date
     public var deleteConfirmInterval: TimeInterval
+    /// Whether this run reads notes; a cached snapshot made the other way
+    /// cannot be patched (`nil`: either is fine).
+    public var notesExpected: Bool?  // swiftlint:disable:this discouraged_optional_boolean
 
     /// Creates a context.
     public init(
         records: RecordMap, vaultTouchedRecords: Set<UUID>, settingsKey: String, vanished: [UUID: Date], now: Date,
-        deleteConfirmInterval: TimeInterval = SyncOptions().deleteConfirmInterval
+        deleteConfirmInterval: TimeInterval = SyncOptions().deleteConfirmInterval,
+        notesExpected: Bool? = nil  // swiftlint:disable:this discouraged_optional_boolean
     ) {
+        self.notesExpected = notesExpected
         self.records = records
         self.vaultTouchedRecords = vaultTouchedRecords
         self.settingsKey = settingsKey
@@ -215,11 +223,7 @@ public struct AppleChangeTracker: Sendable {
     /// The cache and the history since its token, or why a full read is needed.
     private func incrementalChanges(context: AppleReadContext) throws -> IncrementalChanges {
         guard let cache = loadCache(), let token = cache.token else { return .failure(.noCache) }
-        guard cache.settingsKey == context.settingsKey else { return .failure(.settingsChanged) }
-        let due = { (since: Date) in context.now.timeIntervalSince(since) >= context.deleteConfirmInterval }
-        if context.vanished.values.contains(where: due) {
-            return .failure(.deleteConfirmationDue)
-        }
+        if let mismatch = Self.mismatch(cache, context: context) { return .failure(mismatch) }
         let history: HistoryResult
         do {
             history = try store.changes(since: token, excluding: authors)
@@ -235,6 +239,14 @@ public struct AppleChangeTracker: Sendable {
         case .changes(let changes) where changes.groupsChanged: return .failure(.groupsChanged)
         case .changes(let changes): return .success((cache, changes))
         }
+    }
+
+    /// Why the cache cannot be patched for this run, if it cannot.
+    private static func mismatch(_ cache: AppleSnapshotCache, context: AppleReadContext) -> FullReadNeeded? {
+        if cache.settingsKey != context.settingsKey { return .settingsChanged }
+        if let expected = context.notesExpected, cache.notesAvailable != expected { return .notesChanged }
+        let due = { (since: Date) in context.now.timeIntervalSince(since) >= context.deleteConfirmInterval }
+        return context.vanished.values.contains(where: due) ? .deleteConfirmationDue : nil
     }
 
     private func full(_ reason: FullSnapshotReason, context: AppleReadContext) throws -> AppleRead {

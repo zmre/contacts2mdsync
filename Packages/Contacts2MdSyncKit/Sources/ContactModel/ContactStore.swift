@@ -40,7 +40,8 @@ public protocol ContactStore: Sendable {
 
 /// Feature flags discovered at runtime.
 public struct StoreCapabilities: Hashable, Sendable {
-    /// `CNContactNoteKey` readable (the notes entitlement is present).
+    /// Notes readable: `CNContactNoteKey` (the notes entitlement), or the
+    /// Contacts.app scripting bridge (`NotesBridgedStore`, architecture §8).
     public var notesAvailable: Bool
     /// The iCloud container's identifier, when there is one.
     public var iCloudContainerID: String?
@@ -157,6 +158,10 @@ public struct AppleContact: Hashable, Sendable, Codable {
     public var imageUnavailable: Bool
     /// Groups any underlying card belongs to.
     public var groupIDs: [String]
+    /// `true` when some card's note could not be read (scripting did not see
+    /// the card): the body is *unknown*, never empty (§8). Optional so cached
+    /// snapshots from before it decode. `nil`: known, or notes not read.
+    public var notesUnknown: Bool?  // swiftlint:disable:this discouraged_optional_boolean
 
     /// Creates a contact.
     public init(
@@ -209,30 +214,6 @@ public struct AppleSnapshot: Hashable, Sendable, Codable {
         self.containers = containers
         self.groups = groups
         self.notesAvailable = notesAvailable
-    }
-}
-
-/// The URL stamp that ties an Apple card to a markdown record.
-public enum SyncStamp {
-    /// Label of the stamp URL.
-    public static let label = "c2mdsync"
-    /// Scheme prefix of the stamp URL value.
-    public static let prefix = "x-c2mdsync:"
-
-    /// `x-c2mdsync:<uuid>` for `id`.
-    public static func url(for id: UUID) -> String { prefix + id.uuidString.lowercased() }
-
-    /// The id in a stamp URL value, or `nil` when `value` is not a stamp.
-    public static func id(fromURL value: String) -> UUID? {
-        let trimmed = value.trimmingCharacters(in: .whitespaces)
-        guard trimmed.lowercased().hasPrefix(prefix) else { return nil }
-        return UUID(uuidString: String(trimmed.dropFirst(prefix.count)))
-    }
-
-    /// `true` for any value using our scheme (even with a malformed uuid);
-    /// such values are never exported to markdown.
-    public static func isStamp(_ value: String) -> Bool {
-        value.trimmingCharacters(in: .whitespaces).lowercased().hasPrefix(prefix)
     }
 }
 

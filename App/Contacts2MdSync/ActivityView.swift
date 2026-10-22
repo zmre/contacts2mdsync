@@ -59,12 +59,29 @@ struct ActivityView: View {
                     .help(row.holdReason.map { "Apple changes not made: \($0)" } ?? "")
             }
             .width(min: 40, ideal: 50)
+            TableColumn("Notes") { row in
+                Text(row.notes ?? "—")
+                    .monospacedDigit()
+                    .foregroundStyle(row.notes == "skipped" ? .orange : row.notes == nil ? .secondary : .primary)
+                    .help(notesHelp(row))
+            }
+            .width(min: 60, ideal: 130)
             TableColumn("Review") { row in
                 Text(row.review > 0 ? row.review.formatted() : "—").monospacedDigit()
             }
             .width(min: 50, ideal: 60)
             TableColumn("Result") { row in result(row) }
                 .width(min: 50, ideal: 70)
+        }
+    }
+
+    /// What the Notes column means for a row.
+    private func notesHelp(_ row: UIActivityRow) -> String {
+        switch row.notes {
+        case nil: "Contact notes were not synced (off, or a preview)"
+        case "skipped"?:
+            "Contact notes were skipped: no Automation permission for Contacts, or Contacts.app did not answer"
+        default: "Notes bodies written to Contacts notes, and Contacts notes written to markdown"
         }
     }
 

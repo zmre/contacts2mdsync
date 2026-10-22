@@ -314,7 +314,7 @@ Run the steps in this order. Steps 2–7 touch the real address book, but only s
 
 Propagation: confirmed by the user on a re-run (2026-10-22) — a scripted note appears on iCloud.com and iPhone like any Contacts edit. The S13 linked pair (which got a test note on its Google card) was not cleaned up by `cleanup --spike s12` — run `c2m-spike cleanup --spike s13 --yes`.
 
-Design consequences (architecture §8): read notes per card in one bulk call; a record's Apple note = precedence card (stamped/iCloud first), with differing notes on other cards handled like any single-valued field; write through to every writable card of the record and verify per card; launch Contacts.app hidden and quit it if we launched it; headless runs without Automation permission skip notes with a warning (never prompt).
+Design consequences (architecture §8): read notes per card in one bulk call; a record's Apple note = precedence card (stamped/iCloud first), with differing notes on other cards handled like any single-valued field; write through to every writable card of the record and verify per card; launch Contacts.app hidden and quit it if we launched it; headless runs without Automation permission skip notes with a warning (never prompt). These are implemented: see [architecture §8 "As implemented (notes scripting)"](architecture.md#as-implemented-notes-scripting).
 
 ## S12 raw output
 

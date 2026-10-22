@@ -72,7 +72,7 @@ extension PlanningRun {
             recordID: candidate.recordID, cardIDs: candidate.apple.cardIDs, stampID: candidate.apple.stampIDs.first,
             plannedNote: note, existingNote: nil, markdownImage: .none,
             plannedImage: candidate.apple.imageData.map { .hash(FileStamp.hash($0)) } ?? .none,
-            previousBase: records[candidate.recordID]?.base, apple: candidate.apple, title: note.title)
+            previousBase: notesBase(records[candidate.recordID]?.base), apple: candidate.apple, title: note.title)
         sync?.states[candidate.recordID] = state
         return note
     }
@@ -138,15 +138,18 @@ extension PlanningRun {
         let appleImage: ImageState =
             contact.imageUnavailable ? .unknown : contact.imageData.map { .hash(FileStamp.hash($0)) } ?? .none
         let noteImage = markdownImage(existing.image, notePath: candidate.path)
-        let previous = records[id]?.base
+        let previous = notesBase(records[id]?.base)
         let base = BaseView.of(previous)
-        let appleView = tools.builder.apple(values(contact), tags: appleTags(contact), image: appleImage)
+        var appleView = tools.builder.apple(values(contact), tags: appleTags(contact), image: appleImage)
+        // A card whose note could not be read: the body is unknown, not empty.
+        if contact.notesUnknown == true { appleView.body = nil }
         let aliases = sync?.unapplyable.aliases(record: id) ?? [:]
         let decisions = self.decisions
+        let markdownView = tools.builder.markdown(existing, image: noteImage.state)
         let merge = RecordMerger.merge(
             RecordMerger(
                 recordID: id, title: candidate.title, path: candidate.path, base: base, apple: appleView,
-                markdown: tools.builder.markdown(existing, image: noteImage.state),
+                markdown: markdownView,
                 resolution: { decisions.resolution(ofConflict: $0) }, aliases: aliases))
         for (field, alias) in aliases
         where ScalarField(rawValue: field).map({ ScalarField.key(appleView.scalars[$0]) == alias.observed }) == true {
@@ -154,6 +157,9 @@ extension PlanningRun {
         }
         sync?.conflicts += merge.conflicts
         plan.reviews += merge.conflicts.map(ReviewItem.conflict)
+        if base.body == .unknown, let appleBody = appleView.body {
+            noteBaseline(candidate, merge: merge, apple: appleBody, markdown: markdownView.body ?? "")
+        }
 
         var (result, rename) = tools.materializer.apply(merge, to: existing, base: base)
         if let rename { sync?.renames[id] = rename }
@@ -207,6 +213,32 @@ extension PlanningRun {
         self.sync = sync
     }
 
+    /// The stored base, without its body on the first sync with notes
+    /// (`NotesStatus.freshStart`): bodies then merge by the first-bind rule.
+    func notesBase(_ base: RecordBase?) -> RecordBase? {
+        guard sync?.inputs.notes.freshStart == true else { return base }
+        return base?.withoutBody()
+    }
+
+    /// Classifies a body merged without a base (the notes baseline summary).
+    private mutating func noteBaseline(_ candidate: Candidate, merge: MergeResult, apple: String, markdown: String) {
+        guard !(apple.isEmpty && markdown.isEmpty) else { return }
+        let item = { (text: String) in
+            NotesBaselineItem(recordID: candidate.recordID, title: candidate.title, path: candidate.path, text: text)
+        }
+        switch (merge.appleBody, merge.markdownBody) {
+        case (let toApple?, nil): sync?.notesBaseline.toContacts.append(item(toApple ?? ""))
+        case (nil, let toMarkdown?): sync?.notesBaseline.toMarkdown.append(item(toMarkdown ?? ""))
+        case (let both?, _?): sync?.notesBaseline.keptBoth.append(item(both ?? ""))
+        case (nil, nil):
+            if merge.conflicts.contains(where: { $0.field == "body" }) {
+                sync?.notesBaseline.conflicts.append(item(markdown))
+            } else if apple == markdown {
+                sync?.notesBaseline.adopted += 1
+            }
+        }
+    }
+
     /// `to: "[[Old]]"` in other notes follows a regenerated title (§8).
     private func rewriteRenamedLinks(_ built: inout [BuiltNote], resolver: RelationResolver) {
         guard let renames = sync?.renames, !renames.isEmpty else { return }
@@ -236,6 +268,8 @@ extension PlanningRun {
         result.trash = sync.trash
         result.blocked = sync.blocked
         result.awaitingDeleteConfirmation = sync.awaiting
+        result.notes = sync.inputs.notes
+        result.notesBaseline = sync.notesBaseline
         result.removedRecords = sync.removed
         result.appleWritesEnabled = plan.config.appleWrites
         result.stampContacts = plan.config.stampContacts

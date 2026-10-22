@@ -59,7 +59,7 @@ c2mdsync:
   id: 6f1c2e0a-8c1b-4b0e-9a57-2d0d4a1c9f13
 ---
 Everything below the frontmatter is the Apple Contacts "Notes" field
-(when the notes entitlement is available; otherwise it is markdown-only).
+(when notes are synced on this Mac; otherwise it is markdown-only).
 ```
 
 ## 2. Field mapping
@@ -91,7 +91,7 @@ Everything below the frontmatter is the Apple Contacts "Notes" field
 | `relationships`                           | `contactRelations`                                      | both      | See §6.                                                                                                     |
 | `tags`                                    | group membership (managed tags only)                    | both      | See §7.                                                                                                     |
 | `apple.*`                                 | phonetic names, `phoneticOrganizationName`, etc.        | both      | Apple fields mbr has no slot for.                                                                           |
-| body                                      | `note`                                                  | both*     | *Only with `com.apple.developer.contacts.notes`. Entire body.                                               |
+| body                                      | `note`                                                  | both*     | *Only when notes are synced on this Mac (the notes entitlement, or Contacts.app scripting with `notes_sync: on`). Entire body, no truncation. See *Body* below.                 |
 | `c2mdsync.*`                              | `urlAddresses` stamp (`c2mdsync` / `x-c2mdsync:<uuid>`) | engine    | See §3.                                                                                                     |
 | any other key                             | —                                                       | md-only   | Preserved byte-for-byte, in place.                                                                          |
 
@@ -100,6 +100,14 @@ Apple-side rewrites the mapping has to absorb ([spike S5](spikes.md#s5-normaliza
 - **`social`**: Contacts fills in a `urlString` for known services on save (`twitter: zzspike` gains `http://twitter.com/zzspike`). A URL that equals the one Contacts synthesizes for that service and username is not exported, so a bare handle in markdown stays a bare handle.
 - **`image`**: after an iCloud sync, Apple can report `imageDataAvailable = false` and offer only a re-encoded thumbnail. In that state the existing `_images/` file and the `image:` key are kept unchanged; the thumbnail is never exported in place of the original. If no image file exists yet, nothing is exported until `imageData` is available.
 - **`dates`**: Contacts sets a Gregorian calendar on saved dates, including yearless ones. The calendar is not exported; `--MM-DD` stays `--MM-DD`.
+
+**Body.** The body maps to the Contacts note only when notes are synced on this Mac: always with the notes entitlement, else through Contacts.app scripting when `notes_sync: on` and macOS allows the app to control Contacts (architecture §8). Otherwise the body is markdown-only. Details:
+
+- Notes are per underlying card. A record's Contacts note is the note of the first card in precedence order that has one (stamped, iCloud, other writable, read-only), like every single-valued field. A different note on another card is not a change. A markdown edit is written to every writable card whose note differs.
+- The comparison key normalizes `\r\n` and a lone `\r` to `\n` and trims leading blank lines and trailing whitespace. A Contacts note with Windows or classic line endings is therefore equal to the same text in markdown.
+- When a Contacts note replaces the body, the blank lines the body started with (usually one after the closing `---`) are kept, and the body ends with one newline.
+- No truncation: notes of 49,152 characters (the largest seen in spike S12) round-trip as is.
+- The first export does not include notes. The first sync with notes then takes each Contacts note into an empty body (architecture §8, enablement migration).
 
 ### Label mapping (Apple → markdown)
 
@@ -187,7 +195,7 @@ c2mdsync:
 | `relationships`                                                                                                                                         | from Apple, resolved to `[[Title]]` when exactly one note answers to the name (title, alias, name variants); extra edge attributes kept; markdown-only types (`employer`, `employee`, `manages`, `assists`) and `from:` edges kept |
 | `tags`                                                                                                                                                  | managed tags follow Apple groups; unmanaged tags kept, in order                                                                                                                                                                    |
 | `image`                                                                                                                                                 | `<images_folder>/<c2mdsync.id>.<ext>`, relative to the note's current folder; a user-set image is kept when Apple has none                                                                                                         |
-| body                                                                                                                                                    | Apple note when entitled and non-empty; otherwise untouched                                                                                                                                                                        |
+| body                                                                                                                                                    | Apple note when notes are synced and non-empty; otherwise untouched                                                                                                                                                                        |
 | `dates.death`, unknown keys, `apple.*` extras, `c2mdsync.*` extras                                                                                      | kept                                                                                                                                                                                                                               |
 | `image` while Apple reports only a thumbnail (`imageDataAvailable = false`)                                                                              | kept unchanged; nothing is exported                                                                                                                                                                                                |
 
@@ -203,7 +211,7 @@ c2mdsync:
 | `emails`, `phones`, `urls`, `social`, `im`, `addresses`, `dates` (except birthday, `death` and free-text dates) | Element by element. Additions from either side are kept, deletions from one side apply, the note keeps its order and display text, and Contacts additions are appended. A label changed on one side applies. |
 | `relationships` | Element by element, keyed by type and target record. Attributes, `from:` edges and mbr-only types stay markdown-only. |
 | `tags` | Managed tags follow Apple group membership both ways; unmanaged tags never touch Apple. |
-| body | With the notes entitlement: line-based three-way merge with the Apple note. Without it: markdown-only. |
+| body | When notes are synced on this Mac (notes entitlement, or Contacts.app scripting with `notes_sync: on`, architecture §8): line-based three-way merge with the record's Contacts note. Without them: markdown-only. |
 | `image` | By hash; the sidecar file is the markdown side. |
 | `title` | Markdown-owned (§5). |
 | unknown keys, `apple:`/`c2mdsync:` extras, plain aliases | Never touched. |

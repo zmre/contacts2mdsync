@@ -25,6 +25,7 @@ extension Session {
             let prepared = try session.prepareSync(request)
             let plan = prepared.plan
             report.info("apple    \(prepared.apple.kind.summary)")
+            report.notesPlan(plan)
             json?.setting("apple_read", prepared.apple.isComplete ? "full" : "incremental")
             json?.reviews(plan.markdown.reviews)
             json?.setting("apple_writes", plan.appleWritesEnabled ? "enabled" : "disabled")
@@ -51,6 +52,7 @@ extension Session {
                 report.item("backup", "md", "\(folder.path(percentEncoded: false))  (notes before rewrite)")
             }
             report.syncResult(result, of: plan)
+            report.notesResult(prepared.notes.bridge?.log)
             report.syncSummary(plan: plan, result: result, seconds: elapsed)
             return Self.exitCode(plan, failures: result.markdown.failures.count + result.appleFailures.count)
         }
@@ -133,9 +135,21 @@ extension Session {
 
     // MARK: - config
 
-    func config(appleWrites: Switch?, stampContacts: Switch?) -> CLIExitCode {
+    func config(
+        appleWrites: Switch?, stampContacts: Switch?, notes: Switch? = nil, quitContacts: Switch? = nil
+    ) -> CLIExitCode {
         run { root in
             let session = VaultSession(root: root.url, environment: environment)
+            if notes != nil || quitContacts != nil {
+                var settings = session.notesSettingsStore.load()
+                if let notes { settings.notesSync = notes.value }
+                if let quitContacts { settings.quitContactsAfterSync = quitContacts.value }
+                try session.notesSettingsStore.save(settings)
+                report.item(
+                    "wrote", "settings",
+                    "notes_sync=\(settings.notesSync ? "on" : "off")  "
+                        + "quit_contacts_after_sync=\(settings.quitContactsAfterSync) (this Mac)")
+            }
             let config: VaultConfig
             if appleWrites != nil || stampContacts != nil {
                 config = try session.updateSettings { config in
@@ -164,6 +178,7 @@ extension Session {
             if stampContacts?.value == true, !config.appleWrites {
                 report.note("stamp_contacts needs apple_writes enabled before stamps are written")
             }
+            reportNotesSetting(session.notesSourceStatus(), changed: notes != nil)
             return .success
         }
     }

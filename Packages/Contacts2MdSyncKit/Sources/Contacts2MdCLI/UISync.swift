@@ -153,6 +153,10 @@ public struct UISyncPlanSummary: Hashable, Sendable {
     public var deviceCount: Int
     /// `limits.max_apple_changes_without_approval`.
     public var appleChangeLimit: Int
+    /// How the run handles Contacts notes (source, skipped, first notes sync).
+    public var notes: NotesStatus
+    /// Bodies merged without a notes base (the first notes sync preview).
+    public var notesBaseline: NotesBaseline
 
     /// Summarizes `plan`.
     public init(_ plan: SyncPlan) {
@@ -170,6 +174,8 @@ public struct UISyncPlanSummary: Hashable, Sendable {
         stampContacts = plan.stampContacts
         deviceCount = plan.deviceCount
         appleChangeLimit = plan.markdown.config.limits.maxAppleChanges
+        notes = plan.notes
+        notesBaseline = plan.notesBaseline
     }
 
     /// Apple changes that the next sync will not make (held).
@@ -200,6 +206,9 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
     case localRunInProgress
     /// Several devices without stamps. Action: Open Settings.
     case identity(String)
+    /// Contact notes are on but were skipped (no Automation permission for
+    /// Contacts, a failed read). Action: Open Settings.
+    case notesSkipped(String)
 
     public var id: String {
         switch self {
@@ -209,6 +218,7 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         case .waitingForDevice, .leaderElsewhere: "lease"
         case .localRunInProgress: "local-lock"
         case .identity: "identity"
+        case .notesSkipped: "notes-skipped"
         }
     }
 
@@ -238,6 +248,11 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         case .identity:
             return "Several devices share this folder, but your contacts don't carry sync IDs. "
                 + "Turn on “Add sync IDs to contacts” in Settings ▸ Accounts."
+        case .notesSkipped(let reason):
+            return reason.hasPrefix("Automation permission")
+                ? "Contact notes were skipped: this Mac does not allow Contacts2MdSync to control Contacts. "
+                    + "Allow it in Settings ▸ Advanced ▸ Contact notes."
+                : "Contact notes were skipped this time: \(reason)."
         }
     }
 
@@ -245,7 +260,7 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
     public var severity: Severity {
         switch self {
         case .breaker: .error
-        case .blastRadius, .identity: .warning
+        case .blastRadius, .identity, .notesSkipped: .warning
         case .appleWritesDisabled, .waitingForDevice, .leaderElsewhere, .localRunInProgress: .info
         }
     }
@@ -294,6 +309,9 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         }
         if let warning = plan?.identityWarning ?? status?.identityWarning {
             banners.append(.identity(warning))
+        }
+        if let skipped = plan?.notes.skipped {
+            banners.append(.notesSkipped(skipped.replacingOccurrences(of: "; notes skipped", with: "")))
         }
         return banners
     }

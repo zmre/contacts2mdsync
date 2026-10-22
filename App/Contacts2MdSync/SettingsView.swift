@@ -296,13 +296,7 @@ private struct AdvancedSettings: View {
 
     var body: some View {
         Form {
-            LabeledContent("Contact notes") {
-                HStack(spacing: 6) {
-                    MeaningDot(color: model.setup.notesAccess == .available ? .green : .gray)
-                    Text(notesText)
-                }
-            }
-            .help("The Contacts notes field needs an Apple entitlement; without it, note bodies stay markdown-only.")
+            ContactNotesSection(model: model)
             LeaseSection(model: model)
             LabeledContent("Backups") {
                 HStack {
@@ -324,14 +318,5 @@ private struct AdvancedSettings: View {
             .help("Not available yet")
         }
         .formStyle(.grouped)
-    }
-
-    private var notesText: String {
-        switch model.setup.notesAccess {
-        case .available: "Available"
-        case .unavailable: "Not available — notes stay markdown-only"
-        case .checking: "Checking…"
-        case .unknown: "Unknown"
-        }
     }
 }

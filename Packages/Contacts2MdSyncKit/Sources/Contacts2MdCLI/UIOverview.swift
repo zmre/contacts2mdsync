@@ -242,6 +242,18 @@ public struct UIActivityRow: Identifiable, Hashable, Sendable {
     public var review: Int
     public var skipped: Int
     public var result: Result
+    /// Contact notes this run: `2 → Contacts · 1 → notes`, `skipped`, or
+    /// `nil` (notes off, previews, runs before notes existed).
+    public var notes: String?
+
+    /// `2 → Contacts · 1 → notes` / `skipped` for a session's notes counts.
+    static func notesText(_ session: SessionRecord) -> String? {
+        guard session.command != "plan", let sides = session.sides, let source = sides.notes else { return nil }
+        if source == "skipped" { return "skipped" }
+        let toContacts = sides.notesToContacts ?? 0
+        let toMarkdown = sides.notesToMarkdown ?? 0
+        return toContacts + toMarkdown == 0 ? "0" : "\(toContacts) → Contacts · \(toMarkdown) → notes"
+    }
 
     /// Rows for `sessions` (newest first); sessions from other devices show their id.
     public static func rows(
@@ -261,7 +273,8 @@ public struct UIActivityRow: Identifiable, Hashable, Sendable {
                 trigger: Self.trigger(session.trigger), command: session.command, isPreview: preview,
                 contacts: split.contacts, markdown: split.markdown, combined: split.combined,
                 adopted: session.adopted, held: split.held, holdReason: split.holdReason,
-                appleRead: split.appleRead, review: session.pendingReview, skipped: session.skipped, result: result)
+                appleRead: split.appleRead, review: session.pendingReview, skipped: session.skipped, result: result,
+                notes: notesText(session))
         }
     }
 
