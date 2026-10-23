@@ -258,6 +258,8 @@ private struct StatusIndicator: View {
         .foregroundStyle(.secondary)
         .monospacedDigit()
         .fixedSize()
+        // Breathing room inside the toolbar's glass capsule.
+        .padding(.horizontal, 10)
         .help(model.live.state.display()?.detail ?? "")
     }
 
