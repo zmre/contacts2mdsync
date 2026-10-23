@@ -1,4 +1,5 @@
 # Contacts2MdSync
+## This is experimental software / alpha stage
 
 A macOS app (iPadOS/iOS later) that mirrors Apple Contacts into [mbr](https://zmre.github.io/mbr-markdown-browser/markdown/contacts/)-format markdown files and keeps the two in sync.
 
