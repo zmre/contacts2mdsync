@@ -86,8 +86,15 @@ final class ContactsScripting {
 
     private let script: NSAppleScript
 
-    init() throws {
-        guard let script = NSAppleScript(source: Self.source) else {
+    /// The S12 handlers.
+    convenience init() throws {
+        try self.init(source: Self.source)
+    }
+
+    /// Compiles another handler set (S15). Handlers are called by name with
+    /// descriptor arguments through `call`, exactly like the S12 ones.
+    init(source: String) throws {
+        guard let script = NSAppleScript(source: source) else {
             throw SpikeError("NSAppleScript init failed")
         }
         var errorInfo: NSDictionary?
@@ -176,7 +183,7 @@ final class ContactsScripting {
 
     // MARK: - Plumbing
 
-    private func call(_ handler: String, _ args: NSAppleEventDescriptor...) throws -> NSAppleEventDescriptor {
+    func call(_ handler: String, _ args: NSAppleEventDescriptor...) throws -> NSAppleEventDescriptor {
         let event = NSAppleEventDescriptor(
             eventClass: Self.fourCC("ascr"),  // kASAppleScriptSuite
             eventID: Self.fourCC("psbr"),  // kASSubroutineEvent
@@ -206,20 +213,20 @@ final class ContactsScripting {
     }
 
     /// nil for `missing value` (typeType 'msng') and other non-text results.
-    private static func optionalString(_ desc: NSAppleEventDescriptor?) -> String? {
+    static func optionalString(_ desc: NSAppleEventDescriptor?) -> String? {
         guard let desc else { return nil }
         if desc.descriptorType == fourCC("type") || desc.descriptorType == fourCC("enum") { return nil }
         return desc.stringValue
     }
 
-    private static func optionalStrings(_ desc: NSAppleEventDescriptor?) -> [String?] {
+    static func optionalStrings(_ desc: NSAppleEventDescriptor?) -> [String?] {
         guard let desc else { return [] }
         guard desc.descriptorType == fourCC("list") else { return [optionalString(desc)] }
         guard desc.numberOfItems > 0 else { return [] }
         return (1...desc.numberOfItems).map { optionalString(desc.atIndex($0)) }
     }
 
-    private static func strings(_ desc: NSAppleEventDescriptor) -> [String] {
+    static func strings(_ desc: NSAppleEventDescriptor) -> [String] {
         optionalStrings(desc).compactMap { $0 }
     }
 }

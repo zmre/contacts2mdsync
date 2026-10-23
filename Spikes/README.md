@@ -1,16 +1,17 @@
 # c2m-spike: the spike harness
 
-`c2m-spike` is a command-line tool for the spikes in [`docs/spikes.md`](../docs/spikes.md) that need a real address book: S1, S3, S4, S5, S9, S11, S12, S13 and S14. It also gives partial evidence for S2 (the notes-key probe in `inventory`). S1–S12 use Contacts.framework directly. S13 and S14 link `ContactModel` and `ContactsAdapter` from `Packages/Contacts2MdSyncKit` (a path dependency) so they can run the app's real write path and its real notes provider; the harness never modifies the kit.
+`c2m-spike` is a command-line tool for the spikes in [`docs/spikes.md`](../docs/spikes.md) that need a real address book: S1, S3, S4, S5, S9, S11, S12, S13, S14 and S15. It also gives partial evidence for S2 (the notes-key probe in `inventory`). S1–S12 use Contacts.framework directly. S13, S14 and S15 link `ContactModel` and `ContactsAdapter` from `Packages/Contacts2MdSyncKit` (a path dependency) so they can run the app's real write path and its real notes provider; the harness never modifies the kit.
 
 ## Safety model
 
-- **Writes only touch scratch cards.** A card counts as a harness card only if both of these hold: its name (`givenName familyName`) starts with `ZZ Spike `, and one of its URL values starts with `x-c2mdsync-spike:`. That URL carries the label `c2mdsync-spike` and has the form `x-c2mdsync-spike:<spike>:<account>:<uuid>`. Scratch cards created before the rename carry the legacy marker `x-mdsync-spike:` (label `mdsync-spike`); the harness still recognizes those for checks and cleanup (the name prefix is still required), but never creates new ones. The harness never reads or writes the notes field through Contacts.framework. The exceptions are S12 and S14: they use Apple Events to Contacts.app to write synthetic notes, and only to scratch cards.
+- **Writes only touch scratch cards.** A card counts as a harness card only if both of these hold: its name (`givenName familyName`) starts with `ZZ Spike `, and one of its URL values starts with `x-c2mdsync-spike:`. That URL carries the label `c2mdsync-spike` and has the form `x-c2mdsync-spike:<spike>:<account>:<uuid>`. Scratch cards created before the rename carry the legacy marker `x-mdsync-spike:` (label `mdsync-spike`); the harness still recognizes those for checks and cleanup (the name prefix is still required), but never creates new ones. The harness never reads or writes the notes field through Contacts.framework. The exceptions are S12, S14 and S15: they use Apple Events to Contacts.app to write synthetic notes, and only to scratch cards. (S15's `V5` variant also asks CNContactStore to fetch `CNContactNoteKey` on its scratch cards, to see whether the fetch fails; the value is never read.)
 - **S12 writes go through Contacts.app, so they are checked on both sides.** Right before `set note`, `s12-notes write` verifies every underlying card behind the target with `SafeWriter.verifiedCard`. It also asks Contacts.app for the target person's `id`, first and last name, and `url` values, and refuses unless they show the `ZZ Spike ` prefix and one of the expected marker URLs. The handler arguments are passed as Apple Event descriptors, never pasted into script source.
 - **S14 runs the app's real notes provider behind a two-sided guard.** `s14-notes write` calls `ScriptingNotesProvider.write` only through `S14NotesGuard` (`Sources/c2m-spike/Commands/S14Notes.swift`). Before every call it fetches each target card again by id with unified results off; the card must pass both checks and carry the `s14` spike tag (or `s13`, only for the reused S13 linked pair). It also asks Contacts.app (through the S12 `NSAppleScript` reader) for the person with that id, which must show the `ZZ Spike ` prefix and the same marker URL. One target that fails refuses the whole write. The one write that is not to a harness card is case 5: an injection-shaped id that the guard first proves exists nowhere (not a CN card id, and `person id <it>` does not resolve in Contacts.app). `s14-notes check` and `write` print note text only for the synthetic notes they write; real notes are compared by SHA-256 only.
 - **Checks happen right before every write.** All writes go through `SafeWriter` (`Sources/c2m-spike/Support/Harness.swift`). It fetches the target card again by identifier with unified results off, refuses to continue unless the card passes both checks, and checks again after the mutation. A save to a unified contact (S4 `--unified-write`) requires every underlying card to pass.
 - **S13 runs the app's real write path behind a harness guard.** `s13-writes` calls `CNContactStoreAdapter.apply` (which uses `CardWriter`) only through `HarnessGuardedStore` (`Sources/c2m-spike/Support/KitGuard.swift`). Before each batch, the guard fetches every target card again by id with unified results off. Every card must pass both checks and carry the `s13` spike tag, or the guard refuses the whole batch and nothing is saved. The guard also refuses a URL-list edit that would drop the marker, a name edit that would drop the `ZZ Spike ` prefix, note and image edits, a create without the prefix and an `s13` marker, and group operations on any group other than `ZZ Spike S13 Group`. After the save it checks the cards again. The wrapper exposes only `apply`, so the harness can't reach any other write entry point.
+- **S15 writes are checked on both sides too.** Every CNSaveRequest in `s15-noted-writes run` fetches its target again by id (unified results off, in the store the variant uses) and refuses unless it is the expected S15 card: both checks, spike tag `s15`, and the marker recorded at setup. Group writes need the exact name `ZZ Spike S15 Group`; deletes are refused on any card except D and E. Every Contacts.app scripting write first runs the S14 guard (`S14NotesGuard.checkTargets`: CNContactStore and Contacts.app must both show the S15 harness card). The scripting handlers (`Support/S15Scripting.swift`) take person, group and labeled-value ids and values as Apple Event descriptors, never as script source.
 - **Writes are dry runs until you add `--yes`.** Every write subcommand prints its plan. Without `--yes`, nothing is written.
-- **`cleanup` needs both markers.** It deletes only cards that pass both checks. It deletes the S13 scratch group only if the group's name is exactly `ZZ Spike S13 Group` and it is empty or holds only harness cards; this is checked again right before the delete. If a card matches only one, `cleanup` lists it and you delete it by hand. This can happen when Google strips the marker URL during S1 or S5.
+- **`cleanup` needs both markers.** It deletes only cards that pass both checks. It deletes a scratch group (`ZZ Spike S13 Group`, `ZZ Spike S15 Group`) only if the group's name is exactly that and it is empty or holds only harness cards; this is checked again right before the delete. A card with a note can't be deleted through CNSaveRequest without the notes entitlement (S15), so when the CNSaveRequest delete fails, `cleanup` deletes the card through Contacts.app scripting (`delete person id X`, `save`), after CNContactStore and Contacts.app both confirm it is the same harness card. `--no-scripting` turns that off. If a card matches only one, `cleanup` lists it and you delete it by hand. This can happen when Google strips the marker URL during S1 or S5.
 - **Read-only output contains no PII.** `inventory`, `s9-ids`, `s12-notes probe` and `s14-notes check` print counts, timings and opaque identifiers only. `s12-notes probe` and `s14-notes check` read every note but never print note text or names. Container names that contain `@` are redacted. S9 files store SHA-256 hashes of identifiers.
 
 ## Build
@@ -363,6 +364,56 @@ It writes `Spikes/results/s14-write-<date>.md`. The exit code is 1 if any row FA
 
 **Record:** both tables under S14 in `docs/spikes.md`. Then check the solo card's note on iCloud.com and on the iPhone.
 
+## S15: CNSaveRequest on cards that have a note (error 134092)
+
+Question: without the `com.apple.developer.contacts.notes` entitlement, which CNSaveRequest operations fail on a card that has a note? Reports (developer forums thread 723695, FB23452026, mattt/iMCP#148) say updates fail with `NSCocoaErrorDomain 134092` "Unhandled error … occurred during faulting". S13 passed only because its scratch cards had no notes; about 1,572 of the 3,781 real cards have one. For each failing operation, can Contacts.app scripting do it instead?
+
+```sh
+c2m-spike s15-noted-writes setup               # dry run: plan + containers
+c2m-spike s15-noted-writes setup --yes         # creates the cards + group, sets the notes (Apple Events)
+#   wait about 15 min: automatic linking of the C pair + Google id churn
+c2m-spike s15-noted-writes run                 # dry run (CNContactStore reads only): ids, "C pair linked: YES"?
+c2m-spike s15-noted-writes run --yes           # → results/s15-<date>.md
+c2m-spike s15-noted-writes run --yes --scripting-all   # optional: scripting for every op, not only failed ones
+c2m-spike cleanup --spike s15 --yes            # cards (noted ones via scripting) + "ZZ Spike S15 Group"
+```
+
+`setup --yes` creates these cards through `SafeWriter` (CNSaveRequest creates work: a new card has no note yet). Then the production `ScriptingNotesProvider` writes a synthetic three-line note to B, C-iCloud and D (S14 guard first), and reads it back.
+
+| Card | Container | Note | Used for |
+|---|---|---|---|
+| `ZZ Spike S15 A <id>` | iCloud | none | control for ops 1–5 |
+| `ZZ Spike S15 B Noted <id>` | iCloud | yes | ops 1–5 |
+| `ZZ Spike S15 C Linked <id>` | iCloud | yes | ops 1–5 on the noted card of a linked pair |
+| `ZZ Spike S15 C Linked <id>` | Google | none | ops 1, 2, 3, 5 on the un-noted partner (no group ops: the group is in iCloud) |
+| `ZZ Spike S15 D Noted Delete <id>` | iCloud | yes | op 6 delete |
+| `ZZ Spike S15 E Delete <id>` | iCloud | none | op 6 delete (control) |
+
+Every card has an email, a phone, job title `S15 baseline` and the marker URL; the C pair shares its name and email so Contacts links it. `ZZ Spike S15 Group` is created in iCloud. State goes to `results/s15-setup.json` and the setup report to `results/s15-setup-<date>.md`.
+
+`run --yes` launches Contacts.app hidden through the provider, checks that B, C-iCloud and D still have their note (and sets it again if not), and that `group id <CNGroup.identifier>` resolves in Contacts.app. Then:
+
+1. **CNSaveRequest phase**, for A, B, C-iCloud and C-Google. Operations: **1** set `familyName` + `jobTitle`; **2** add an email; **3** edit the existing phone in place (`settingValue`, same labeled-value id); **4a/4b** `addMember`/`removeMember` with the scratch group (iCloud cards; the harness puts the card in or out of the group first, using scripting if CNSaveRequest can't); **5** set `urlAddresses` to the existing URLs (marker kept) plus an `x-c2mdsync:<uuid>` stamp. Each operation runs once per variant:
+   - **V0** production keys (`AppleContactMapper.cardKeys(includeNote: false)`), shared store
+   - **V1** minimal keys: the identity keys plus the operation's field
+   - **V2** production keys, `shouldRefetchContacts = false`
+   - **V3** production keys, a fresh `CNContactStore` for the fetch and the save
+   - **V4** V1 + V2 + V3 together
+   - **V5** production keys + `CNContactNoteKey` (does the fetch even work?)
+   - **K** the production adapter: `CNContactStoreAdapter.apply` → `CardWriter`, through the S13 harness guard (`HarnessGuardedStore`, spike `s15`)
+
+   Each attempt is recorded as `ok`, `134092` (that code anywhere in the error chain or text), `other` or `fetch failed`. After a failure, the card is fetched again and compared field by field (plus group membership): any difference is reported as `PARTIAL` and as a FAIL row. After a success, the written value is checked (labeled-value id kept for the phone edit and for existing emails, marker URL kept, exactly one stamp, no other field changed). The history events since the attempt are listed per card (`unify=false`), so a write that reaches the linked partner shows up. For noted cards the note hash is compared before and after every attempt (`note CHANGED` is a FAIL).
+2. **Labeled-value ids.** For each card, the Contacts.app `id` of every email, phone and url is compared with `CNLabeledValue.identifier` (INFO when they differ; one sample of each is printed).
+3. **Scripting phase.** For every card and operation where V0 did not succeed (every one with `--scripting-all`): `set last name`/`set job title of person id X`; `make new email at end of emails of person id X with properties {label:"work", value:…}`; `set value of phone id Y of person id X` (by index if scripting phone ids aren't the CN ids); `add person id X to group id G` / `remove person id X from group id G`; delete old stamp urls and `make new url …`; each followed by `save`. Verified the same way on CNContactStore (polling up to 8 s for Contacts.app's save to land), plus a re-read through scripting.
+4. **Delete phase.** E, then D: V0, V1, … K until one deletes the card, else `delete person id X` + `save`.
+5. **Final checks.** Notes on B and C-iCloud still exact, C pair still linked, no card added or removed except D and E, change history of the whole run only on S15 cards.
+
+The results file holds a matrix (card × operation × path), the checks, every attempt (error domain/code chain, partial changes, verify detail, history) and the log. Only harness data appears in it. The exit code is 1 if any row FAILs.
+
+**Observe:** which cells say `134092` for B and C-iCloud while A says `ok`; whether a failed save left a `PARTIAL` change; whether any of V1–V5 avoids the error (and whether K, the production path, fails); whether C-Google (no note, linked to a noted card) fails; whether a successful CN save on a noted card left its note intact; for scripting: does each op work, keep the phone's labeled-value id, keep the card id, and touch only the target card in history; do scripting ids equal `CNLabeledValue.identifier`.
+
+**Record:** the matrix and the decision under S15 in `docs/spikes.md`: which write operations the app must route through Contacts.app scripting (or refuse) for noted cards when the entitlement is missing.
+
 ## Cleanup
 
 ```sh
@@ -372,6 +423,7 @@ c2m-spike cleanup --spike s5 --yes
 c2m-spike cleanup --spike s12 --yes   # S12 scratch cards (single card and linked pair)
 c2m-spike cleanup --spike s13 --yes   # S13 cards, plus "ZZ Spike S13 Group" if all its members are harness cards
 c2m-spike cleanup --spike s14 --yes   # S14 cards (solo card and linked pair)
+c2m-spike cleanup --spike s15 --yes   # S15 cards (noted ones via Contacts.app scripting) + "ZZ Spike S15 Group"
 ```
 
 Cards that match only one marker are listed for manual deletion and never deleted by the tool. After cleanup, delete any leftovers on contacts.google.com and iCloud.com by hand, and unload the S11 LaunchAgent and cron line.

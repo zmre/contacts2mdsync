@@ -1,8 +1,8 @@
 // swift-tools-version: 6.0
 //
 // C2MSpikes: throwaway harness for the spikes in docs/spikes.md that need a
-// real address book (S1, S3, S4, S5, S9, S11, S12, S13, S14). S1–S12 use only
-// Contacts.framework directly. S13 and S14 deliberately depend on
+// real address book (S1, S3, S4, S5, S9, S11, S12, S13, S14, S15). S1–S12 use
+// only Contacts.framework directly. S13, S14 and S15 deliberately depend on
 // Contacts2MdSyncKit (path dependency) so they can exercise the real M3 Apple
 // write path (`CNContactStoreAdapter.apply` → `CardWriter`) and the real notes
 // provider (`ScriptingNotesProvider`) against scratch cards. The harness never

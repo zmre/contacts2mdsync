@@ -18,6 +18,7 @@ Each spike is a throwaway target under `Spikes/` with a written result here. Run
 | S12| Notes without the entitlement: can we read and write the Notes field by scripting Contacts.app with Apple Events (`note` and `id` of `person`)? How long do a bulk read and a per-person read take for about 2,500 contacts? Do AppleScript ids match CNContact card ids or unified ids? Which card of a linked pair gets the write? | Body ↔ notes mapping while S2 is blocked on Apple. | Bulk read of all notes takes a few seconds or less, writes keep the text exactly, no other fields or ids change, the linked-pair write target is predictable, and the Automation prompt is acceptable. Then Apple Events become the fallback notes path in architecture §8. | **pass** (2026-10-22) |
 | S13| Real M3 write path on scratch cards: does `CNContactStoreAdapter.apply` → `CardWriter` (behind a harness-only guard) add, edit and delete list values, write single-valued fields through to linked cards, stamp, manage group membership and edit relations correctly on real iCloud and Google cards? Labeled-value ids kept, no unified save, `transactionAuthor` excluded from history, values intact after a server round trip? | Go/no-go for `apple_writes: enabled` on the real address book. | `run`: every row PASS (WARN in steps 8–9 only if explained by a concurrent Google re-save). `check` after 15–30 min: values, stamps and ids survive, or each server rewrite is understood and covered by comparison keys. | todo |
 | S14| Production notes provider on the real Contacts.app: does `ScriptingNotesProvider` (raw Apple Events, `LiveContactsApp`) read every card's note identically to the S12 `NSAppleScript` reader (bulk and per-card paths, ids = CN card ids), write notes exactly (CRLF/Unicode/quotes/backslashes/emoji, ~49k chars, clear, both cards of a linked pair in one call), fail per card on an id that does not exist, and launch Contacts.app hidden and quit it after? | Go/no-go for notes scripting in the app (architecture §8 "As implemented (notes scripting)"). | `check`: every row PASS (parity by per-card SHA-256, no note text printed). `write`: every row PASS; WARN in case 1 only if Contacts rewrites line endings (then the body normalization covers it); CN identifiers and other fields unchanged, history only on target cards. | **pass** (2026-10-22; launch-hidden cosmetic fail) |
+| S15| CNSaveRequest on cards that HAVE a note, without the notes entitlement: reports (forums 723695, FB23452026, mattt/iMCP#148) say updates fail with `NSCocoaErrorDomain 134092` "Unhandled error … occurred during faulting". S13 passed only because its scratch cards had no notes; ~1,572 of 3,781 real cards have one. Exactly which operations fail (names/job title, add email, in-place phone edit, group add/remove, URLs + stamp, delete), does a failed save leave partial changes, do cheap variations (minimal keys, `shouldRefetchContacts = false`, fresh store, `CNContactNoteKey`) avoid it, does the kit adapter fail, and can Contacts.app scripting do each failing operation instead (ids kept, history only on the target, scripting labeled-value ids = `CNLabeledValue.identifier`?) | Go/no-go for `apple_writes` on a real address book without the entitlement; which writes must go through Contacts.app scripting (architecture §6/§8). | `run`: a matrix of card × operation × path. Decision: for every operation that fails with 134092 on noted cards, either a scripting path that verifies (fields, labeled-value ids, card id, history only on target, note intact) or the planner refuses that write for noted cards. No `PARTIAL` after a failed save. | todo |
 
 ## Results (2026-10-21 UTC run)
 
@@ -322,6 +323,38 @@ Run the steps in this order. Steps 2–7 touch the real address book, but only s
    Within about 5 minutes, check the S14 solo card's note (emoji, quotes, line breaks) on iCloud.com and on the iPhone.
 
 4. **Clean up:** `c2m-spike cleanup --spike s14 --yes`. Then check iCloud.com and contacts.google.com for leftover "ZZ Spike S14" cards.
+
+### S15 run steps
+
+`c2m-spike s15-noted-writes` checks which CNSaveRequest writes fail on cards that have a note (error 134092 without the notes entitlement) and whether Contacts.app scripting can do them instead. Writes go only to `ZZ Spike S15 …` scratch cards and `ZZ Spike S15 Group`: every CNSaveRequest fetches its target again (unified results off) and needs the S15 marker; every scripting write first checks the card in CNContactStore and in Contacts.app (the S14 guard). For what each row checks, see [`Spikes/README.md`](../Spikes/README.md#s15-cnsaverequest-on-cards-that-have-a-note-error-134092).
+
+1. **Rebuild** (step 1 above).
+
+2. **Setup.** Creates A (no note), B (note), an iCloud + Google pair C (note on the iCloud card), D (note) and E (no note) for the delete test, and the scratch group. The notes are written by the production `ScriptingNotesProvider` (Contacts.app is launched hidden and quit afterwards).
+
+   ```sh
+   c2m-spike s15-noted-writes setup          # dry run
+   c2m-spike s15-noted-writes setup --yes    # → Spikes/results/s15-setup-<date>.md
+   ```
+
+3. **Wait about 15 minutes** for Contacts to link the C pair (or link the two "ZZ Spike S15 C Linked" cards by hand). Then:
+
+   ```sh
+   c2m-spike s15-noted-writes run            # dry run: "C pair linked: YES"?
+   c2m-spike s15-noted-writes run --yes      # matrix + checks → Spikes/results/s15-<date>.md
+   ```
+
+   Add `--allow-unlinked` if the pair never links, and `--scripting-all` to also run the scripting path for operations CNSaveRequest did not fail on (for example, to compare labeled-value ids on the control card).
+
+   Look for these:
+
+   - `134092` cells for B and C-iCloud where A is `ok`; whether C-Google (no note, linked) fails too;
+   - `PARTIAL` after any failed save, and `NOTE CHANGED` anywhere;
+   - whether any variant (V1–V5) or the kit adapter (K) succeeds on a noted card;
+   - for the AS column: verified, phone labeled-value id kept, history only on the target card;
+   - the `ID` rows: do Contacts.app email/phone/url ids equal `CNLabeledValue.identifier`?
+
+4. **Clean up:** `c2m-spike cleanup --spike s15 --yes`. The noted cards (B, C-iCloud, and D if it survived) can't be deleted through CNSaveRequest, so `cleanup` deletes them through Contacts.app scripting after checking both sides. Then check iCloud.com and contacts.google.com for leftover "ZZ Spike S15" cards.
 
 ---
 
