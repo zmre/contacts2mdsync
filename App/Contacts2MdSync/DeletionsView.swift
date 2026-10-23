@@ -47,6 +47,15 @@ struct DeletionsView: View {
         }
         .toolbar {
             ToolbarItem {
+                Menu(setAllTitle) {
+                    ForEach(bulkOptions) { option in
+                        Button(option.title) { setAll(option) }
+                    }
+                }
+                .disabled(bulkTargets.isEmpty || !model.capabilities.deletionActions)
+                .help("Choose one action for the selected rows (or every row in this list); change any row afterwards")
+            }
+            ToolbarItem {
                 Button(applyTitle) {
                     if pending.contains(where: { $0.option.isDestructive }) {
                         confirmingDestructive = true
@@ -120,6 +129,31 @@ struct DeletionsView: View {
         }
     }
 
+    // MARK: - Set all
+
+    /// Rows a bulk choice applies to: the selected actionable rows in this
+    /// queue when more than one is selected, otherwise every actionable row.
+    private var bulkTargets: [UIDeletionRow] {
+        let actionable = rows.filter(\.isActionable)
+        let selected = actionable.filter { selection.contains($0.id) }
+        return selected.count > 1 ? selected : actionable
+    }
+
+    /// Options every target row offers, in the first row's order.
+    private var bulkOptions: [UIDeletionOption] {
+        guard let first = bulkTargets.first else { return [] }
+        return first.options.filter { option in bulkTargets.allSatisfy { $0.options.contains(option) } }
+    }
+
+    private var setAllTitle: String {
+        let actionable = rows.filter(\.isActionable)
+        return bulkTargets.count < actionable.count ? "Set \(bulkTargets.count) Selected" : "Set All"
+    }
+
+    private func setAll(_ option: UIDeletionOption) {
+        for row in bulkTargets { chosen[row.id] = option }
+    }
+
     private func option(for row: UIDeletionRow) -> Binding<UIDeletionOption> {
         Binding(get: { chosen[row.id] ?? row.options[0] }, set: { chosen[row.id] = $0 })
     }
@@ -152,7 +186,10 @@ struct DeletionsView: View {
     }
 
     private var destructiveTitle: String {
-        "Delete \(destructiveRows.map(\.0.title).joined(separator: ", "))?"
+        let titles = destructiveRows.map(\.0.title)
+        return titles.count <= 3
+            ? "Delete \(titles.joined(separator: ", "))?"
+            : "Delete \(titles.count) items?"
     }
 
     /// Names exactly what goes: which files move to the Trash, and which
