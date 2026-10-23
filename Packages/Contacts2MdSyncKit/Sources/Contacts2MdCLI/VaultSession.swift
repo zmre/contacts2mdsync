@@ -89,6 +89,9 @@ public struct StoredStatus: Hashable, Sendable {
     public var leaseHolder: LeaseHolder?
     /// Notes (or vault files) with iCloud conflict versions awaiting a choice.
     public var fileVersionConflicts = 0
+    /// Contacts accounts not visible in Contacts (cards kept as last seen),
+    /// or visible again and still being matched (architecture §9).
+    public var unavailableAccounts: [UnavailableAccount] = []
     /// Every device that synced this vault (`.c2mdsync/devices/<id>.json`).
     public var devices: [DeviceRecord] = []
 
@@ -137,9 +140,13 @@ public struct VaultSession: Sendable {
             options: ExportOptions(
                 restoreMissing: request.restoreMissing, autoAdopt: request.autoAdopt,
                 allowUndownloaded: request.allowUndownloaded))
-        let snapshot = try store.snapshot()
+        let records = try state.load()
+        // A Contacts account that is not visible: its cards stay as last seen (§9).
+        let snapshot = AccountGuard.protectExport(
+            try store.snapshot(), state: state, records: records, decisions: DecisionSet(decisions),
+            now: environment.clock.now)
         var inputs = ExportInputs(
-            snapshot: snapshot, index: index, records: try state.load(), config: config,
+            snapshot: snapshot, index: index, records: records, config: config,
             configText: loaded?.text, decisions: DecisionSet(decisions),
             reportedProblems: try state.reportedProblemHashes(), now: environment.clock.now)
         inputs.knownGroups = try state.loadGroups()
@@ -193,6 +200,7 @@ public struct VaultSession: Sendable {
             default: break
             }
         }
+        status.unavailableAccounts = AccountGuard.load(from: state)?.unavailable ?? []
         fillShared(&status, fs: fs)
         return status
     }

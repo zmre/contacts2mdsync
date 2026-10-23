@@ -39,20 +39,6 @@ public enum SyncError: Error, Hashable, Sendable, CustomStringConvertible {
     }
 }
 
-/// Applies Apple writes. Requires a `BackupReceipt`, which only
-/// `VCardBackup.backup` can create, so no Apple write happens without a
-/// fresh vCard backup of the whole address book (architecture §9).
-public enum AppleWriter {
-    /// Saves `batch` tagged with `author`.
-    public static func apply(
-        _ batch: AppleWriteBatch, in store: any ContactStore, backup: BackupReceipt, author: String
-    ) throws -> AppleWriteResult {
-        _ = backup  // The receipt's existence is the precondition.
-        guard !batch.operations.isEmpty else { return AppleWriteResult(applied: []) }
-        return try store.apply(batch, author: author)
-    }
-}
-
 /// Executes a `SyncPlan` (architecture §5 "execute"): vCard backup → one
 /// Apple batch (`transactionAuthor`) → re-fetch and verify each written card
 /// → markdown writes (compare-and-swap) → merge bases refreshed from what
@@ -121,8 +107,9 @@ public struct SyncExecutor: Sendable {
             // Token first: our own saves are older than it, so they are never
             // reported back as changes (they are excluded by author as well).
             result.postWriteHistoryToken = try? store.currentHistoryToken()
-            postSnapshot = try store.snapshot()
-            result.postWriteSnapshot = postSnapshot
+            result.postWriteSnapshot = try store.snapshot()
+            // Unavailable accounts' cards back as last seen: the base keeps their values (§9).
+            postSnapshot = result.postWriteSnapshot.map { plan.accountGuard.augment($0).snapshot }
         } else if let noteBackups {
             result.markdown.noteBackup = try backupNotes(plan, to: noteBackups)
         }
@@ -301,6 +288,7 @@ public struct SyncExecutor: Sendable {
         try state.saveGroups(after: plan, result: result)
         try state.saveUnapplyable(unapplyable)
         try state.saveVanished(plan.vanished)
+        try plan.accountGuard.save(executed: true, in: state)
         try NotesSyncState.record(plan.notes, notesSynced: result.notesSynced, in: state)
     }
 

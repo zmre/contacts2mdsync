@@ -152,6 +152,8 @@ struct PlanningRun {
     var sync: SyncRun?
     /// Managed tag key → the tag it is renamed to (an Apple group rename, §8).
     var tagRenames: [String: String] = [:]
+    /// Unified ids of contacts frozen because an account is not visible (§9).
+    var accountFrozen = Set<String>()
 
     var index: VaultIndex { inputs.index }
     var records: RecordMap { inputs.records }

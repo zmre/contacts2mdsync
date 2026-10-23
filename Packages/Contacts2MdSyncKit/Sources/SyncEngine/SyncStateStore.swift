@@ -126,6 +126,9 @@ public struct SessionSides: Codable, Hashable, Sendable {
     /// Contacts note was written to markdown (`nil`: notes off, or older runs).
     public var notesToContacts: Int?
     public var notesToMarkdown: Int?
+    /// Accounts not visible in Contacts during the run (their cards kept as
+    /// last seen), one banner text each, `; `-separated (`nil`: none).
+    public var accounts: String?
 
     /// Creates counts.
     public init(
@@ -157,6 +160,7 @@ public struct SessionSides: Codable, Hashable, Sendable {
         case notes
         case notesToContacts = "notes_to_contacts"
         case notesToMarkdown = "notes_to_markdown"
+        case accounts
     }
 }
 

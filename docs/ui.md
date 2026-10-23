@@ -133,6 +133,16 @@ Step 5 — Confirm
 - "Needs Review" appears only when something is pending; otherwise the header reads "✓ In sync. Nothing needs your attention."
 - "Since Last Sync" is computed continuously from a dry-run, so it shows what the next sync will do.
 - Contact notes (§9 Advanced): when notes are synced, the live run summary line mentions how many bodies went each way (`notes →contacts 2 →md 1`, or `notes skipped`). When the latest check skipped notes, a warning banner says "Contact notes were skipped: this Mac does not allow Contacts2MdSync to control Contacts. Allow it in Settings ▸ Advanced ▸ Contact notes." (or "Contact notes were skipped this time: <reason>." for a failed read) with [Open Settings…].
+- **Unavailable accounts** (architecture §9): when a Contacts account this Mac saw is not visible in Contacts (its Contacts turned off in System Settings, removed, or in a partial state), a banner below the status line says so and that nothing in the notes changes meanwhile:
+
+```
+│  ⍰ Google account isn't visible in Contacts — 1,353 cards kept as last seen │
+│    Last seen Today 9:12 AM. Nothing in your notes changes while it is away. │
+│    Turn its Contacts back on in System Settings ▸ Internet Accounts.        │
+│                              [Keep Waiting]  [Forget This Account…]         │
+```
+
+  **Keep Waiting** records `wait` (the default; the banner stays while the account is away). **Forget This Account…** opens a confirmation sheet first: the account's label, how many contacts exist only in it (they move to Pending Deletions, each note kept until confirmed; five names as examples), and how many notes lose values only its cards held, listed with the values (first 50). **Forget Account** (destructive) records `forget`; the banner then says "Forget chosen: the next sync removes it." Both buttons wait for a check to have run (the preview comes from it). An iCloud account says "check System Settings ▸ Apple Account ▸ iCloud ▸ Contacts". When the account is back, the banner reads "Google account is back — N cards still being matched" (no buttons) until every card is matched; nothing is created twice meanwhile. The banner never counts as "needs review".
 - During sync: toolbar shows `ProgressView` + "Syncing… 312 of 1,248" and a Stop button.
 - Another device holds the lease:
 
@@ -257,6 +267,7 @@ Deleted in Markdown
 - Trigger is Manual, Live, Launch, Wake, Sweep or CLI. Items a CLI run skipped show up in Review badges like any others.
 - Notes: bodies written into Contacts notes and into markdown notes that run; `skipped` (tooltip: why, e.g. "Automation permission for Contacts not granted") when notes are on but were not read; `—` when notes are off or for runs from before notes.
 - Warnings expand inline ("34 files not downloaded from iCloud Drive; skipped").
+- A run during which a Contacts account was not visible shows an orange account icon next to its result, with the banner text as tooltip ("Google account isn't visible in Contacts — 1,353 cards kept as last seen (nothing removed from your notes)"). Changes held because they would touch that account's cards count in Held.
 - File ▸ Export Log…
 
 ## 9. Settings
@@ -314,6 +325,9 @@ Turning it off saves at once. The next sync with notes starts without a base aga
 ┌──────────────────────────────────┐
 │ ✓ In sync · 10:42 AM             │
 │ Live sync on                     │
+├──────────────────────────────────┤
+│ ⍰ Google account isn't visible   │
+│   in Contacts — 1,353 cards kept │
 ├──────────────────────────────────┤
 │ Needs review                  24 │
 │   Conflicts 3 · Md only 12       │
@@ -453,3 +467,4 @@ Every review answer is a decision appended to `.c2mdsync/devices/<device>/decisi
 - Device name is read-only: it follows the computer name.
 - Dry runs take review details and account counts from the plan's own snapshot (`PreparedSync.snapshot`): no second Contacts read. After a live run the app still runs one dry run (an incremental read with a valid history token) to refresh Since Last Sync and Review; it is recorded as a preview.
 - Menu bar: the icon is `person.2.circle`, filled while something needs review and arrows while syncing, instead of an orange dot (menu bar icons are template images). The panel adds Settings… and Quit. Pause offers For 1 Hour and Until Tomorrow (the start of the next day).
+- Unavailable accounts (§3): the Overview banner is `AccountBannerSection` over `UIOverview.accounts` (`UIAccountBanner`: banner text, detail, the latest `wait` / `forget` answer, and the forget preview from the pending `account-missing:<id>` item). Keep Waiting and Forget record through `AppModel.decide` like every other review answer; Forget takes effect on the next sync. The menu bar panel lists the same banner text under the status line; Activity marks runs during which an account was missing (`UIActivityRow.accounts`).

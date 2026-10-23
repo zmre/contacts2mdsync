@@ -30,6 +30,7 @@ public struct SyncPlanner: Sendable {
         run.sync = SyncRun(options: options, inputs: inputs)
         run.reportVaultProblems()
         run.resolveIdentities()
+        run.applyUnavailableAccounts()
         run.applyMergeDecisions()
         run.blockDetached()
         run.applyExclusions()
@@ -68,6 +69,8 @@ struct SyncRun {
     var imageHashes: [String: ImageHashEntry] = [:]
     /// Bodies merged without a notes base.
     var notesBaseline = NotesBaseline()
+    /// Unavailable accounts (frozen records, held changes, forget preview).
+    var accounts = AccountPlanning()
 
     init(options: SyncOptions, inputs: SyncInputs) {
         self.options = options
@@ -170,9 +173,12 @@ extension PlanningRun {
                 continue
             }
             guard !entry.isDataless, entry.contact != nil, !proposedPaths.contains(entry.path) else { continue }
+            // A forgotten account's contacts are deleted on the user's word:
+            // queued at once, and not a mass vanish.
+            let forgotten = sync.inputs.accounts.forgottenRecords.contains(id)
             let first = sync.inputs.vanished[id]
-            if first == nil { self.sync?.newlyVanishedApple += 1 }
-            let since = first ?? now
+            if first == nil, !forgotten { self.sync?.newlyVanishedApple += 1 }
+            let since = forgotten ? Date.distantPast : first ?? now
             self.sync?.vanished[id] = since
             guard now.timeIntervalSince(since) >= sync.options.deleteConfirmInterval else {
                 self.sync?.awaiting.append(entry.title)

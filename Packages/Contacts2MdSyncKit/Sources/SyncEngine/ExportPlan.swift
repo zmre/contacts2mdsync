@@ -118,10 +118,16 @@ public enum ReviewItem: Codable, Hashable, Sendable {
     /// that differ from the current contents (`NSFileVersion`, M6). The
     /// note's record is paused until the user keeps one.
     case fileVersionConflict(FileVersionConflict)
+    /// A Contacts account this Mac saw with cards is not visible any more
+    /// (turned off in System Settings, removed, or in a partial state): its
+    /// cards are kept as last seen. Informational: `wait` (keep freezing)
+    /// or `forget` (remove it deliberately; architecture §9).
+    case accountMissing(AccountMissingReview)
 
     /// Stable id: `<kind>-<10 hex>`.
     public var id: String {
         if case .conflict(let conflict) = self { return conflict.id }
+        if case .accountMissing(let review) = self { return AccountMissingReview.idPrefix + review.containerID }
         let (prefix, basis): (String, String) =
             switch self {
             case .duplicateCluster(let members, _):
@@ -138,6 +144,7 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             case .markdownDeleted(_, let id, _, _): ("missing", id.uuidString.lowercased())
             case .markdownOnly(let path, _): ("mdonly", path)
             case .fileVersionConflict(let conflict): ("version", conflict.path)
+            case .accountMissing(let review): ("account", review.containerID)
             }
         return prefix + "-" + String(hexSHA256(Data(basis.utf8)).prefix(10))
     }
@@ -156,14 +163,17 @@ public enum ReviewItem: Codable, Hashable, Sendable {
         case .markdownOnly: ["add", "ignore"]
         case .fileVersionConflict(let conflict):
             ["keep-current"] + conflict.versions.indices.map { "keep-other:\($0 + 1)" }
+        case .accountMissing: ["wait", "forget"]
         }
     }
 
     /// `false` for informational items (markdown-only notes) that never make
     /// a run "need review" (exit code 1).
     public var needsDecision: Bool {
-        if case .markdownOnly = self { return false }
-        return true
+        switch self {
+        case .markdownOnly, .accountMissing: false
+        default: true
+        }
     }
 
     /// Errors turning a choice into decisions.
@@ -264,6 +274,10 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             decision = Decision(
                 kind: choice == "add" ? .createContact : .ignoreCandidate, createdAt: date, device: device,
                 path: path, itemID: id)
+        case .accountMissing(let review):
+            decision = Decision(
+                kind: .accountMissing, createdAt: date, device: device, path: review.containerID, itemID: id,
+                choice: choice)
         default:
             return []
         }
@@ -302,37 +316,10 @@ public enum ReviewItem: Codable, Hashable, Sendable {
             return "\(path) (\"\(title)\") is not in Contacts"
         case .fileVersionConflict(let conflict):
             return conflict.summary
+        case .accountMissing(let review):
+            return review.summary
         }
     }
-}
-
-/// A contact left out of this export, and why.
-public struct SkippedContact: Hashable, Sendable {
-    public var title: String
-    public var reason: String
-    /// `false` when a recorded decision excluded it (no review needed).
-    public var needsReview: Bool
-
-    /// Creates a skipped entry.
-    public init(title: String, reason: String, needsReview: Bool = true) {
-        self.title = title
-        self.reason = reason
-        self.needsReview = needsReview
-    }
-}
-
-/// A non-contact note with invalid frontmatter, reported once per content hash.
-public struct ProblemNotice: Hashable, Sendable {
-    public var path: String
-    public var problem: String
-    public var sha256: String
-}
-
-/// A request to stamp an Apple card with its record id.
-public struct StampRequest: Hashable, Sendable {
-    public var cardID: String
-    public var recordID: UUID
-    public var title: String
 }
 
 /// The dry-run result of planning an export: exactly what `ExportExecutor`

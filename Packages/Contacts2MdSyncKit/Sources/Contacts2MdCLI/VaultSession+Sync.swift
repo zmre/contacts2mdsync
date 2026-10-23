@@ -166,7 +166,7 @@ extension VaultSession {
                     AppleReadRequest(
                         tracker: tracker, mode: mode, fullReason: fullReason,
                         deleteConfirmInterval: options.deleteConfirmInterval)),
-                notes: notes.status)
+                notes: notes.status, keyer: keyer)
             if gathered.inputs.notes.skipped != nil, let log = notes.handle.bridge?.log {
                 gathered.inputs.notes.skipped = Self.skipWarning(log) ?? gathered.inputs.notes.skipped
             }
@@ -278,9 +278,11 @@ extension VaultSession {
             markdownCreated: result?.markdown.created.count ?? 0,
             markdownUpdated: result?.markdown.updated.count ?? 0,
             markdownDeleted: result?.trashed.count ?? 0,
-            held: plan.appleHold == nil ? 0 : plan.apple.count, heldReason: plan.appleHold?.reason,
+            held: (plan.appleHold == nil ? 0 : plan.apple.count) + plan.accountHeld.count,
+            heldReason: plan.appleHold?.reason ?? plan.accountHeld.first.map { "\($0.account) not visible" },
             appleRead: prepared.apple.isComplete ? "full" : "incremental")
         record.sides?.notes = plan.notes.source?.rawValue ?? (plan.notes.skipped == nil ? nil : "skipped")
+        record.sides?.accounts = plan.accounts.isEmpty ? nil : plan.accounts.map(\.banner).joined(separator: "; ")
         if plan.notes.isActive, let result {
             let counts = NotesCounts(result)
             record.sides?.notesToContacts = counts.toContacts

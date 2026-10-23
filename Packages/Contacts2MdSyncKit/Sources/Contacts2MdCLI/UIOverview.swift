@@ -91,6 +91,8 @@ public struct UIOverview: Sendable {
     public var multiDeviceWithoutStamps: Bool
     /// `apple_writes` is on.
     public var appleWritesEnabled: Bool
+    /// Contacts accounts not visible in Contacts (their cards kept as last seen).
+    public var accounts: [UIAccountBanner]
 
     /// Builds the overview. `sessionStart` is when the app launched.
     public init(data: UIVaultData, plan: UIPlanSummary?, counts: UIReviewCounts, sessionStart: Date) {
@@ -112,6 +114,7 @@ public struct UIOverview: Sendable {
         rootPath = data.rootPath
         appleWritesEnabled = data.config.appleWrites
         multiDeviceWithoutStamps = data.deviceCount > 1 && !data.config.stampContacts
+        accounts = UIAccountBanner.banners(data)
         if data.records.lastExport == nil {
             health = .neverExported
         } else if counts.total > 0 {
@@ -245,6 +248,9 @@ public struct UIActivityRow: Identifiable, Hashable, Sendable {
     /// Contact notes this run: `2 → Contacts · 1 → notes`, `skipped`, or
     /// `nil` (notes off, previews, runs before notes existed).
     public var notes: String?
+    /// Accounts not visible in Contacts during the run (`Google account isn't
+    /// visible in Contacts — 1,353 cards kept as last seen`), if any.
+    public var accounts: String?
     /// Changes in the run's change log (`nil`: none recorded).
     public var changeCount: Int?
     /// The key of the run's change log (`SessionRecord.changeLogID`).
@@ -278,7 +284,8 @@ public struct UIActivityRow: Identifiable, Hashable, Sendable {
                 contacts: split.contacts, markdown: split.markdown, combined: split.combined,
                 adopted: session.adopted, held: split.held, holdReason: split.holdReason,
                 appleRead: split.appleRead, review: session.pendingReview, skipped: session.skipped, result: result,
-                notes: notesText(session), changeCount: session.changeCount, changeLogID: session.changeLogID)
+                notes: notesText(session), accounts: preview ? nil : session.sides?.accounts,
+                changeCount: session.changeCount, changeLogID: session.changeLogID)
         }
     }
 

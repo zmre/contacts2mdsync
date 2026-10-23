@@ -10,7 +10,9 @@ extension PlanningRun {
 
     mutating func limitClustersToOneNote() {
         let eligible = contacts.filter {
-            !blocked.contains($0.unifiedID) || boundIDs[$0.unifiedID] != nil || decisionExcluded.contains($0.unifiedID)
+            !accountFrozen.contains($0.unifiedID)
+                && (!blocked.contains($0.unifiedID) || boundIDs[$0.unifiedID] != nil
+                    || decisionExcluded.contains($0.unifiedID))
         }
         let byUnifiedID = Dictionary(eligible.map { ($0.unifiedID, $0) }, uniquingKeysWith: { first, _ in first })
         let clusterInput = eligible.map { contact -> AppleContact in

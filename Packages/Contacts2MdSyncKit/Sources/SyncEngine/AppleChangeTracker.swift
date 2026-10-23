@@ -38,6 +38,9 @@ public enum FullSnapshotReason: String, Hashable, Sendable, Codable {
     case imagesNeeded = "images-needed"
     /// Notes were turned on or off (or skipped) since the cached snapshot.
     case notesChanged = "notes-changed"
+    /// A Contacts account (container) appeared or disappeared, or an
+    /// account went missing or came back (architecture §9).
+    case accountsChanged = "accounts-changed"
 
     /// Short text for output.
     public var text: String {
@@ -55,6 +58,7 @@ public enum FullSnapshotReason: String, Hashable, Sendable, Codable {
         case .cacheInconsistent: "cache inconsistent"
         case .imagesNeeded: "images needed"
         case .notesChanged: "notes turned on or off"
+        case .accountsChanged: "a Contacts account went missing or came back"
         }
     }
 }
@@ -97,6 +101,9 @@ public struct AppleRead: Sendable {
     var maskedCards: Set<String>
     /// `AppleChangeTracker.settingsKey` at read time.
     var settingsKey: String
+    /// What Contacts really holds, when `snapshot` has unavailable
+    /// accounts' cards put back (the mirror never keeps those).
+    var mirrorSnapshot: AppleSnapshot?
 
     /// `true` when `snapshot` is a full snapshot.
     public var isComplete: Bool { kind.isFull }
@@ -105,36 +112,6 @@ public struct AppleRead: Sendable {
     public static func full(_ snapshot: AppleSnapshot, reason: FullSnapshotReason = .requested) -> AppleRead {
         AppleRead(
             snapshot: snapshot, kind: .full(reason), token: nil, imageHashes: [:], maskedCards: [], settingsKey: "")
-    }
-}
-
-/// What the tracker needs to know about the vault side of a run.
-public struct AppleReadContext: Sendable {
-    public var records: RecordMap
-    /// Records whose note changed since the last run (their contacts are re-read).
-    public var vaultTouchedRecords: Set<UUID>
-    /// `AppleChangeTracker.settingsKey(configText:decisions:)`.
-    public var settingsKey: String
-    public var vanished: [UUID: Date]
-    public var now: Date
-    public var deleteConfirmInterval: TimeInterval
-    /// Whether this run reads notes; a cached snapshot made the other way
-    /// cannot be patched (`nil`: either is fine).
-    public var notesExpected: Bool?  // swiftlint:disable:this discouraged_optional_boolean
-
-    /// Creates a context.
-    public init(
-        records: RecordMap, vaultTouchedRecords: Set<UUID>, settingsKey: String, vanished: [UUID: Date], now: Date,
-        deleteConfirmInterval: TimeInterval = SyncOptions().deleteConfirmInterval,
-        notesExpected: Bool? = nil  // swiftlint:disable:this discouraged_optional_boolean
-    ) {
-        self.notesExpected = notesExpected
-        self.records = records
-        self.vaultTouchedRecords = vaultTouchedRecords
-        self.settingsKey = settingsKey
-        self.vanished = vanished
-        self.now = now
-        self.deleteConfirmInterval = deleteConfirmInterval
     }
 }
 
@@ -205,19 +182,32 @@ public struct AppleChangeTracker: Sendable {
         case .failure(let reason):
             return try full(reason, context: context)
         case .success(let (cache, changes)):
-            var touched = Set(changes.changedCardIDs)
-            for id in context.vaultTouchedRecords {
-                touched.formUnion(context.records[id]?.cards.map(\.id) ?? [])
+            do {
+                return try incremental(cache, changes, context: context)
+            } catch let reason as FullSnapshotReason {
+                return try full(reason, context: context)
             }
-            let totalCards = cache.contacts.reduce(0) { $0 + $1.cards.count }
-            if touched.count > max(maxChangedCards, Int(Double(totalCards) * maxChangeFraction)) {
-                return try full(.tooManyChanges, context: context)
-            }
-            let patched = try patch(
-                cache, touched: touched, changedCards: changes.changedCardIDs.count, token: changes.token,
-                context: context)
-            return try patched ?? full(.cacheInconsistent, context: context)
         }
+    }
+
+    /// The cached snapshot patched with what the history reports; throws a
+    /// `FullSnapshotReason` when a full read is needed instead.
+    private func incremental(
+        _ cache: AppleSnapshotCache, _ changes: HistoryChanges, context: AppleReadContext
+    ) throws -> AppleRead {
+        var touched = Set(changes.changedCardIDs)
+        for id in context.vaultTouchedRecords {
+            touched.formUnion(context.records[id]?.cards.map(\.id) ?? [])
+        }
+        let totalCards = cache.contacts.reduce(0) { $0 + $1.cards.count }
+        if touched.count > max(maxChangedCards, Int(Double(totalCards) * maxChangeFraction)) {
+            throw FullSnapshotReason.tooManyChanges
+        }
+        let patched = try patch(
+            cache, touched: touched, changedCards: changes.changedCardIDs.count, token: changes.token,
+            context: context)
+        guard let patched else { throw FullSnapshotReason.cacheInconsistent }
+        return patched
     }
 
     /// The cache and the history since its token, or why a full read is needed.
@@ -275,6 +265,11 @@ public struct AppleChangeTracker: Sendable {
             let result = try store.refetch(
                 cardIDs: touched.sorted(), siblingHints: Array(Set(siblings).subtracting(touched)).sorted())
             refetched = result.contacts
+            // An account appeared or disappeared: only a full snapshot may
+            // see it (deletions, the unavailable-accounts guard, §9).
+            if Set(result.containers.map(\.id)) != Set(containers.map(\.id)) {
+                throw FullSnapshotReason.accountsChanged
+            }
             let replaced = touched.union(refetched.flatMap(\.cardIDs))
             contacts.removeAll { $0.cards.contains { replaced.contains($0.id) } }
             containers = result.containers
@@ -295,7 +290,8 @@ public struct AppleChangeTracker: Sendable {
         }
         contacts += refetched
         let present = Set(contacts.flatMap(\.cardIDs))
-        for (id, binding) in context.records.records where context.vanished[id] == nil && !binding.cards.isEmpty {
+        for (id, binding) in context.records.records
+        where context.vanished[id] == nil && !binding.cards.isEmpty && !context.exemptRecords.contains(id) {
             guard binding.cards.contains(where: { present.contains($0.id) }) else { return nil }
         }
         let snapshot = AppleSnapshot(
@@ -325,7 +321,8 @@ public struct AppleChangeTracker: Sendable {
                 masked: [], settingsKey: read.settingsKey, savedAt: now)
         } else {
             cache = AppleSnapshotCache(
-                snapshot: read.snapshot, token: read.token, imageHashes: read.imageHashes, masked: read.maskedCards,
+                snapshot: read.mirrorSnapshot ?? read.snapshot, token: read.token, imageHashes: read.imageHashes,
+                masked: read.maskedCards,
                 settingsKey: read.settingsKey, savedAt: now)
         }
         guard cache.token != nil else {

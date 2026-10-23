@@ -60,6 +60,13 @@ struct MenuBarView: View {
             Text(model.isConfigured ? model.live.liveLine : "Not set up yet")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+            ForEach(model.overview?.accounts ?? []) { banner in
+                Label(banner.text, systemImage: "person.crop.circle.badge.questionmark")
+                    .font(.callout)
+                    .foregroundStyle(banner.isReturning ? Color.secondary : Color.orange)
+                    .lineLimit(2)
+                    .help(banner.detail)
+            }
         }
     }
 

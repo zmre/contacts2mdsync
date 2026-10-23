@@ -25,6 +25,10 @@ extension Session {
                         report.info("         \(offset + 1). \(Self.describe(member, in: members))")
                     }
                 }
+                if case .accountMissing(let account) = entry.item {
+                    report.info("         forget would:")
+                    for line in account.forgetPreview { report.info("           \(line)") }
+                }
                 report.info("         choices: \(choices)")
                 if case .duplicateCluster = entry.item {
                     report.info("         or a partition: --group 1,2 --group 3 --exclude 4 (each group is one person)")

@@ -79,8 +79,17 @@ struct ActivityView: View {
                 Text(row.review > 0 ? row.review.formatted() : "—").monospacedDigit()
             }
             .width(min: 50, ideal: 60)
-            TableColumn("Result") { row in result(row) }
-                .width(min: 50, ideal: 70)
+            TableColumn("Result") { row in
+                HStack(spacing: 4) {
+                    result(row)
+                    if let accounts = row.accounts {
+                        Image(systemName: "person.crop.circle.badge.questionmark")
+                            .foregroundStyle(.orange)
+                            .help(accounts + " (nothing removed from your notes)")
+                    }
+                }
+            }
+            .width(min: 50, ideal: 70)
         }
     }
 

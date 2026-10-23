@@ -104,6 +104,8 @@ Exit codes for `sync`: 0 clean, 1 items await review, 2 Apple writes held by the
 
 Exit codes: 0 clean, 1 done but items await review, 2 Apple writes held back by the change limit (M3), 3 not configured, folder or Contacts permission missing, 4 safety breaker tripped (M3), 5 error, 64 bad command line. Details are in [docs/architecture.md §15](docs/architecture.md#15-headless-cli-cron--launchd).
 
+**Turning an account off in System Settings is safe.** When an account's Contacts (Google, Exchange, even iCloud) is turned off, macOS removes its cards from Contacts; Contacts2MdSync keeps them as last seen instead of treating them as deleted: no note loses a phone, email or note that only that account held, contacts only in that account stay as they are, and nothing is written to them. `status`, `sync` and the app say which account is missing. Turn it back on and its cards are matched to your notes again (even with new ids), with nothing created twice; or, if you removed it for good, `contacts2md review decide account-missing:<id> forget` (Forget This Account… in the app) shows what would be removed and removes it on the next sync. See [architecture §9](docs/architecture.md#unavailable-accounts).
+
 ## Trying a real export safely
 
 Nothing below writes to Apple Contacts: stamping is off unless you pass `--stamp`.

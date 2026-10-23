@@ -198,8 +198,10 @@ extension PlanningRun {
         let plannedImage = applyImage(merge.markdownImage, to: &result, candidate: candidate, current: noteImage.state)
         result.sync = SyncMetadata(id: id, status: existing.sync.status, other: existing.sync.other)
         let imageData = merge.appleImage == nil ? nil : imageBytes(noteImage.path)
+        previewForget(candidate, builder: tools.builder)
         planAppleWrites(
-            candidate, merge: merge, imageData: imageData, writer: tools.writer, renamer: tools.renamer)
+            candidate, merge: holdFrozenWrites(merge, candidate: candidate, builder: tools.builder),
+            imageData: imageData, writer: tools.writer, renamer: tools.renamer)
         sync?.states[id] = RecordSyncState(
             recordID: id, cardIDs: contact.cardIDs, stampID: contact.stampIDs.first, plannedNote: result,
             existingNote: existing, markdownImage: noteImage.state, plannedImage: plannedImage,
@@ -304,6 +306,11 @@ extension PlanningRun {
         result.awaitingDeleteConfirmation = sync.awaiting
         result.notes = sync.inputs.notes
         result.notesBaseline = sync.notesBaseline
+        let accounts = accountReport()
+        result.accounts = accounts.statuses
+        result.markdown.reviews += accounts.reviews
+        result.accountHeld = sync.accounts.held
+        result.accountGuard = sync.inputs.accounts
         result.removedRecords = sync.removed
         result.titleRenames = sync.renames.map {
             TitleRename(recordID: $0.key, oldTitle: $0.value.oldTitle, newTitle: $0.value.newTitle)
@@ -326,7 +333,8 @@ extension PlanningRun {
     private func withStamps(_ changes: [AppleRecordChange], removed: Set<UUID>) -> [AppleRecordChange] {
         guard plan.config.stampContacts else { return changes }
         var changes = changes
-        for request in plan.stamps where !removed.contains(request.recordID) {
+        let frozen = sync?.inputs.frozenCardIDs ?? []
+        for request in plan.stamps where !removed.contains(request.recordID) && !frozen.contains(request.cardID) {
             let stamp = AppleWriteOperation.stamp(cardID: request.cardID, id: request.recordID)
             if let index = changes.firstIndex(where: { $0.recordID == request.recordID && $0.kind == .update }) {
                 changes[index].operations.append(stamp)

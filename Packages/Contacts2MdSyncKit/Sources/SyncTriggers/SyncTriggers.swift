@@ -159,6 +159,9 @@ public struct SyncRunSummary: Hashable, Sendable, Codable {
     /// Notes wanted but skipped this run (no Automation permission, a failed
     /// read), or note writes that failed: the first warning.
     public var notesWarning: String?
+    /// A Contacts account is not visible in Contacts (its cards are kept as
+    /// last seen): the first one's banner text.
+    public var accountWarning: String?
 
     /// Creates a summary.
     public init(kind: SyncRunKind, startedAt: Date, finishedAt: Date, appleFull: Bool, appleRead: String) {
@@ -188,6 +191,7 @@ public struct SyncRunSummary: Hashable, Sendable, Codable {
             text += "  notes →contacts \(notesToContacts) →md \(notesToMarkdown)"
         }
         if notesWarning != nil { text += "  notes skipped" }
+        if accountWarning != nil { text += "  account missing" }
         if !failures.isEmpty { text += "  failures \(failures.count)" }
         return text
     }

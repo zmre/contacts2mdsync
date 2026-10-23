@@ -163,6 +163,7 @@ public struct VaultSyncRunner: SyncRunner {
         let notes = NotesCounts(planned: plan)
         (summary.notesToContacts, summary.notesToMarkdown) = (notes.toContacts, notes.toMarkdown)
         summary.notesWarning = plan.notes.skipped
+        summary.accountWarning = plan.accounts.first?.banner
         return summary
     }
 
@@ -176,8 +177,8 @@ public struct VaultSyncRunner: SyncRunner {
         summary.appleCreated = result.apple.filter { $0.kind == .create }.count
         summary.appleDeleted = result.apple.filter { $0.kind == .delete }.count
         summary.appleUpdated = result.apple.count - summary.appleCreated - summary.appleDeleted
-        summary.appleHeld = plan.appleHold == nil ? 0 : plan.apple.count
-        summary.appleHoldReason = plan.appleHold?.reason
+        summary.appleHeld = (plan.appleHold == nil ? 0 : plan.apple.count) + plan.accountHeld.count
+        summary.appleHoldReason = plan.appleHold?.reason ?? plan.accountHeld.first.map { "\($0.account) not visible" }
         summary.markdownCreated = result.markdown.created.count
         summary.markdownUpdated = result.markdown.updated.count
         summary.markdownTrashed = result.trashed.count
@@ -191,6 +192,7 @@ public struct VaultSyncRunner: SyncRunner {
         let notes = NotesCounts(result)
         (summary.notesToContacts, summary.notesToMarkdown) = (notes.toContacts, notes.toMarkdown)
         summary.notesWarning = plan.notes.skipped ?? prepared.notes.bridge?.log.writeWarnings.first
+        summary.accountWarning = plan.accounts.first?.banner
         return summary
     }
 }

@@ -204,7 +204,7 @@ public final class SyncHarness: Sendable {
                 } ?? .snapshot(notes.store)
             let gathered = try SyncPlanner.gather(
                 fs: vault, state: state, config: (try config, loaded?.text), now: clock.now, apple: source,
-                notes: notes.status)
+                notes: notes.status, keyer: keyer)
             let plan = try SyncPlanner(fs: vault, keyer: keyer, ids: ids, options: options).plan(
                 gathered.including(device).inputs)
             if SyncPlanner.needsImages(plan, read: gathered.apple) {

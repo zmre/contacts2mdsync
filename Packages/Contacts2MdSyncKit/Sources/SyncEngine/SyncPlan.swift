@@ -83,6 +83,15 @@ public struct SyncInputs: Sendable {
     /// How this run handles Contacts notes (architecture §8). With
     /// `freshStart`, every record's body merges without a base.
     public var notes: NotesStatus = .off
+    /// Accounts not visible in Contacts (architecture §9): the snapshot
+    /// already has their cards put back as last seen.
+    public var accounts: AccountGuard = .inactive
+    /// Cards kept as last seen in the snapshot.
+    var frozenCardIDs: Set<String> = []
+    /// Contacts made only of frozen cards → their record.
+    var ghostRecords: [String: UUID] = [:]
+    /// Contacts not synced this run because of unavailable accounts.
+    var frozenContacts: Set<String> = []
 
     /// Creates inputs.
     public init(
@@ -207,6 +216,14 @@ public struct SyncPlan: Sendable {
     /// Bodies merged without a notes base (the enablement migration on the
     /// first sync with notes; adopted notes later).
     public var notesBaseline = NotesBaseline()
+    /// Accounts not visible in Contacts whose cards are kept as last seen
+    /// (or that came back and are being matched), architecture §9.
+    public var accounts: [AccountStatus] = []
+    /// Apple changes held because they would touch an unavailable account's cards.
+    public var accountHeld: [AccountHeldChange] = []
+    /// The run's account guard (the executor puts frozen cards back into
+    /// its post-write snapshot, and stores the tracked accounts).
+    public var accountGuard: AccountGuard = .inactive
 
     // Bookkeeping for the executor.
     var removedRecords = Set<UUID>()

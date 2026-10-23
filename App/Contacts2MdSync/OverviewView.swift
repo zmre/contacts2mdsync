@@ -10,6 +10,7 @@ struct OverviewView: View {
         if let overview = model.overview {
             Form {
                 statusSection(overview)
+                ForEach(overview.accounts) { banner in AccountBannerSection(model: model, banner: banner) }
                 if !overview.needsReview.isEmpty { needsReviewSection(overview) }
                 if !model.renamedLinks.isEmpty { RenamedLinksSection(model: model) }
                 sinceLastSyncSection(overview)

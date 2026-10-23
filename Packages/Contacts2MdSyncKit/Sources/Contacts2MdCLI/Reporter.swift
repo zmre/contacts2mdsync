@@ -184,6 +184,8 @@ struct Reporter {
             break  // summarized in one `pending` line
         case .fileVersionConflict:
             warning("version", "\(review.summary) — record paused; keep one in the app or `review decide` \(id)")
+        case .accountMissing:
+            break  // one `account` line per account (syncWarnings)
         }
     }
 
@@ -273,6 +275,7 @@ extension Reporter {
     }
 
     private func syncWarnings(_ plan: SyncPlan) {
+        accounts(plan)
         reviews(plan.markdown)
         for text in plan.blocked { warning("blocked", text + " — kept in markdown") }
         if let warning = plan.identityWarning { self.warning("identity", warning) }
@@ -283,6 +286,28 @@ extension Reporter {
         }
     }
 
+    /// `WARNING account …` per unavailable account (not an error: its cards
+    /// are kept as last seen), and the Apple changes held for it.
+    private func accounts(_ plan: SyncPlan) {
+        for status in plan.accounts {
+            guard !status.isReturning else {
+                warning("account", status.message)
+                continue
+            }
+            let id = AccountMissingReview.idPrefix + status.account.containerID
+            warning(
+                "account",
+                "\(status.message) (\(AccountGuard.count(status.frozenRecords, "contact")) only there, "
+                    + "\(AccountGuard.count(status.linkedRecords)) linked). \(status.hint), or forget it: "
+                    + "`review decide \(id) forget` [\(id)]")
+        }
+        for change in plan.accountHeld {
+            item(
+                "held", "apple",
+                "\(change.title)  (\(change.fields.joined(separator: ", "))) — \(change.account) not visible")
+        }
+    }
+
     /// `summary  apple c/u/d …  md c/u/d …  skipped …  pending-review …  held …  2.4s`
     func syncSummary(plan: SyncPlan, result: SyncResult?, seconds: TimeInterval) {
         let apple = result?.apple ?? (plan.appleWritesAllowed ? plan.apple : [])
@@ -290,7 +315,7 @@ extension Reporter {
         let markdownCreated = result?.markdown.created.count ?? plan.markdown.creates.count
         let markdownUpdated = result?.markdown.updated.count ?? plan.markdown.updates.count
         let trashed = result?.trashed.count ?? plan.trash.count
-        let held = plan.appleWritesAllowed ? 0 : plan.apple.count
+        let held = (plan.appleWritesAllowed ? 0 : plan.apple.count) + plan.accountHeld.count
         let pending = plan.markdown.reviews.filter(\.needsDecision).count
         let line =
             "summary  apple c/u/d \(count([.create]))/\(count([.update, .stamp, .unstamp]))/\(count([.delete]))"

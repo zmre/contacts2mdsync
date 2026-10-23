@@ -71,6 +71,12 @@ public struct Decision: Codable, Hashable, Sendable {
         /// people, `excluded` members are not synced. `contacts` lists every
         /// member. Supersedes `distinct-people` / `sync-only` for its members.
         case clusterResolve = "cluster-resolve"
+        /// The Contacts account whose container id is `path` is not visible:
+        /// `choice` `wait` (keep its cards as last seen) or `forget` (remove
+        /// it deliberately: its contacts are queued as deleted and values
+        /// only its cards held leave the notes). Applies only to the absence
+        /// that began before the decision (architecture §9).
+        case accountMissing = "account-missing"
     }
 
     public var id: UUID

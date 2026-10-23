@@ -120,6 +120,7 @@ struct Session {
                             + "  stamp_contacts=\(stored.stampContacts)  devices=\(stored.deviceCount)")
                     reportLease(stored)
                     if let warning = stored.identityWarning { report.warning("identity", warning) }
+                    reportAccounts(stored.unavailableAccounts)
                 }
                 let pending = try opened.loadPending()
                 pendingCount = pending.items.filter(\.item.needsDecision).count
@@ -145,6 +146,24 @@ struct Session {
             report.info("summary  \(String(format: "%.1fs", elapsed))")
             guard hasAccess, loaded != nil else { return .notRunnable }
             return needsReview || pendingCount > 0 ? .needsReview : .success
+        }
+    }
+
+    /// `account  MISSING  Google "Gmail" (1,353 cards, last seen …) — kept as last seen`.
+    func reportAccounts(_ accounts: [UnavailableAccount]) {
+        for account in accounts {
+            let what =
+                "\(account.kind.displayName) \"\(account.name)\" (\(AccountGuard.count(account.cardCount)) cards, "
+                + "last seen \(report.timestamp(account.lastSeen)))"
+            if account.returnedAt != nil {
+                report.info(
+                    "account  RETURNED \(what) — \(AccountGuard.count(account.cards.count)) cards still being matched")
+            } else {
+                report.info(
+                    "account  MISSING  \(what) — kept as last seen; "
+                        + "`contacts2md review decide \(AccountMissingReview.idPrefix)\(account.containerID) forget` "
+                        + "removes it")
+            }
         }
     }
 
