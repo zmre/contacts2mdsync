@@ -50,8 +50,7 @@ extension Session {
                 report.item("backup", "md", "\(folder.path(percentEncoded: false))  (notes before rewrite)")
             }
             report.result(outcome.result, of: plan)
-            for request in outcome.stampedRequests { report.item("stamped", "apple", request.title) }
-            for failure in outcome.stampFailures { report.warning("stamp", failure) }
+            report.stamps(outcome)
             report.summary(plan: plan, result: outcome.result, stamped: outcome.stamped, seconds: elapsed)
             if !outcome.result.failures.isEmpty { return .error }
             return plan.needsReview || !outcome.stampFailures.isEmpty ? .needsReview : .success

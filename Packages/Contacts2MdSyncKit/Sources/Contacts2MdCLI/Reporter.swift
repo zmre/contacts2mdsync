@@ -190,6 +190,15 @@ struct Reporter {
     }
 
     /// `summary  apple c/u/d …  md c/u/d …  adopted …  unchanged …  skipped …  pending-review …  0.4s`
+    /// The stamp lines of `export --stamp`: stamped, failed, and held (a
+    /// card with a note waiting for permission to control Contacts.app).
+    func stamps(_ outcome: ExportOutcome) {
+        for request in outcome.stampedRequests { item("stamped", "apple", request.title) }
+        for failure in outcome.stampFailures { warning("stamp", failure) }
+        for held in outcome.stampsHeld { item("held", "apple", "\(held.request.title) — \(held.reason)") }
+        contactsControlWarning(reasons: outcome.stampsHeld.map(\.reason))
+    }
+
     func summary(plan: ExportPlan, result: ExportResult?, stamped: Int, seconds: TimeInterval) {
         let created = result?.created.count ?? plan.creates.count
         let changes = result?.updated ?? plan.updates
@@ -245,6 +254,16 @@ extension Reporter {
         info("timing   \(timings.line)  total \(String(format: "%.2f", timings.total))s")
     }
 
+    /// One `WARNING held` line when writes wait for permission to control
+    /// Contacts.app (architecture §6 "Write routing").
+    func contactsControlWarning(reasons: [String]) {
+        guard reasons.contains(CardWriteRouter.permissionReason) else { return }
+        warning(
+            "held",
+            "contacts with notes are edited through Contacts.app: allow Contacts2MdSync to control Contacts "
+                + "(open the app: Settings ▸ Accounts, or System Settings ▸ Privacy & Security ▸ Automation)")
+    }
+
     /// The lines of an executed sync.
     func syncResult(_ result: SyncResult, of plan: SyncPlan) {
         markdownResult(result.markdown)
@@ -252,12 +271,7 @@ extension Reporter {
         for change in result.apple { item(Self.appleVerb(change.kind, done: true), "apple", Self.describe(change)) }
         for failure in result.appleFailures { error("apple: \(failure)") }
         for held in result.appleHeld { item("held", "apple", "\(held.title) — \(held.reason)") }
-        if result.appleHeld.contains(where: { $0.reason == CardWriteRouter.permissionReason }) {
-            warning(
-                "held",
-                "contacts with notes are edited through Contacts.app: allow Contacts2MdSync to control Contacts "
-                    + "(open the app: Settings ▸ Accounts, or System Settings ▸ Privacy & Security ▸ Automation)")
-        }
+        contactsControlWarning(reasons: result.appleHeld.map(\.reason))
         for path in result.skippedLinks { warning("create", "\(path): contact not created; note left unlinked") }
         for entry in result.newUnapplyable {
             warning("unapplyable", "\(entry.field) not kept by card \(entry.cardID) — not retried while unchanged")

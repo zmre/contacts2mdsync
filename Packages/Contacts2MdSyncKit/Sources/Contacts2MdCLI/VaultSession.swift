@@ -53,9 +53,21 @@ public struct ExportOutcome: Sendable {
     /// Stamps that were saved.
     public var stampedRequests: [StampRequest] = []
     public var stampFailures: [String] = []
+    /// Stamps not written yet and why: a card with a note needs Contacts.app
+    /// scripting, which needs permission (`CardWriteRouter.permissionReason`).
+    /// Not failures; the next `export --stamp` plans them again.
+    public var stampsHeld: [HeldStamp] = []
+    /// How the stamps were routed (`nil` when nothing was stamped).
+    public var stampRouting: CardWriteRouteLog?
 
     /// Number of contacts stamped.
     public var stamped: Int { stampedRequests.count }
+}
+
+/// A stamp held instead of written (see `ExportOutcome.stampsHeld`).
+public struct HeldStamp: Hashable, Sendable {
+    public var request: StampRequest
+    public var reason: String
 }
 
 /// What this device's state says about a configured vault (no Contacts access needed).
@@ -249,11 +261,9 @@ public struct VaultSession: Sendable {
         if stamp, let receipt {
             let written = Set(plan.bindings.keys).subtracting(result.failedRecordIDs(in: plan))
             let requests = plan.stamps.filter { written.contains($0.recordID) }
-            let applied = try Stamper.stamp(
-                requests, in: prepared.store, backup: receipt, author: SyncEngine.transactionAuthorPrefix + "cli")
-            let done = Set(applied.applied)
-            outcome.stampedRequests = requests.filter { done.contains(.stamp(cardID: $0.cardID, id: $0.recordID)) }
-            outcome.stampFailures = applied.failed.map { "\($0.operation) failed: \($0.message)" }
+            if !requests.isEmpty {
+                try writeStamps(requests, prepared: prepared, backup: receipt, into: &outcome)
+            }
         }
         try saveObservations(prepared, writtenCache: result.writtenCache)
         try prepared.state.saveGroups(
@@ -273,6 +283,31 @@ public struct VaultSession: Sendable {
             _ = try? LeaseManager(fs: prepared.fs, device: device, clock: environment.clock).heartbeat()
         }
         return outcome
+    }
+
+    /// Stamps `requests` through a `CardWriteRouter` (architecture §6 "Write
+    /// routing"), like every other card write: without the notes entitlement
+    /// a card with a note is stamped through Contacts.app, or held without
+    /// permission for it.
+    private func writeStamps(
+        _ requests: [StampRequest], prepared: PreparedExport, backup: BackupReceipt, into outcome: inout ExportOutcome
+    ) throws {
+        let routing = stampRouting(prepared, cardIDs: Set(requests.map(\.cardID)))
+        defer { routing.handle.finish() }
+        let applied = try Stamper.stamp(
+            requests, in: routing.router, cardNotes: routing.cardNotes, backup: backup,
+            author: SyncEngine.transactionAuthorPrefix + "cli")
+        let operation = { (request: StampRequest) in
+            AppleWriteOperation.stamp(cardID: request.cardID, id: request.recordID)
+        }
+        let done = Set(applied.applied)
+        outcome.stampedRequests = requests.filter { done.contains(operation($0)) }
+        outcome.stampFailures = applied.failed.map { "\($0.operation) failed: \($0.message)" }
+        let held = Dictionary(applied.held.map { ($0.operation, $0.reason) }, uniquingKeysWith: { first, _ in first })
+        outcome.stampsHeld = requests.compactMap { request in
+            held[operation(request)].map { HeldStamp(request: request, reason: $0) }
+        }
+        outcome.stampRouting = routing.router.log
     }
 
     private func saveObservations(_ prepared: PreparedExport, writtenCache: [String: FileCacheEntry] = [:]) throws {

@@ -10,6 +10,15 @@ struct NotesSetup {
     var handle: NotesRunHandle
 }
 
+/// How a write outside a sync (`export --stamp`) routes card writes.
+struct StampRouting {
+    var router: CardWriteRouter
+    /// What is known about the written cards' notes (`AppleWriteBatch.cardNotes`).
+    var cardNotes: [String: Bool]
+    /// Ends the Contacts.app session (`finish()`).
+    var handle: NotesRunHandle
+}
+
 /// What the app shows in Settings ▸ Advanced ▸ Contact notes.
 public struct NotesSourceStatus: Hashable, Sendable {
     /// The entitlement is present (notes always synced, no setting).
@@ -65,6 +74,37 @@ extension VaultSession {
         return NotesSetup(
             store: bridge, status: NotesStatus(source: provider.source),
             handle: NotesRunHandle(provider: provider, bridge: bridge, router: router))
+    }
+
+    /// The card-write routing of a write outside a sync (`export --stamp`):
+    /// a `CardWriteRouter` over the export's store, and what is known about
+    /// the notes of `cardIDs`, from the best source available, without a
+    /// prompt:
+    ///
+    /// 1. the export's snapshot, when it was read with notes (entitlement);
+    /// 2. this device's Apple mirror, when the last sync read notes;
+    /// 3. a read of the remaining cards' notes through Contacts.app, when
+    ///    `notes_sync` is on (no permission: the read fails, they stay unknown).
+    ///
+    /// Cards still unknown go through Contacts.app when it may be controlled,
+    /// else through the framework with a retry through Contacts.app on 134092
+    /// (held without permission). `handle.finish()` ends the Contacts.app session.
+    func stampRouting(_ prepared: PreparedExport, cardIDs: Set<String>) -> StampRouting {
+        let settings = notesSettingsStore.load()
+        let entitled = (try? prepared.store.capabilities.notesAvailable) == true
+        let provider = !entitled && settings.notesSync ? environment.makeNotesProvider(settings) : nil
+        let router = CardWriteRouter(
+            inner: prepared.store, scripting: environment.makeCardScripting(settings, provider))
+        let handle = NotesRunHandle(provider: provider, bridge: nil, router: router)
+        var notes = CardNoteHints.from(prepared.snapshot, cardIDs: cardIDs)
+        let keepKnown = { (known: Bool, _: Bool) in known }
+        let mirror = CardNoteHints.fromMirror(in: prepared.state, cardIDs: cardIDs.subtracting(notes.keys))
+        notes.merge(mirror, uniquingKeysWith: keepKnown)
+        let unknown = cardIDs.subtracting(notes.keys)
+        if let provider, !unknown.isEmpty, let read = try? provider.readAll(cardIDs: unknown.sorted()) {
+            notes.merge(CardNoteHints.from(read: read).filter { unknown.contains($0.key) }, uniquingKeysWith: keepKnown)
+        }
+        return StampRouting(router: router, cardNotes: notes, handle: handle)
     }
 
     /// The warning of a run whose notes read failed.

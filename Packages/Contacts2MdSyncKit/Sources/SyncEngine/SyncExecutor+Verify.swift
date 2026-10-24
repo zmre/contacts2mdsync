@@ -13,12 +13,9 @@ extension SyncExecutor {
         guard plan.notes.isActive, plan.notes.skipped == nil else { return [:] }
         var notes: [String: Bool] = [:]
         for change in plan.apple {
-            guard let contact = plan.records[change.recordID]?.apple, contact.notesUnknown != true else { continue }
+            guard let contact = plan.records[change.recordID]?.apple else { continue }
             let targets = Set(change.operations.compactMap(\.cardID))
-            for card in contact.cards where targets.contains(card.id) {
-                guard let values = contact.values(of: card) else { continue }
-                notes[card.id] = values.body != nil
-            }
+            notes.merge(CardNoteHints.from([contact], cardIDs: targets)) { _, new in new }
         }
         return notes
     }

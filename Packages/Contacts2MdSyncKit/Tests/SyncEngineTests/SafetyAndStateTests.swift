@@ -67,7 +67,8 @@ struct StampingTests {
         let (plan, _) = try harness.export()
         let receipt = try VCardBackup(directory: directory).backup(harness.store)
         let result = try Stamper.stamp(
-            plan.stamps, in: harness.store, backup: receipt, author: "com.zmre.contacts2mdsync.test")
+            plan.stamps, in: CardWriteRouter(inner: harness.store, scripting: nil), backup: receipt,
+            author: "com.zmre.contacts2mdsync.test")
         #expect(result.failed.isEmpty)
         #expect(result.applied.count == plan.stamps.count)
         #expect(harness.store.appliedBatches.map(\.author) == ["com.zmre.contacts2mdsync.test"])

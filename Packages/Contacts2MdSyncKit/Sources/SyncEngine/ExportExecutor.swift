@@ -225,17 +225,25 @@ public struct VCardBackup: Sendable {
 
 /// Stamps Apple cards with their record id (`x-c2mdsync:<uuid>`, label `c2mdsync`).
 ///
-/// The only Apple write in M1. Requires a `BackupReceipt`, i.e. a vCard
-/// backup written in this session; callers additionally gate it behind an
-/// explicit opt-in (`contacts2md export --stamp`), off by default.
+/// The one-shot stamping of `contacts2md export --stamp`. Requires a
+/// `BackupReceipt`, i.e. a vCard backup written in this session; callers
+/// additionally gate it behind an explicit opt-in, off by default.
+///
+/// Takes a `CardWriteRouter`, not any store: without the notes entitlement
+/// the Contacts framework refuses to stamp a card that has a note (134092,
+/// spike S15), so stamps are routed like every other card write
+/// (architecture §6 "Write routing") and may come back `held`.
 public enum Stamper {
-    /// Applies `requests` as one save, tagged with `author`.
+    /// Applies `requests` as one batch, tagged with `author`. `cardNotes`
+    /// is what the caller knows about the cards' notes (`CardNoteHints`).
     public static func stamp(
-        _ requests: [StampRequest], in store: any ContactStore, backup: BackupReceipt, author: String
+        _ requests: [StampRequest], in router: CardWriteRouter, cardNotes: [String: Bool] = [:],
+        backup: BackupReceipt, author: String
     ) throws -> AppleWriteResult {
         _ = backup  // The receipt's existence is the precondition.
         guard !requests.isEmpty else { return AppleWriteResult(applied: []) }
-        let batch = AppleWriteBatch(operations: requests.map { .stamp(cardID: $0.cardID, id: $0.recordID) })
-        return try store.apply(batch, author: author)
+        let batch = AppleWriteBatch(
+            operations: requests.map { .stamp(cardID: $0.cardID, id: $0.recordID) }, cardNotes: cardNotes)
+        return try router.apply(batch, author: author)
     }
 }
