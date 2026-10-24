@@ -48,6 +48,8 @@ public struct PreparedSync: Sendable {
     let tracker: AppleChangeTracker
     /// The notes side of the run (provider session, bridge log).
     public let notes: NotesRunHandle
+    /// Phase durations of this run (planning so far; writing adds to it).
+    public let timer: PhaseTimer
 
     /// The Apple snapshot the plan was made from (read-only; no second read
     /// of Contacts needed for review details). After an incremental read it
@@ -86,6 +88,10 @@ public enum SyncGate: Sendable {
 /// The vault has not been exported/synced on this device yet (exit 3).
 public struct VaultNotReady: Error, CustomStringConvertible {
     public let description: String
+
+    /// Configured (by this or another device), but never synced on this Mac.
+    static let notSyncedHere = VaultNotReady(
+        description: "first sync not done on this Mac: run it in Contacts2MdSync (or `contacts2md export --yes`) once")
 }
 
 extension VaultSession {
@@ -131,24 +137,20 @@ extension VaultSession {
     /// Scans, snapshots and plans a two-way sync. Requires a vault exported
     /// or synced on this device before (`VaultNotReady` otherwise).
     public func prepareSync(
-        _ request: SyncRequest, progress: @Sendable (SyncPhase) -> Void = { _ in }
+        _ request: SyncRequest, progress: @Sendable (SyncPhase) -> Void = { _ in }, timer: PhaseTimer = PhaseTimer()
     ) throws -> PreparedSync {
         progress(.scanning)
         let fs = environment.makeVault(root)
         let vault = try configured(fs)
         let (config, text, directory) = (vault.config, vault.text, vault.directory)
         guard FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)) else {
-            throw VaultNotReady(
-                description:
-                    "first sync not done on this Mac: run it in Contacts2MdSync (or `contacts2md export --yes`) once")
+            throw VaultNotReady.notSyncedHere
         }
         let notes = notesSetup(for: try environment.makeStore(), backups: directory.appending(path: "backups"))
         let store = notes.store
         let state = try environment.makeStateStore(directory)
         guard try state.load().lastExport != nil else {
-            throw VaultNotReady(
-                description:
-                    "first sync not done on this Mac: run it in Contacts2MdSync (or `contacts2md export --yes`) once")
+            throw VaultNotReady.notSyncedHere
         }
         let device = try environment.device()
         let tracker = AppleChangeTracker(store: store, state: state, deviceID: device.id)
@@ -166,14 +168,16 @@ extension VaultSession {
                     AppleReadRequest(
                         tracker: tracker, mode: mode, fullReason: fullReason,
                         deleteConfirmInterval: options.deleteConfirmInterval)),
-                notes: notes.status, keyer: keyer)
+                notes: notes.status, keyer: keyer, progress: progress, timer: timer)
             if gathered.inputs.notes.skipped != nil, let log = notes.handle.bridge?.log {
                 gathered.inputs.notes.skipped = Self.skipWarning(log) ?? gathered.inputs.notes.skipped
             }
             try state.saveDecisionMirror(gathered.decisions)
             progress(.planning)
-            let plan = try SyncPlanner(fs: fs, keyer: keyer, ids: environment.ids, options: options).plan(
-                gathered.including(device).inputs)
+            let plan = try timer.measure("plan") {
+                try SyncPlanner(fs: fs, keyer: keyer, ids: environment.ids, options: options).plan(
+                    gathered.including(device).inputs)
+            }
             if SyncPlanner.needsImages(plan, read: gathered.apple) {
                 (mode, fullReason) = (.full, .imagesNeeded)
                 continue
@@ -181,7 +185,7 @@ extension VaultSession {
             return PreparedSync(
                 fs: fs, store: store, state: state, stateDirectory: directory, index: gathered.index,
                 decisions: gathered.decisions, decisionProblems: gathered.decisionProblems, config: config,
-                plan: plan, apple: gathered.apple, tracker: tracker, notes: notes.handle)
+                plan: plan, apple: gathered.apple, tracker: tracker, notes: notes.handle, timer: timer)
         }
     }
 
@@ -219,26 +223,35 @@ extension VaultSession {
         defer { prepared.notes.finish() }
         let device = try environment.device()
         let backups = prepared.stateDirectory.appending(path: "backups")
-        let executor = SyncExecutor(
+        var executor = SyncExecutor(
             fs: prepared.fs, store: prepared.store, state: prepared.state, clock: environment.clock,
             noteBackups: NoteBackup(directory: backups, clock: environment.clock),
             author: SyncEngine.transactionAuthor(deviceID: device.id))
-        let result = try executor.execute(prepared.plan) {
-            let receipt: BackupReceipt
-            do {
-                receipt = try VCardBackup(directory: backups, clock: environment.clock).backup(prepared.store)
-            } catch {
-                throw BackupFailed(underlying: error)
+        let timer = prepared.timer
+        executor.timer = timer
+        let result = try timer.measure("write") {
+            try executor.execute(prepared.plan) {
+                let receipt: BackupReceipt
+                do {
+                    receipt = try timer.measure("backup") {
+                        try VCardBackup(directory: backups, clock: environment.clock).backup(prepared.store)
+                    }
+                } catch {
+                    throw BackupFailed(underlying: error)
+                }
+                onBackup(receipt)
+                return receipt
             }
-            onBackup(receipt)
-            return receipt
         }
-        try SyncPlanner.recordObservations(
-            prepared.plan, index: prepared.index, state: prepared.state, now: environment.clock.now,
-            written: result.markdown.writtenCache)
-        try prepared.tracker.commit(
-            prepared.apple, postWrite: result.postWriteSnapshot.map { ($0, result.postWriteHistoryToken) },
-            compared: prepared.apple.isComplete, now: environment.clock.now)
+        for part in ["backup", "apple-write", "reread", "md-write", "save-state"] { timer.exclude(part, from: "write") }
+        try timer.measure("record") {
+            try SyncPlanner.recordObservations(
+                prepared.plan, index: prepared.index, state: prepared.state, now: environment.clock.now,
+                written: result.markdown.writtenCache)
+            try prepared.tracker.commit(
+                prepared.apple, postWrite: result.postWriteSnapshot.map { ($0, result.postWriteHistoryToken) },
+                compared: prepared.apple.isComplete, now: environment.clock.now)
+        }
         let changes = SessionChange.log(result)
         let record = syncSession(prepared, command: command, startedAt: startedAt, result: result)
         try prepared.state.appendSession(record, changes: changes)
@@ -270,6 +283,7 @@ extension VaultSession {
             pendingReview: plan.markdown.reviews.filter(\.needsDecision).count,
             stamped: result?.apple.filter { $0.kind == .stamp }.count ?? 0,
             failures: (result?.markdown.failures.count ?? 0) + (result?.appleFailures.count ?? 0))
+        record.timings = prepared.timer.timings
         let apple = result?.apple ?? []
         record.sides = SessionSides(
             appleCreated: apple.filter { $0.kind == .create }.count,

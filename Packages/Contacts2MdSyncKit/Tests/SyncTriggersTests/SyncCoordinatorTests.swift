@@ -249,7 +249,7 @@ struct SyncCoordinatorTests {
             case .idle: "idle"
             case .scheduled: "scheduled"
             case .running(_, nil): "running"
-            case .running(_, .some(let phase)): phase.rawValue
+            case .running(_, .some(let phase)): phase.name
             case .finished: "finished"
             default: "other"
             }

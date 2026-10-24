@@ -3,6 +3,7 @@ import Contacts2MdCLI
 import Foundation
 import SyncEngine
 import SyncTestSupport
+import Synchronization
 import Testing
 import VaultIndex
 
@@ -33,8 +34,10 @@ extension UISyncTests {
         let data = try data(reader)
         let banners = UIBanner.banners(
             status: data.status, plan: sync, outcome: nil, deviceID: data.device.id, now: harness.clock.now)
-        #expect(banners == [.appleWritesDisabled(held: 1)])
-        #expect(banners.first?.message.hasPrefix("1 change held for Apple Contacts") == true)
+        #expect(banners == [.appleWritesDisabled(held: 1, kinds: "1 update")])
+        #expect(
+            banners.first?.message
+                == "1 change for Apple Contacts (1 update) is waiting because writing to Contacts is turned off.")
         let overview = UIOverview(data: data, plan: plan, counts: UIReviewCounts(), sessionStart: .distantPast)
         #expect(overview.changedInContacts == 1)
         #expect(overview.changedInMarkdown == 1)
@@ -95,9 +98,52 @@ extension UISyncTests {
             status: data.status, plan: nil, outcome: outcome, deviceID: data.device.id, now: harness.clock.now)
         #expect(banners == [.breaker(trip)])
         #expect(banners.first?.severity == .error)
-        #expect(banners.first?.message.hasPrefix("Sync paused: 12 of 12 contacts disappeared from Contacts") == true)
+        #expect(
+            banners.first?.message
+                == "Sync paused: 12 contacts disappeared from Contacts since the last sync "
+                + "(e.g. Person N1, Person N10, …). Is iCloud signed in? Nothing was written.")
+        #expect(trip.paths.count == 12 && trip.paths.first == "Inbox/Person N1.md")
         #expect(harness.vault.exists("Inbox/Person N1.md"))
         #expect(try reader.sync(UISyncRequest(allowMassVanish: true)).summary != nil)
+    }
+
+    @Test("banner wording: breaker names the missing notes; held changes say writing is off, by kind")
+    func bannerWording() {
+        let paths = ["People/Jane Doe.md", "People/John Roe.md", "People/Max Moe.md"]
+        let markdown = UIBanner.breaker(BreakerTrip(side: "markdown", vanished: 22, total: 2447, paths: paths))
+        #expect(
+            markdown.message
+                == "Sync paused: 22 notes disappeared from the notes folder since the last sync "
+                + "(e.g. Jane Doe.md, John Roe.md, …). Is the folder available? Nothing was written.")
+        let one = UIBanner.breaker(BreakerTrip(side: "markdown", vanished: 1, total: 4, paths: ["Jane Doe.md"]))
+        #expect(
+            one.message
+                == "Sync paused: 1 note disappeared from the notes folder since the last sync (e.g. Jane Doe.md). "
+                + "Is the folder available? Nothing was written.")
+        let held = UIBanner.appleWritesDisabled(held: 24, kinds: "15 deletions, 9 updates")
+        #expect(
+            held.message
+                == "24 changes for Apple Contacts (15 deletions, 9 updates) are waiting because writing to "
+                + "Contacts is turned off.")
+        #expect(!held.message.contains("Settings"))
+    }
+
+    @Test("Sync Now and checks report their phases with last run's counts as they start")
+    func progressPhases() throws {
+        let harness = CLIHarness.exported()
+        let reader = reader(harness)
+        harness.editNote("Inbox/Ann One.md", "job_title: Engineer", with: "job_title: CTO")
+        let phases = Mutex<[SyncPhase]>([])
+        _ = try reader.sync { phase in phases.withLock { $0.append(phase) } }
+        let names = phases.withLock { $0 }.map(\.name)
+        #expect(
+            names == ["waiting-for-lock", "scanning", "scanning-notes", "reading-contacts", "planning", "writing"])
+        let checked = Mutex<[SyncPhase]>([])
+        _ = try reader.plan { phase in checked.withLock { $0.append(phase) } }
+        let counted = checked.withLock { $0 }
+        #expect(counted.contains(.scanningNotes(count: 3)))
+        #expect(counted.contains { if case .readingContacts(let cards?) = $0 { cards > 0 } else { false } })
+        #expect(!counted.contains(.writing))
     }
 
     @Test("another device holds the lease: Waiting banner; Take Over syncs")

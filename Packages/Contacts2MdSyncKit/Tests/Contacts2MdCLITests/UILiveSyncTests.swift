@@ -33,10 +33,19 @@ struct UILiveSyncTests {
         #expect(state.display(now: Self.now)?.text == "Syncing…")
         #expect(state.display(now: Self.now)?.detail == "Sync Now sync in progress")
         state.apply(.running(.manual, .scanning))
-        #expect(state.display(now: Self.now)?.text == "Syncing… reading")
+        #expect(state.display(now: Self.now)?.text == "Reading…")
         #expect(state.display(now: Self.now)?.tone == .busy)
+        state.apply(.running(.manual, .readingContacts(cards: 3_781)))
+        #expect(state.display(now: Self.now)?.text == "Reading Contacts (3,781 cards)…")
+        #expect(state.display(now: Self.now)?.detail == "Sync Now sync in progress: Reading Contacts (3,781 cards)…")
+        state.apply(.running(.manual, .readingContactNotes))
+        #expect(state.display(now: Self.now)?.text == "Reading notes from Contacts…")
+        state.apply(.running(.manual, .scanningNotes(count: 2_447)))
+        #expect(state.display(now: Self.now)?.text == "Scanning notes (2,447)…")
+        state.apply(.running(.manual, .waitingForLock))
+        #expect(state.display(now: Self.now)?.text == "Waiting for the current sync to finish…")
         state.apply(.running(.sweep, .writing))
-        #expect(state.display(now: Self.now)?.text == "Syncing… writing")
+        #expect(state.display(now: Self.now)?.text == "Writing…")
     }
 
     @Test("a finished run asks for a refresh and clears the last problem")
@@ -90,7 +99,7 @@ struct UILiveSyncTests {
         #expect(state.headline(lastSync: today, reviewTotal: 0, now: Self.now).hasPrefix("✓ In sync · Today "))
         #expect(state.headline(lastSync: today, reviewTotal: 3, now: Self.now).hasPrefix("3 to review · synced Today "))
         state.apply(.running(.live, .writing))
-        #expect(state.headline(lastSync: today, reviewTotal: 3, now: Self.now) == "Syncing… writing")
+        #expect(state.headline(lastSync: today, reviewTotal: 3, now: Self.now) == "Writing…")
     }
 
     @Test("following another device (M6): shown as Waiting for that device, review data refreshed")

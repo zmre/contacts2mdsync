@@ -82,6 +82,8 @@ public struct SessionRecord: Codable, Hashable, Sendable {
     public var changeCount: Int?
     /// The key of this run's change log (`SyncStateStore.sessionChanges(logID:)`).
     public var changeLogID: String?
+    /// How long each phase took (`nil` in older records and exports).
+    public var timings: PhaseTimings?
 
     /// Creates a session record.
     public init(
@@ -257,6 +259,32 @@ extension SyncStateStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
         try setMetadata("image_hashes", hashes.isEmpty ? nil : try encoder.encode(hashes))
+    }
+
+    /// Records whose note was missing at the end of the last run whose
+    /// markdown breaker did not trip (`meta`): later runs do not count them
+    /// as newly missing (architecture §9).
+    public func loadKnownMissingNotes() throws -> Set<UUID> {
+        guard let data = try metadata("known_missing_notes"),
+            let raw = try? JSONDecoder().decode([String].self, from: data)
+        else { return [] }
+        return Set(raw.compactMap(UUID.init(uuidString:)))
+    }
+
+    public func saveKnownMissingNotes(_ ids: Set<UUID>) throws {
+        let raw = ids.map { $0.uuidString.lowercased() }.sorted()
+        try setMetadata("known_missing_notes", raw.isEmpty ? nil : try JSONEncoder().encode(raw))
+    }
+
+    /// Cards in the last Contacts read (`meta`), for "Reading Contacts (3,781 cards)…".
+    public func lastCardCount() throws -> Int? {
+        guard let data = try metadata("last_card_count") else { return nil }
+        return String(bytes: data, encoding: .utf8).flatMap { Int($0) }
+    }
+
+    public func saveLastCardCount(_ count: Int) throws {
+        guard try lastCardCount() != count else { return }
+        try setMetadata("last_card_count", Data(String(count).utf8))
     }
 
     public func saveVanished(_ vanished: [UUID: Date]) throws {

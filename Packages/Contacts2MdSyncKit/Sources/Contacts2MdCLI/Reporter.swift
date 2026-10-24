@@ -239,6 +239,12 @@ extension Reporter {
         syncWarnings(plan)
     }
 
+    /// `timing   lock 0.00s  scan 0.42s  contacts 3.10s  …  total 4.71s` (`--verbose` only).
+    func timings(_ timings: PhaseTimings) {
+        guard verbose, !timings.entries.isEmpty else { return }
+        info("timing   \(timings.line)  total \(String(format: "%.2f", timings.total))s")
+    }
+
     /// The lines of an executed sync.
     func syncResult(_ result: SyncResult, of plan: SyncPlan) {
         markdownResult(result.markdown)
@@ -263,9 +269,11 @@ extension Reporter {
         if !stamps.isEmpty { item("held", "apple", "\(stamps.count) stamps — \(hold.reason)") }
         switch hold {
         case .appleWritesDisabled:
-            note(
-                "\(plan.apple.count) Apple changes held: apple writes are disabled for this vault "
-                    + "(`contacts2md config --apple-writes enabled` turns them on)")
+            let count = plan.apple.count
+            item(
+                "held", "apple",
+                "\(count) \(count == 1 ? "change" : "changes") (\(AppleRecordChange.kindSummary(plan.apple))): "
+                    + "apple_writes is disabled — enable with `contacts2md config --apple-writes enabled`")
         case .blastRadius(let count, let limit):
             warning(
                 "limit",

@@ -10,8 +10,9 @@ extension Session {
             let session = VaultSession(root: root.url, environment: environment)
             var lock: LocalLock?
             defer { lock?.release() }
+            let timer = PhaseTimer()
             if write {
-                switch try session.beginSync(takeOver: request.takeOverLease) {
+                switch try timer.measure("lock", { try session.beginSync(takeOver: request.takeOverLease) }) {
                 case .localRunInProgress:
                     report.note("another sync is running on this Mac; skipped (nothing to do)")
                     return .success
@@ -22,24 +23,20 @@ extension Session {
                     lock = acquired
                 }
             }
-            let prepared = try session.prepareSync(request)
+            let prepared = try session.prepareSync(request, timer: timer)
             let plan = prepared.plan
-            report.info("apple    \(prepared.apple.kind.summary)")
-            report.notesPlan(plan)
-            json?.setting("apple_read", prepared.apple.isComplete ? "full" : "incremental")
-            json?.reviews(plan.markdown.reviews)
-            json?.setting("apple_writes", plan.appleWritesEnabled ? "enabled" : "disabled")
-            json?.setting("stamp_contacts", plan.stampContacts ? "true" : "false")
-            for problem in prepared.decisionProblems { report.warning("decision", problem) }
+            reportPrepared(prepared)
             if let trip = plan.breaker {
                 try session.recordSyncPlan(prepared, command: command, startedAt: startedAt)
                 report.error(trip.message)
+                report.timings(timer.timings)
                 return .breaker
             }
             guard write else {
                 report.syncPlan(plan)
                 try session.recordSyncPlan(prepared, command: command, startedAt: startedAt)
                 report.syncSummary(plan: plan, result: nil, seconds: elapsed)
+                report.timings(timer.timings)
                 let rootHint = options.root.map { " --root \($0)" } ?? ""
                 report.note("dry run: nothing written; run `contacts2md sync\(rootHint)` to sync")
                 return Self.exitCode(plan, failures: 0)
@@ -54,8 +51,21 @@ extension Session {
             report.syncResult(result, of: plan)
             report.notesResult(prepared.notes.bridge?.log)
             report.syncSummary(plan: plan, result: result, seconds: elapsed)
+            report.timings(timer.timings)
             return Self.exitCode(plan, failures: result.markdown.failures.count + result.appleFailures.count)
         }
+    }
+
+    /// How Apple was read, the notes plan, the settings, unreadable decisions.
+    private func reportPrepared(_ prepared: PreparedSync) {
+        let plan = prepared.plan
+        report.info("apple    \(prepared.apple.kind.summary)")
+        report.notesPlan(plan)
+        json?.setting("apple_read", prepared.apple.isComplete ? "full" : "incremental")
+        json?.reviews(plan.markdown.reviews)
+        json?.setting("apple_writes", plan.appleWritesEnabled ? "enabled" : "disabled")
+        json?.setting("stamp_contacts", plan.stampContacts ? "true" : "false")
+        for problem in prepared.decisionProblems { report.warning("decision", problem) }
     }
 
     /// Another device leads: a read-only dry run so `review list` and the app

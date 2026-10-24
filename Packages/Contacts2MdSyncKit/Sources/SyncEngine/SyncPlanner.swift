@@ -57,8 +57,11 @@ struct SyncRun {
     var removed = Set<UUID>()
     var conflicts: [SyncConflict] = []
     var vanished: [UUID: Date] = [:]
-    var newlyVanishedApple = 0
-    var newlyMissingNotes = 0
+    /// The breaker (§9): notes of contacts newly gone; last paths of notes newly missing.
+    var newlyVanishedApple: [String] = []
+    var newlyMissingNotes: [String] = []
+    /// Records whose note is missing this run (decided or not).
+    var missingNotes = Set<UUID>()
     var awaiting: [String] = []
     var blocked: [String] = []
     var newUnapplyable: [UnapplyableEntry] = []
@@ -173,11 +176,12 @@ extension PlanningRun {
                 continue
             }
             guard !entry.isDataless, entry.contact != nil, !proposedPaths.contains(entry.path) else { continue }
-            // A forgotten account's contacts are deleted on the user's word:
-            // queued at once, and not a mass vanish.
+            // Not a mass vanish: forgotten accounts (the user's word), decided or known records.
             let forgotten = sync.inputs.accounts.forgottenRecords.contains(id)
             let first = sync.inputs.vanished[id]
-            if first == nil, !forgotten { self.sync?.newlyVanishedApple += 1 }
+            if first == nil, !forgotten, decisions.appleDeleteChoice(for: id) == nil {
+                self.sync?.newlyVanishedApple.append(entry.path)
+            }
             let since = forgotten ? Date.distantPast : first ?? now
             self.sync?.vanished[id] = since
             guard now.timeIntervalSince(since) >= sync.options.deleteConfirmInterval else {
@@ -207,7 +211,13 @@ extension PlanningRun {
 
     mutating func markdownDeleted(_ contact: AppleContact, id: UUID) {
         guard let sync else { return }
-        if !sync.inputs.knownMissingNotes.contains(id) { self.sync?.newlyMissingNotes += 1 }
+        self.sync?.missingNotes.insert(id)
+        // Newly missing (§9): not known missing, not decided (a held
+        // delete-contact stays bound with its note gone).
+        let path = records[id]?.path ?? title(contact)
+        if !sync.inputs.knownMissingNotes.contains(id), decisions.markdownDeleteChoice(for: id) == nil {
+            self.sync?.newlyMissingNotes.append(path)
+        }
         let title = title(contact)
         switch decisions.markdownDeleteChoice(for: id) {
         case "restore"?:

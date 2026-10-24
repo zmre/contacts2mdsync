@@ -232,8 +232,9 @@ private struct NotesSheetView: View {
                             next(.denied)
                             return
                         }
-                        await model.check()
+                        // The preview fills in when the dry run finishes; never wait for it here.
                         next(.granted)
+                        await model.check()
                     }
                 }
                 .keyboardShortcut(.defaultAction)
@@ -245,6 +246,12 @@ private struct NotesSheetView: View {
     private var granted: some View {
         Group {
             Text("Contact notes are on").font(.title3.weight(.semibold))
+            if model.phase == .checking {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(model.runProgress?.text ?? "Updating the preview…").foregroundStyle(.secondary)
+                }
+            }
             if let plan = model.syncPlan, plan.notes.isActive {
                 let baseline = plan.notesBaseline
                 Text(plan.notes.freshStart ? "The first sync with notes will:" : "The next sync will:")
@@ -273,7 +280,7 @@ private struct NotesSheetView: View {
                     }
                     .frame(maxHeight: 180)
                 }
-            } else {
+            } else if model.phase != .checking {
                 Text("Check for Changes (⇧⌘R) shows what the first sync with notes will do.")
                     .foregroundStyle(.secondary)
             }
@@ -282,10 +289,11 @@ private struct NotesSheetView: View {
                 Button("Later") { next(nil) }.keyboardShortcut(.cancelAction)
                 Button("Sync Now") {
                     next(nil)
+                    // Waits for the preview's dry run if it is still running.
                     Task { await model.syncNow() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(!model.canSync)
+                .disabled(model.feedback != nil)
             }
         }
     }

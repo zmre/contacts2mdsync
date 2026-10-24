@@ -59,9 +59,10 @@ public struct VaultSyncRunner: SyncRunner {
         let session = VaultSession(root: root, environment: environment)
         let startedAt = environment.clock.now
         progress(.waitingForLock)
+        let timer = PhaseTimer()
         do {
             let lock: LocalLock
-            switch try session.beginSync(takeOver: false) {
+            switch try timer.measure("lock", { try session.beginSync(takeOver: false) }) {
             case .localRunInProgress: return .blocked(.localRunInProgress)
             case .leaseHeldElsewhere(let lease):
                 return follow(lease, request: request, session: session, startedAt: startedAt, progress: progress)
@@ -70,7 +71,7 @@ public struct VaultSyncRunner: SyncRunner {
             defer { lock.release() }
             var syncRequest = options
             syncRequest.appleMode = request.appleMode
-            let prepared = try session.prepareSync(syncRequest, progress: progress)
+            let prepared = try session.prepareSync(syncRequest, progress: progress, timer: timer)
             if let trip = prepared.plan.breaker {
                 try session.recordSyncPlan(prepared, command: "sync", startedAt: startedAt)
                 return .blocked(.breaker(trip.message))

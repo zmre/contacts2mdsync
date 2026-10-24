@@ -102,7 +102,10 @@ struct VaultSyncRunnerTests {
         }
         #expect(summary.kind == .live && !summary.appleFull && summary.markdownUpdated == 1)
         #expect(summary.appleRead == "incremental: 1 changed cards, 1 contacts re-read")
-        #expect(phases.withLock { $0 } == [.waitingForLock, .scanning, .planning, .writing])
+        #expect(
+            phases.withLock { $0 } == [
+                .waitingForLock, .scanning, .scanningNotes(count: 3), .readingContacts(cards: 3), .planning, .writing,
+            ])
         #expect(registry.paths(at: harness.clock.now) == ["Inbox/Bob Two.md"])
         #expect(try harness.stateStore().recentSessions(limit: 1).first?.trigger == "Live")
     }

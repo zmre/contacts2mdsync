@@ -8,6 +8,18 @@ import UniformTypeIdentifiers
 // inspector's change list and File ▸ Export Log… (docs/ui.md §8, §9).
 
 extension AppModel {
+    /// Changes the folder for new notes; `nil` on success, else the message.
+    func setDefaultFolder(_ folder: String) async -> String? {
+        guard let root = rootURL else { return "No notes folder is open." }
+        do {
+            try await source.setDefaultFolder(folder, root: root)
+            await reload()
+            return nil
+        } catch {
+            return "Use a folder path inside the notes root, like Inbox or People/New. (\(Self.describe(error)))"
+        }
+    }
+
     /// Rescan Everything (confirmed in Settings): forgets this Mac's caches,
     /// then syncs (live sync hosted) or checks, which reads every note and
     /// all of Contacts again. Returns what to tell the user, or `nil` on error.

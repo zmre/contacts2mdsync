@@ -62,7 +62,6 @@ private struct FolderSettings: View {
 private struct AccountSettings: View {
     let model: AppModel
     @State private var confirming: OptionChange?
-    @State private var isSaving = false
 
     var body: some View {
         Form {
@@ -90,7 +89,7 @@ private struct AccountSettings: View {
             Section {
                 Toggle("Write changes back to Apple Contacts", isOn: optionBinding(\.appleWrites))
                     .disabled(!optionsEnabled)
-                if let held = model.syncPlan?.held, held > 0, !(model.vaultOptions?.appleWrites ?? true) {
+                if let held = model.syncPlan?.held, held > 0, !(model.displayedOptions?.appleWrites ?? true) {
                     Text("\(held) \(held == 1 ? "change is" : "changes are") waiting for Apple Contacts.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -108,72 +107,86 @@ private struct AccountSettings: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             } footer: {
-                if !optionsEnabled {
+                if model.pendingOptions != nil {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Saving…").foregroundStyle(.secondary)
+                    }
+                } else if !optionsEnabled {
                     Text("Available once the notes folder has been read.").foregroundStyle(.secondary)
-                } else if isSaving {
-                    ProgressView().controlSize(.small)
                 }
             }
         }
         .formStyle(.grouped)
         .sheet(item: $confirming) { change in
-            OptionConfirmation(change: change) {
+            OptionConfirmation(change: change, model: model) {
                 confirming = nil
-                Task { await save(change.options) }
+                Task { await model.setVaultOptions(change.options) }
             } cancel: {
                 confirming = nil
             }
         }
     }
 
-    private var optionsEnabled: Bool { model.capabilities.vaultOptions && model.vaultOptions != nil && !isSaving }
+    private var optionsEnabled: Bool {
+        model.capabilities.vaultOptions && model.vaultOptions != nil && model.pendingOptions == nil
+    }
 
-    /// Turning a switch off saves at once; turning one on asks first.
+    /// Turning a switch off saves at once; turning one on asks first. The
+    /// switch shows a change being saved at once (`displayedOptions`).
     private func optionBinding(_ keyPath: WritableKeyPath<UIVaultOptions, Bool>) -> Binding<Bool> {
         Binding(
-            get: { model.vaultOptions?[keyPath: keyPath] ?? false },
+            get: { model.displayedOptions?[keyPath: keyPath] ?? false },
             set: { value in
                 guard var options = model.vaultOptions else { return }
                 options[keyPath: keyPath] = value
                 if value {
-                    confirming = keyPath == \.appleWrites ? .appleWrites(options, facts) : .stamping(options, facts)
+                    confirming = keyPath == \.appleWrites ? .appleWrites(options) : .stamping(options)
                 } else {
-                    Task { await save(options) }
+                    Task { await model.setVaultOptions(options) }
                 }
             })
     }
-
-    private var facts: OptionChange.Facts {
-        let records = model.data?.records.records.values
-        return OptionChange.Facts(
-            heldChanges: model.syncPlan.map { $0.hold == nil ? 0 : $0.changedInMarkdown },
-            limit: model.data?.config.limits.maxAppleChanges ?? 25,
-            contacts: records?.count ?? 0, cards: records?.reduce(0) { $0 + $1.cardIDs.count } ?? 0,
-            devices: model.data?.deviceCount ?? 1, appleWrites: model.vaultOptions?.appleWrites ?? false)
-    }
-
-    private func save(_ options: UIVaultOptions) async {
-        isSaving = true
-        defer { isSaving = false }
-        await model.setVaultOptions(options)
-    }
 }
 
-/// Turning on a vault write switch, with what it means.
-private enum OptionChange: Identifiable {
-    /// Counts the confirmation shows.
+/// Turning on a vault write switch, with what it means (Settings ▸
+/// Accounts, and the held-changes banner's Turn On…).
+enum OptionChange: Identifiable {
+    /// Counts the confirmation shows, read from the model each time it draws
+    /// (a dry run started with the sheet refreshes them).
     struct Facts {
         /// Apple changes the latest check holds (`nil`: no check yet).
         var heldChanges: Int?
+        /// When that check ran, and whether a fresh one is running.
+        var freshness: UICountFreshness
         var limit: Int
         var contacts: Int
         var cards: Int
         var devices: Int
         var appleWrites: Bool
+
+        /// The facts as `model` has them now.
+        @MainActor init(_ model: AppModel) {
+            let records = model.data?.records.records.values
+            heldChanges = model.syncPlan.map { $0.hold == nil ? 0 : $0.changedInMarkdown }
+            freshness = UICountFreshness(computedAt: model.plan?.computedAt, isUpdating: model.phase == .checking)
+            limit = model.data?.config.limits.maxAppleChanges ?? 25
+            contacts = records?.count ?? 0
+            cards = records?.reduce(0) { $0 + $1.cardIDs.count } ?? 0
+            devices = model.data?.deviceCount ?? 1
+            appleWrites = model.vaultOptions?.appleWrites ?? false
+        }
     }
 
-    case appleWrites(UIVaultOptions, Facts)
-    case stamping(UIVaultOptions, Facts)
+    /// Turning `apple_writes` on (`nil` until the vault's options are read).
+    @MainActor static func turnOnAppleWrites(_ model: AppModel) -> OptionChange? {
+        guard var options = model.vaultOptions else { return nil }
+        options.appleWrites = true
+        return .appleWrites(options)
+    }
+
+    case appleWrites(UIVaultOptions)
+    case stamping(UIVaultOptions)
 
     var id: String {
         switch self {
@@ -184,7 +197,7 @@ private enum OptionChange: Identifiable {
 
     var options: UIVaultOptions {
         switch self {
-        case .appleWrites(let options, _), .stamping(let options, _): options
+        case .appleWrites(let options), .stamping(let options): options
         }
     }
 
@@ -202,9 +215,9 @@ private enum OptionChange: Identifiable {
         }
     }
 
-    var points: [String] {
+    func points(_ facts: Facts) -> [String] {
         switch self {
-        case .appleWrites(_, let facts):
+        case .appleWrites:
             var points = [
                 "Edits you make in your notes are written to the matching contacts on each sync.",
                 "Before any sync that changes Contacts, a vCard backup of all your contacts is saved "
@@ -212,16 +225,17 @@ private enum OptionChange: Identifiable {
                 "More than \(facts.limit) contacts changed in one sync wait for your approval.",
                 "Nothing is deleted on its own: deletions wait in Deletions for your decision.",
             ]
+            let asOf = facts.freshness.asOf()
             switch facts.heldChanges {
             case .some(let count) where count > 0:
                 points.append(
-                    "\(count) \(count == 1 ? "change is" : "changes are") waiting now and will be written "
-                        + "on the next sync.")
-            case .some: points.append("No changes are waiting right now.")
+                    "\(count) \(count == 1 ? "change is" : "changes are") waiting now"
+                        + (asOf.isEmpty ? "" : " (\(asOf))") + " and will be written on the next sync.")
+            case .some: points.append("No changes are waiting right now" + (asOf.isEmpty ? "." : " (\(asOf))."))
             case .none: points.append("Check for Changes (⇧⌘R) shows how many changes are waiting.")
             }
             return points
-        case .stamping(_, let facts):
+        case .stamping:
             var points = [
                 "Each synced contact gets a small link (an x-c2mdsync: URL) on its card, so every device "
                     + "that shares this folder matches it to the same file.",
@@ -240,17 +254,21 @@ private enum OptionChange: Identifiable {
     }
 }
 
-/// The sheet confirming an `OptionChange`.
-private struct OptionConfirmation: View {
+/// The sheet confirming an `OptionChange`: shown at once with the last
+/// counts (“as of …”); a dry run started with it refreshes them
+/// (“Updating count…”). Confirming does not wait for it.
+struct OptionConfirmation: View {
     let change: OptionChange
+    let model: AppModel
     let confirm: () -> Void
     let cancel: () -> Void
 
     var body: some View {
+        let facts = OptionChange.Facts(model)
         VStack(alignment: .leading, spacing: 14) {
             Text(change.title).font(.title3.weight(.semibold))
             VStack(alignment: .leading, spacing: 8) {
-                ForEach(change.points, id: \.self) { point in
+                ForEach(change.points(facts), id: \.self) { point in
                     Label {
                         Text(point).fixedSize(horizontal: false, vertical: true)
                     } icon: {
@@ -259,6 +277,10 @@ private struct OptionConfirmation: View {
                 }
             }
             HStack {
+                if facts.freshness.isUpdating {
+                    ProgressView().controlSize(.small)
+                    Text("Updating count…").font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Cancel", role: .cancel, action: cancel)
                     .keyboardShortcut(.cancelAction)
@@ -266,6 +288,8 @@ private struct OptionConfirmation: View {
                     .keyboardShortcut(.defaultAction)
             }
         }
+        // Recount in the background; the sheet never waits for it.
+        .task { await model.check() }
         .padding(20)
         .frame(width: 440)
     }

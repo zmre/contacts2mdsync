@@ -41,6 +41,13 @@ final class AppModel {
     /// How the last Sync Now ended (lease, lock and breaker banners).
     private(set) var lastOutcome: UISyncOutcome?
     private(set) var snoozed: Set<String> = []
+    /// What the user just started (Sync Now, a banner action), shown at
+    /// once in its button and the toolbar until it ends (docs/ui.md §3).
+    private(set) var feedback: UIRunFeedback?
+    /// The phase of the app's own run (a check or a direct Sync Now).
+    private(set) var runProgress: SyncPhase?
+    /// A vault switch change being saved (the switch shows it at once).
+    private(set) var pendingOptions: UIPendingOptions?
     /// Renamed contacts still linked by their old title from other notes (Overview).
     var renamedLinks: [UIRenamedLinks] = []
     var errorMessage: String?
@@ -55,7 +62,9 @@ final class AppModel {
     /// The coordinator run `liveRunEnded` last handled.
     @ObservationIgnored private var handledSummary: SyncRunSummary?
     /// Rescan when the app becomes active again (after Open in Contacts to Link).
-    @ObservationIgnored private var rescanOnActivate = false
+    @ObservationIgnored var rescanOnActivate = false
+    /// A check was asked for while one ran: run another when it ends.
+    @ObservationIgnored private var recheckRequested = false
 
     init(source: any ReviewDataSource = LiveReviewDataSource(), live: LiveSyncController = LiveSyncController()) {
         self.source = source
@@ -76,7 +85,9 @@ final class AppModel {
     var isSyncing: Bool { phase == .syncing || live.state.isRunning }
 
     /// Sync Now / Check for Changes can start.
-    var canSync: Bool { isConfigured && setup.isAuthorized && phase == .idle && !live.state.isRunning }
+    var canSync: Bool {
+        isConfigured && setup.isAuthorized && phase == .idle && !live.state.isRunning && feedback == nil
+    }
 
     var overview: UIOverview? {
         data.map { UIOverview(data: $0, plan: plan, counts: counts, sessionStart: sessionStart) }
@@ -89,6 +100,18 @@ final class AppModel {
 
     /// `apple_writes` / `stamp_contacts` (`nil` until the folder is read).
     var vaultOptions: UIVaultOptions? { capabilities.vaultOptions ? data?.options : nil }
+
+    /// The switches as shown: a change being saved shows at once.
+    var displayedOptions: UIVaultOptions? {
+        UIPendingOptions.displayed(stored: vaultOptions, pending: pendingOptions)
+    }
+
+    /// The toolbar's view of the app's own run (the action, its phase, waiting).
+    var runFeedback: UIRunFeedback? {
+        guard var feedback else { return nil }
+        feedback.phase = runProgress ?? feedback.phase
+        return feedback
+    }
 
     /// The two-way part of the latest dry run.
     var syncPlan: UISyncPlanSummary? { plan?.sync }
@@ -190,14 +213,42 @@ final class AppModel {
         }
     }
 
+    /// Ignore for Now: hidden until the next sync or relaunch.
+    func snooze(_ itemID: String) {
+        snoozed.insert(itemID)
+        rebuildQueues()
+    }
+
+    private func rebuildQueues() {
+        queues = data.map { UIReviewQueues(data: $0, plan: plan, snoozed: snoozed) }
+    }
+
+    /// Engine errors describe themselves; Cocoa errors use their localized text.
+    static func describe(_ error: any Error) -> String { UIFormat.message(for: error) }
+}
+
+// MARK: - Checks, Sync Now, Take Over, vault switches
+
+extension AppModel {
     /// Dry run: what the next sync would do; refreshes the review queue.
-    func check() async {
+    /// Asked for while a check runs, another follows it (the counts may
+    /// predate a change just made). `action`: Check Again on a banner.
+    func check(action: UIUserAction? = nil) async {
+        guard let root = rootURL, setup.isAuthorized else { return }
         // Never next to a coordinator run: it re-checks when the run ends.
-        guard let root = rootURL, setup.isAuthorized, phase == .idle, !live.state.isRunning else { return }
+        guard !live.state.isRunning else { return }
+        guard phase == .idle else {
+            if phase == .checking { recheckRequested = true }
+            return
+        }
         phase = .checking
+        if let action { feedback = UIRunFeedback(action) }
+        defer { if let action, feedback?.action == action { feedback = nil } }
+        runProgress = nil
         do {
-            let result = try await source.plan(root: root)
+            let result = try await source.plan(root: root, progress: progressHandler())
             phase = .idle
+            runProgress = nil
             guard root == rootURL else { return }
             plan = result
             // Following another device: this plan is a fresher follower check.
@@ -205,7 +256,12 @@ final class AppModel {
             await reload()
         } catch {
             phase = .idle
+            runProgress = nil
             errorMessage = Self.describe(error)
+        }
+        if recheckRequested {
+            recheckRequested = false
+            await check()
         }
     }
 
@@ -216,18 +272,30 @@ final class AppModel {
     /// overrides the banners offer (Apply Anyway, Resume Anyway, Take
     /// Over), each confirmed by the user first; those, and the first export
     /// on this Mac, run directly.
-    func syncNow(_ request: UISyncRequest = UISyncRequest()) async {
-        guard let root = rootURL, setup.isAuthorized, phase == .idle else { return }
+    ///
+    /// `action` shows at once (its banner button turns into “Resuming…”,
+    /// the toolbar follows the run's phases). While a check or another sync
+    /// runs on this Mac, the request waits for it (“Waiting for the current
+    /// sync to finish…”) instead of being dropped.
+    func syncNow(_ request: UISyncRequest = UISyncRequest(), action: UIUserAction = .syncNow) async {
+        // One user action at a time (a Check Again in progress is waited for).
+        let busy = feedback.map { $0.action != .checkAgain } ?? false
+        guard let root = rootURL, setup.isAuthorized, phase != .syncing, !busy else { return }
+        feedback = UIRunFeedback(action)
+        defer { feedback = nil }
         if request == UISyncRequest(), live.isHosting {
             lastOutcome = nil
             await live.syncNow()
             return
         }
+        guard await waitUntilIdle(), root == rootURL else { return }
         phase = .syncing
+        runProgress = nil
         snoozed = []
         do {
-            let outcome = try await source.sync(request, root: root)
+            let outcome = try await source.sync(request, root: root, progress: progressHandler())
             phase = .idle
+            runProgress = nil
             guard root == rootURL else { return }
             lastOutcome = outcome
             if let summary = outcome.summary {
@@ -237,6 +305,7 @@ final class AppModel {
                     errorMessage = "Some changes could not be written:\n" + summary.failures.joined(separator: "\n")
                 }
             }
+            feedback = nil
             await reload()
             await refreshRenamedLinks()
             // The first export makes this Mac ready for live sync.
@@ -244,7 +313,30 @@ final class AppModel {
             if !catchingUp { await check() }
         } catch {
             phase = .idle
+            runProgress = nil
             errorMessage = Self.describe(error)
+        }
+    }
+
+    /// Waits while a check or a coordinator run is in progress (shown as
+    /// waiting); `false` when cancelled.
+    private func waitUntilIdle() async -> Bool {
+        while phase != .idle || live.state.isRunning {
+            feedback?.isWaiting = true
+            try? await Task.sleep(for: .milliseconds(250))
+            if Task.isCancelled { return false }
+        }
+        feedback?.isWaiting = false
+        return true
+    }
+
+    /// Progress from a run off the main actor, published on it.
+    private func progressHandler() -> @Sendable (SyncPhase) -> Void {
+        { [weak self] phase in
+            Task { @MainActor in
+                guard let self, self.phase != .idle else { return }
+                self.runProgress = phase
+            }
         }
     }
 
@@ -255,11 +347,14 @@ final class AppModel {
     /// at once; otherwise Sync Now runs with `takeOver` (the first export
     /// too), which takes the lease the same way.
     func takeOver() async {
-        guard rootURL != nil, setup.isAuthorized, phase == .idle else { return }
+        guard rootURL != nil, setup.isAuthorized, feedback == nil else { return }
         guard live.isHosting else {
-            await syncNow(UISyncRequest(takeOver: true))
+            await syncNow(UISyncRequest(takeOver: true), action: .takeOver)
             return
         }
+        feedback = UIRunFeedback(.takeOver)
+        defer { feedback = nil }
+        guard await waitUntilIdle() else { return }
         phase = .syncing
         lastOutcome = nil
         do {
@@ -275,125 +370,26 @@ final class AppModel {
         await reload()
     }
 
-    // MARK: - Decisions
-
-    /// Records answers in the decision log; `true` on success.
-    @discardableResult
-    func decide(_ answers: [UIReviewDecision]) async -> Bool {
-        guard let root = rootURL, !answers.isEmpty else { return false }
-        do {
-            try await source.record(answers, root: root)
-            await reload()
-            // Following another device: what it still has to apply changed
-            // (the leader carries the answers out); count it again.
-            if live.state.isFollowing { await check() }
-            return true
-        } catch {
-            errorMessage = Self.describe(error)
-            await reload()
-            return false
-        }
-    }
-
-    /// Ignore for Now: hidden until the next sync or relaunch.
-    func snooze(_ itemID: String) {
-        snoozed.insert(itemID)
-        rebuildQueues()
-    }
-
-    /// Records conflict resolutions; the next sync applies each one while
-    /// both sides still hold the values it was made against.
-    @discardableResult
-    func resolve(_ choices: [UIConflictChoice]) async -> Bool {
-        await decide(choices.map(\.decision))
-    }
-
-    /// Records deletion decisions; the next sync carries them out.
-    @discardableResult
-    func applyDeletions(_ choices: [UIDeletionChoice]) async -> Bool {
-        await decide(choices.map(\.decision))
-    }
-
-    /// Records "create a contact from this note" for each path.
-    @discardableResult
-    func addToContacts(paths: [String]) async -> Bool {
-        await decide(paths.map { .addContact(path: $0) })
-    }
-
-    /// Writes the vault's sync switches, then re-checks (held counts change).
+    /// Writes the vault's sync switches at once (a small edit of
+    /// config.yaml; it never waits for a sync or a recount). The switch
+    /// shows the new position while saving; the re-check (held counts
+    /// change) runs afterwards in the background, shown in the toolbar.
     func setVaultOptions(_ options: UIVaultOptions) async {
-        await perform { try await self.source.setVaultOptions(options, root: $0) }
-        await check()
-    }
-
-    /// Changes the folder for new notes; `nil` on success, else the message.
-    func setDefaultFolder(_ folder: String) async -> String? {
-        guard let root = rootURL else { return "No notes folder is open." }
-        do {
-            try await source.setDefaultFolder(folder, root: root)
-            await reload()
-            return nil
-        } catch {
-            return "Use a folder path inside the notes root, like Inbox or People/New. (\(Self.describe(error)))"
-        }
-    }
-
-    private func perform(_ work: @escaping (URL) async throws -> Void) async {
         guard let root = rootURL else { return }
+        pendingOptions = UIPendingOptions(options)
+        defer { pendingOptions = nil }
         do {
-            try await work(root)
-            await reload()
+            try await source.setVaultOptions(options, root: root)
         } catch {
             errorMessage = Self.describe(error)
+            return
         }
-    }
-
-    private func rebuildQueues() {
-        queues = data.map { UIReviewQueues(data: $0, plan: plan, snoozed: snoozed) }
-    }
-
-    /// Engine errors describe themselves; Cocoa errors use their localized text.
-    static func describe(_ error: any Error) -> String { UIFormat.message(for: error) }
-}
-
-// MARK: - Finder and Contacts
-
-extension AppModel {
-    /// Opens each card in Contacts.app; rescans when the app is active again.
-    func openInContacts(cardIDs: [String]) {
-        let urls = UIFormat.contactsURLs(cardIDs: cardIDs)
-        guard !urls.isEmpty else { return }
-        rescanOnActivate = true
-        for url in urls { NSWorkspace.shared.open(url) }
-    }
-
-    /// Called when the app becomes active.
-    func didBecomeActive() async {
-        guard rescanOnActivate else { return }
-        rescanOnActivate = false
-        await check()
-    }
-
-    /// Selects `path` (root-relative) in Finder.
-    func revealInFinder(path: String) {
-        guard let root = rootURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([root.appending(path: path)])
-    }
-
-    func revealRoot() {
-        guard let root = rootURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([root])
-    }
-
-    func revealBackups() {
-        guard let folder = data?.backupsDirectory else { return }
-        let target = FileManager.default.fileExists(atPath: folder.path(percentEncoded: false)) ? folder : nil
-        NSWorkspace.shared.activateFileViewerSelecting([target ?? folder.deletingLastPathComponent()])
-    }
-
-    /// Shows `item` in the inspector (opening it when asked).
-    func inspect(_ item: InspectorItem?, open: Bool = false) {
-        inspected = item
-        if open, item != nil { isInspectorPresented = true }
+        guard root == rootURL else { return }
+        data?.config.appleWrites = options.appleWrites
+        data?.config.stampContacts = options.stampContacts
+        Task {
+            await self.reload()
+            await self.check()
+        }
     }
 }

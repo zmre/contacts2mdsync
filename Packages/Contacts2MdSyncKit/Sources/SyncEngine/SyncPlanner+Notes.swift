@@ -353,11 +353,21 @@ extension PlanningRun {
     private func applyVerdicts(_ sync: SyncRun, to result: inout SyncPlan) {
         let config = plan.config
         let total = max(records.records.count, 1)
-        if !sync.options.allowMassVanish {
-            if config.limits.tripsMassVanish(vanished: sync.newlyVanishedApple, total: total) {
-                result.breaker = BreakerTrip(side: "apple", vanished: sync.newlyVanishedApple, total: total)
-            } else if config.limits.tripsMassVanish(vanished: sync.newlyMissingNotes, total: total) {
-                result.breaker = BreakerTrip(side: "markdown", vanished: sync.newlyMissingNotes, total: total)
+        let trips = { (paths: [String]) in
+            !sync.options.allowMassVanish && config.limits.tripsMassVanish(vanished: paths.count, total: total)
+        }
+        if trips(sync.newlyVanishedApple) {
+            let paths = sync.newlyVanishedApple.sorted()
+            result.breaker = BreakerTrip(side: "apple", vanished: paths.count, total: total, paths: paths)
+        } else if trips(sync.newlyMissingNotes) {
+            let paths = sync.newlyMissingNotes.sorted()
+            result.breaker = BreakerTrip(side: "markdown", vanished: paths.count, total: total, paths: paths)
+        }
+        // Remembered unless this side's breaker tripped (those notes must
+        // count again next run): still-bound records whose note is gone.
+        if !trips(sync.newlyMissingNotes) {
+            result.knownMissingNotes = sync.inputs.knownMissingNotes.union(sync.missingNotes).filter { id in
+                records[id] != nil && !sync.removed.contains(id) && note(of: id) == nil
             }
         }
         if !result.apple.isEmpty {

@@ -38,6 +38,10 @@ struct ContentView: View {
 struct MainView: View {
     @Bindable var model: AppModel
     @State private var confirming: SyncOverride?
+    /// The held-changes banner's Turn On… (the `apple_writes` confirmation).
+    @State private var enablingWrites: OptionChange?
+    /// The breaker banner's Show Missing.
+    @State private var showingMissing: BreakerTrip?
 
     var body: some View {
         NavigationSplitView {
@@ -70,13 +74,24 @@ struct MainView: View {
                     if case .takeOver = override {
                         await model.takeOver()
                     } else {
-                        await model.syncNow(override.request)
+                        await model.syncNow(override.request, action: override.action)
                     }
                 }
             }
             Button("Cancel", role: .cancel) {}
         } message: { override in
             Text(override.message)
+        }
+        .sheet(item: $enablingWrites) { change in
+            OptionConfirmation(change: change, model: model) {
+                enablingWrites = nil
+                Task { await model.setVaultOptions(change.options) }
+            } cancel: {
+                enablingWrites = nil
+            }
+        }
+        .sheet(item: $showingMissing) { trip in
+            MissingList(trip: trip) { showingMissing = nil }
         }
     }
 
@@ -126,19 +141,46 @@ struct MainView: View {
         }
     }
 
-    /// Every override is confirmed first (docs/ui.md §3, §12).
+    /// Every override is confirmed first (docs/ui.md §3, §12). The button
+    /// of the action in progress turns into “Resuming…” with a spinner.
     @ViewBuilder private func bannerActions(_ banner: UIBanner) -> some View {
-        let busy = !model.canSync
+        if let feedback = model.runFeedback, feedback.action.bannerID == banner.id {
+            Button {
+            } label: {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(feedback.buttonTitle)
+                }
+            }
+            .disabled(true)
+            .help(feedback.statusText)
+        } else {
+            idleBannerActions(banner)
+        }
+    }
+
+    @ViewBuilder private func idleBannerActions(_ banner: UIBanner) -> some View {
+        let busy = !model.canSync || model.feedback != nil
         switch banner {
         case .breaker(let trip):
-            Button("Check Again") { Task { await model.check() } }
+            if !trip.paths.isEmpty {
+                Button("Show Missing") { showingMissing = trip }
+            }
+            Button("Check Again") { Task { await model.check(action: .checkAgain) } }
                 .disabled(busy)
             Button("Resume Anyway…") { confirming = .resumeAnyway(trip) }
                 .disabled(busy)
         case .blastRadius(let count, let limit):
             Button("Apply Anyway…") { confirming = .applyAnyway(count: count, limit: limit) }
                 .disabled(busy)
-        case .appleWritesDisabled, .identity, .notesSkipped:
+        case .appleWritesDisabled:
+            if let change = OptionChange.turnOnAppleWrites(model) {
+                Button("Turn On…") { enablingWrites = change }
+                    .disabled(model.pendingOptions != nil)
+            } else {
+                SettingsLink { Text("Open Settings…") }
+            }
+        case .identity, .notesSkipped:
             SettingsLink { Text("Open Settings…") }
         case .waitingForDevice(let name, _, let expires), .leaderElsewhere(let name, let expires, _):
             Button("Take Over…") { confirming = .takeOver(device: name, expires: expires) }
@@ -225,56 +267,6 @@ private struct Sidebar: View {
     }
 }
 
-/// Toolbar status: the coordinator's status (Scheduled, Syncing… phase,
-/// Waiting for *device*, Paused: safety breaker, Failed), else reading /
-/// checking, else Idle or the review count (orange).
-private struct StatusIndicator: View {
-    let model: AppModel
-
-    var body: some View {
-        HStack(spacing: 6) {
-            if let live = model.live.state.display() {
-                if live.tone == .busy {
-                    ProgressView().controlSize(.small)
-                } else {
-                    MeaningDot(color: live.tone == .error ? .red : .gray)
-                }
-                Text(live.text)
-            } else {
-                switch model.phase {
-                case .loading, .checking:
-                    ProgressView().controlSize(.small)
-                    Text(model.phase == .loading ? "Reading…" : "Checking…")
-                case .syncing:
-                    ProgressView().controlSize(.small)
-                    Text(model.data?.hasSynced == false ? "Exporting…" : "Syncing…")
-                case .idle:
-                    MeaningDot(color: color)
-                    Text(text)
-                }
-            }
-        }
-        .font(.callout)
-        .foregroundStyle(.secondary)
-        .monospacedDigit()
-        .fixedSize()
-        // Breathing room inside the toolbar's glass capsule.
-        .padding(.horizontal, 10)
-        .help(model.live.state.display()?.detail ?? "")
-    }
-
-    private var color: Color {
-        if model.errorMessage != nil { return .red }
-        return model.counts.total > 0 ? .orange : .gray
-    }
-
-    private var text: String {
-        if model.errorMessage != nil { return "Error" }
-        let total = model.counts.total
-        return total > 0 ? "\(total.formatted()) to review" : "Idle"
-    }
-}
-
 /// Centered progress for the first read (docs/ui.md §12).
 private struct FirstScanView: View {
     let phase: AppModel.Phase
@@ -321,6 +313,14 @@ private enum SyncOverride: Identifiable {
         case .applyAnyway: "apply"
         case .resumeAnyway: "resume"
         case .takeOver: "take-over"
+        }
+    }
+
+    var action: UIUserAction {
+        switch self {
+        case .applyAnyway: .applyAnyway
+        case .resumeAnyway: .resumeAnyway
+        case .takeOver: .takeOver
         }
     }
 

@@ -59,15 +59,18 @@ public struct UIVaultReader: Sendable {
     /// A dry run (reads Contacts): refreshes the pending review queue and
     /// records a `plan` session, exactly like `contacts2md plan`: the
     /// two-way plan once this Mac has synced or exported, else the export plan.
-    public func plan() throws -> UIPlanSummary {
+    ///
+    /// `progress` hears each phase as it starts (toolbar status).
+    public func plan(progress: @Sendable (SyncPhase) -> Void = { _ in }) throws -> UIPlanSummary {
         let startedAt = environment.clock.now
         let session = VaultSession(root: root, environment: environment)
         guard try hasSynced(session) else {
+            progress(.scanning)
             let prepared = try session.prepare(ExportRequest(), forWriting: false)
             try session.recordPlan(prepared, command: "plan", startedAt: startedAt)
             return UIPlanSummary(prepared, computedAt: environment.clock.now)
         }
-        let prepared = try session.prepareSync(SyncRequest(policy: .gui))
+        let prepared = try session.prepareSync(SyncRequest(policy: .gui), progress: progress)
         try session.recordSyncPlan(prepared, command: "plan", startedAt: startedAt)
         return UIPlanSummary(prepared, computedAt: environment.clock.now)
     }
@@ -78,10 +81,16 @@ public struct UIVaultReader: Sendable {
     /// first export instead (a two-way sync needs a merge base), behind the
     /// same lock and lease: while another device leads, nothing is written
     /// and the outcome is `.leaseHeldElsewhere`.
-    public func sync(_ request: UISyncRequest = UISyncRequest()) throws -> UISyncOutcome {
+    ///
+    /// `progress` hears each phase as it starts (`waitingForLock` while
+    /// another run on this Mac holds the lock).
+    public func sync(
+        _ request: UISyncRequest = UISyncRequest(), progress: @Sendable (SyncPhase) -> Void = { _ in }
+    ) throws -> UISyncOutcome {
         let startedAt = environment.clock.now
         let session = VaultSession(root: root, environment: environment)
         guard try hasSynced(session) else {
+            progress(.waitingForLock)
             switch try gatedExport(takeOver: request.takeOver) {
             case .exported(let summary): return .synced(UISyncSummary(export: summary))
             case .localRunInProgress: return .localRunInProgress
@@ -89,7 +98,9 @@ public struct UIVaultReader: Sendable {
             }
         }
         let lock: LocalLock
-        switch try session.beginSync(takeOver: request.takeOver) {
+        let timer = PhaseTimer()
+        progress(.waitingForLock)
+        switch try timer.measure("lock", { try session.beginSync(takeOver: request.takeOver) }) {
         case .localRunInProgress: return .localRunInProgress
         case .leaseHeldElsewhere(let lease): return .leaseHeldElsewhere(lease)
         case .ready(let acquired, _): lock = acquired
@@ -98,12 +109,14 @@ public struct UIVaultReader: Sendable {
         let prepared = try session.prepareSync(
             SyncRequest(
                 maxAppleChanges: request.maxAppleChanges, allowMassVanish: request.allowMassVanish,
-                takeOverLease: request.takeOver, policy: .gui))
+                takeOverLease: request.takeOver, policy: .gui),
+            progress: progress, timer: timer)
         if let trip = prepared.plan.breaker {
             try session.recordSyncPlan(prepared, command: "sync", startedAt: startedAt)
             return .breaker(trip)
         }
         // The session records its Apple / markdown split itself (`SessionRecord.sides`).
+        progress(.writing)
         let result = try session.executeSync(prepared, command: "sync", startedAt: startedAt)
         return .synced(UISyncSummary(result, plan: prepared.plan))
     }

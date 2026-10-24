@@ -151,15 +151,20 @@ public struct UILiveState: Hashable, Sendable {
     public func display(now: Date = Date()) -> UILiveDisplay? {
         switch activity {
         case .running(let kind, let phase):
-            let text = phase.map { "Syncing… \(Self.phaseText($0))" } ?? "Syncing…"
-            return UILiveDisplay(text: text, detail: "\(Self.kindText(kind)) sync in progress", tone: .busy)
+            let kindText = "\(Self.kindText(kind)) sync in progress"
+            guard let phase else { return UILiveDisplay(text: "Syncing…", detail: kindText, tone: .busy) }
+            return UILiveDisplay(text: phase.text, detail: "\(kindText): \(phase.text)", tone: .busy)
         case .scheduled(let kind, let startsAt):
             let seconds = max(0, Int(startsAt.timeIntervalSince(now).rounded()))
             return UILiveDisplay(
                 text: "Scheduled", detail: "\(Self.kindText(kind)) sync in \(seconds) s", tone: .idle)
         case .idle:
-            break
+            return problemDisplay(now: now)
         }
+    }
+
+    /// The last blocked or failed run, while nothing runs.
+    private func problemDisplay(now: Date) -> UILiveDisplay? {
         switch problem {
         case .waitingForDevice(let name, let until)?:
             let detail = "\(name) is syncing this folder; its turn ends by \(UIFormat.relativeDay(until, now: now))."
@@ -192,16 +197,6 @@ public struct UILiveState: Hashable, Sendable {
         guard let lastSync else { return "Not synced on this Mac yet" }
         let when = UIFormat.relativeDay(lastSync, now: now)
         return reviewTotal > 0 ? "\(reviewTotal.formatted()) to review · synced \(when)" : "✓ In sync · \(when)"
-    }
-
-    /// `reading`, `writing`, …
-    static func phaseText(_ phase: SyncPhase) -> String {
-        switch phase {
-        case .waitingForLock: "waiting"
-        case .scanning: "reading"
-        case .planning: "planning"
-        case .writing: "writing"
-        }
     }
 
     /// `Live`, `Sync Now`, … (the Activity trigger, with Manual as Sync Now).

@@ -133,7 +133,7 @@ struct WatchPrinter: Sendable {
         switch status {
         case .idle: "idle"
         case .scheduled(let kind, let startsAt): "scheduled \(kind.rawValue) at \(time(startsAt))"
-        case .running(let kind, .some(let phase)): "running  \(kind.rawValue)  (\(phase.rawValue))"
+        case .running(let kind, .some(let phase)): "running  \(kind.rawValue)  (\(phase.name))"
         case .skipped(let kind, let reason): "skipped  \(kind.rawValue): \(reason)"
         default: nil
         }

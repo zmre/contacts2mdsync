@@ -57,6 +57,10 @@ struct SyncCommandTests {
         #expect(lines.first?.hasPrefix("contacts2md sync  2027-01-15T08:00:00Z  device=Test Mac  root=/vault") == true)
         #expect(lines.contains("updated  md     Inbox/Bob Two.md  (job_title)"))
         #expect(lines.contains("held     apple  Ann One  (job_title) — apple writes disabled"))
+        #expect(
+            lines.contains(
+                "held     apple  1 change (1 update): apple_writes is disabled — "
+                    + "enable with `contacts2md config --apple-writes enabled`"))
         #expect(lines.contains { $0.hasPrefix("summary  apple c/u/d 0/0/0  md c/u/d 0/1/0") && $0.contains("held 1") })
         #expect(harness.store.appliedBatches.isEmpty)
         #expect(harness.backups.isEmpty)
@@ -122,6 +126,21 @@ struct SyncCommandTests {
         #expect(harness.store.appliedOperations.count == 27)
     }
 
+    @Test("--verbose prints per-phase timings; the session record keeps them; plain runs do not print them")
+    func verboseTimings() throws {
+        let harness = CLIHarness.exported()
+        harness.editNote("Inbox/Ann One.md", "job_title: Engineer", with: "job_title: CTO")
+        let run = harness.sync(["--verbose"])
+        #expect(run.code == 0, "\(run.err)")
+        let line = try #require(harness.lines(run).first { $0.hasPrefix("timing   ") })
+        #expect(line.contains("  total ") && line.hasSuffix("s"))
+        let session = try #require(try harness.stateStore().recentSessions(limit: 1).first)
+        let phases = try #require(session.timings).entries.map(\.phase)
+        #expect(["lock", "decisions", "scan", "state", "contacts", "plan"].allSatisfy(phases.contains), "\(phases)")
+        #expect(phases.contains("md-write") && phases.contains("save-state") && phases.contains("record"))
+        #expect(!harness.sync().out.contains("timing "))
+    }
+
     @Test("mass-vanish breaker: exit 4, error on stderr, nothing written")
     func breaker() {
         let people = (1...12).map { number in
@@ -133,6 +152,8 @@ struct SyncCommandTests {
         let run = harness.sync()
         #expect(run.code == 4)
         #expect(run.err.contains("error    mass-vanish breaker: 12 of 12 synced records vanished from Contacts"))
+        let listed = ["1", "10", "11", "12", "2", "3", "4", "5", "6", "7"].map { "Inbox/Person N\($0).md" }
+        #expect(run.err.contains("Notes of the missing contacts: \(listed.joined(separator: ", ")), … (+2 more)"))
         #expect(harness.vault.writes == [".c2mdsync/lease.json"])  // only the lease; no note, no config
     }
 

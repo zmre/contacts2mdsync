@@ -34,9 +34,12 @@ protocol ReviewDataSource: Sendable {
     /// Stored state and a folder scan; `nil` when the folder was never exported to.
     func load(root: URL) async throws -> UIVaultData?
     /// A dry run (reads Contacts); refreshes the pending review queue.
-    func plan(root: URL) async throws -> UIPlanSummary
+    /// `progress` hears each phase as it starts (any thread).
+    func plan(root: URL, progress: @escaping @Sendable (SyncPhase) -> Void) async throws -> UIPlanSummary
     /// Sync Now (the first export on this Mac when it has never synced).
-    func sync(_ request: UISyncRequest, root: URL) async throws -> UISyncOutcome
+    func sync(
+        _ request: UISyncRequest, root: URL, progress: @escaping @Sendable (SyncPhase) -> Void
+    ) async throws -> UISyncOutcome
     /// Appends review answers to the decision log.
     func record(_ answers: [UIReviewDecision], root: URL) async throws
     func setDefaultFolder(_ folder: String, root: URL) async throws
@@ -75,11 +78,15 @@ struct LiveReviewDataSource: ReviewDataSource {
     func load(root: URL) async throws -> UIVaultData? { try reader(root).read() }
 
     @concurrent
-    func plan(root: URL) async throws -> UIPlanSummary { try reader(root).plan() }
+    func plan(root: URL, progress: @escaping @Sendable (SyncPhase) -> Void) async throws -> UIPlanSummary {
+        try reader(root).plan(progress: progress)
+    }
 
     @concurrent
-    func sync(_ request: UISyncRequest, root: URL) async throws -> UISyncOutcome {
-        try reader(root).sync(request)
+    func sync(
+        _ request: UISyncRequest, root: URL, progress: @escaping @Sendable (SyncPhase) -> Void
+    ) async throws -> UISyncOutcome {
+        try reader(root).sync(request, progress: progress)
     }
 
     @concurrent

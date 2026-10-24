@@ -52,6 +52,8 @@ public struct SyncExecutor: Sendable {
     public let noteBackups: NoteBackup?
     /// `com.zmre.contacts2mdsync.<deviceID>`.
     public let author: String
+    /// Measures `apple-write`, `reread`, `md-write` and `save-state` (`--verbose`).
+    public var timer = PhaseTimer()
 
     /// Creates an executor.
     public init(
@@ -81,15 +83,7 @@ public struct SyncExecutor: Sendable {
             let receipt = try backup()
             result.backup = receipt
             if let noteBackups { result.markdown.noteBackup = try backupNotes(plan, to: noteBackups) }
-            let batch = AppleWriteBatch(operations: plan.apple.flatMap(\.operations))
-            let write: AppleWriteResult
-            do {
-                write = try AppleWriter.apply(batch, in: store, backup: receipt, author: author)
-            } catch {
-                let message = String(describing: error)
-                write = AppleWriteResult(
-                    applied: [], failed: batch.operations.map { AppleWriteFailure(operation: $0, message: message) })
-            }
+            let write = applyBatch(plan, receipt: receipt)
             created = write.createdCardIDs
             let applied = Set(write.applied)
             for change in plan.apple {
@@ -107,23 +101,39 @@ public struct SyncExecutor: Sendable {
             // Token first: our own saves are older than it, so they are never
             // reported back as changes (they are excluded by author as well).
             result.postWriteHistoryToken = try? store.currentHistoryToken()
-            result.postWriteSnapshot = try store.snapshot()
+            result.postWriteSnapshot = try timer.measure("reread") { try store.snapshot() }
             // Unavailable accounts' cards back as last seen: the base keeps their values (§9).
             postSnapshot = result.postWriteSnapshot.map { plan.accountGuard.augment($0).snapshot }
         } else if let noteBackups {
             result.markdown.noteBackup = try backupNotes(plan, to: noteBackups)
         }
 
-        let failedRecords = writeMarkdown(plan, created: created, result: &result)
+        let failedRecords = timer.measure("md-write") { writeMarkdown(plan, created: created, result: &result) }
         if let postSnapshot, let context = plan.context {
             result.newUnapplyable = verify(plan, applied: appliedUpdates, after: postSnapshot, context: context)
         }
         result.notesSynced = plan.notes.isActive && (postSnapshot?.notesAvailable ?? true)
-        try saveState(
-            plan, result: result,
-            outcome: Outcome(
-                created: created, snapshot: postSnapshot, failedRecords: failedRecords, deleted: deletedRecords))
+        try timer.measure("save-state") {
+            try saveState(
+                plan, result: result,
+                outcome: Outcome(
+                    created: created, snapshot: postSnapshot, failedRecords: failedRecords, deleted: deletedRecords))
+        }
         return result
+    }
+
+    /// The one Apple batch; a thrown error fails every operation.
+    private func applyBatch(_ plan: SyncPlan, receipt: BackupReceipt) -> AppleWriteResult {
+        let batch = AppleWriteBatch(operations: plan.apple.flatMap(\.operations))
+        do {
+            return try timer.measure("apple-write") {
+                try AppleWriter.apply(batch, in: store, backup: receipt, author: author)
+            }
+        } catch {
+            let message = String(describing: error)
+            return AppleWriteResult(
+                applied: [], failed: batch.operations.map { AppleWriteFailure(operation: $0, message: message) })
+        }
     }
 
     // MARK: - Markdown

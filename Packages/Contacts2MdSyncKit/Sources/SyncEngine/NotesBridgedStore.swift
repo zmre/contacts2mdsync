@@ -18,6 +18,8 @@ public struct NotesRunLog: Hashable, Sendable {
     public var ownWritesSeen = 0
     /// Notes written (cards).
     public var written = 0
+    /// Time spent reading notes (all reads so far).
+    public var readSeconds: Double = 0
 
     /// Creates an empty log.
     public init() {}
@@ -108,6 +110,13 @@ public final class NotesBridgedStore: ContactStore {
     let backup: (@Sendable ([String: String?]) throws -> Void)?
     let now: @Sendable () -> Date
     private let state = Mutex(NotesRunLog())
+    private let observer = Mutex<(@Sendable () -> Void)?>(nil)
+
+    /// Called just before each notes read (progress: "Reading notes from Contacts…").
+    public var onNotesRead: (@Sendable () -> Void)? {
+        get { observer.withLock { $0 } }
+        set { observer.withLock { $0 = newValue } }
+    }
 
     /// Creates a bridge over `inner`.
     public init(
@@ -217,6 +226,14 @@ public final class NotesBridgedStore: ContactStore {
     /// Reads notes (`nil`: every card); `nil` result when the read failed.
     private func read(cardIDs: [String]?) -> [String: String?]? {
         let bulk = cardIDs.map { $0.count > bulkThreshold } ?? true
+        onNotesRead?()
+        let clock = ContinuousClock()
+        let start = clock.now
+        defer {
+            let elapsed = clock.now - start
+            let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1e18
+            state.withLock { $0.readSeconds += seconds }
+        }
         do {
             let notes = try provider.readAll(cardIDs: bulk ? nil : cardIDs)
             state.withLock { log in

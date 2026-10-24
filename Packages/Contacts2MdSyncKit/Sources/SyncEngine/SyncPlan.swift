@@ -64,7 +64,9 @@ public struct SyncInputs: Sendable {
     public var unapplyable: [UnapplyableEntry]
     /// Records whose Apple contact was missing, with when that was first seen.
     public var vanished: [UUID: Date]
-    /// Records already queued as "note deleted" (not counted again by the breaker).
+    /// Records whose note was already missing before this run (pending
+    /// "note deleted" items, and the set remembered by earlier runs): not
+    /// counted again by the breaker.
     public var knownMissingNotes: Set<UUID>
     /// Containers the store may write to.
     public var writableContainerIDs: [String]
@@ -143,6 +145,22 @@ public struct AppleRecordChange: Hashable, Sendable {
     }
 }
 
+extension AppleRecordChange {
+    /// "15 deletions, 9 updates": the changes by kind (fixed order, empty
+    /// kinds left out).
+    public static func kindSummary(_ changes: [AppleRecordChange]) -> String {
+        let kinds: [(AppleChangeKind, String)] = [
+            (.delete, "deletion"), (.update, "update"), (.create, "new contact"), (.stamp, "sync ID"),
+            (.unstamp, "sync ID removal"),
+        ]
+        return kinds.compactMap { kind, noun in
+            let count = changes.filter { $0.kind == kind }.count
+            return count == 0 ? nil : "\(count) \(noun)\(count == 1 ? "" : "s")"
+        }
+        .joined(separator: ", ")
+    }
+}
+
 /// Why planned Apple writes are not made this run.
 public enum AppleHold: Hashable, Sendable {
     /// `apple_writes` is not enabled in `.c2mdsync/config.yaml` (not an error).
@@ -161,18 +179,46 @@ public enum AppleHold: Hashable, Sendable {
 }
 
 /// A safety breaker that stops the whole run before anything is written.
-public struct BreakerTrip: Hashable, Sendable {
+///
+/// Only records that are *newly* gone count (architecture §9): not ones
+/// already missing in an earlier run, not ones with a delete decision, not
+/// a forgotten account's contacts.
+public struct BreakerTrip: Hashable, Sendable, Identifiable {
     /// `apple` or `markdown`.
     public var side: String
     public var vanished: Int
     public var total: Int
+    /// The notes concerned (root-relative paths, sorted): the note last seen
+    /// for each missing record (markdown), or the note of each contact gone
+    /// from Contacts (apple).
+    public var paths: [String]
 
-    /// Message for stderr.
+    /// Creates a trip.
+    public init(side: String, vanished: Int, total: Int, paths: [String] = []) {
+        self.side = side
+        self.vanished = vanished
+        self.total = total
+        self.paths = paths
+    }
+
+    public var id: String { "\(side):\(vanished):\(paths.first ?? "")" }
+
+    /// At most this many paths in `message`.
+    public static let listedPaths = 10
+
+    /// Message for stderr (lists up to `listedPaths` paths).
     public var message: String {
         let place = side == "apple" ? "from Contacts" : "from the notes folder"
-        return "mass-vanish breaker: \(vanished) of \(total) synced records vanished \(place) in one run; "
+        var text =
+            "mass-vanish breaker: \(vanished) of \(total) synced records vanished \(place) since the last sync; "
             + "nothing was written (Contacts account or iCloud off? folder unmounted?). "
             + "Fix the cause, or rerun with --allow-mass-vanish to queue them as deletions."
+        if !paths.isEmpty {
+            let shown = paths.prefix(Self.listedPaths).joined(separator: ", ")
+            let more = paths.count > Self.listedPaths ? ", … (+\(paths.count - Self.listedPaths) more)" : ""
+            text += " \(side == "apple" ? "Notes of the missing contacts" : "Missing notes"): \(shown)\(more)"
+        }
+        return text
     }
 }
 
@@ -233,6 +279,10 @@ public struct SyncPlan: Sendable {
     var unapplyableKept: [UnapplyableEntry] = []
     var newUnapplyable: [UnapplyableEntry] = []
     var vanished: [UUID: Date] = [:]
+    /// Records whose note is missing, remembered so later runs do not count
+    /// them as newly missing (`nil`: the markdown breaker tripped; keep the
+    /// stored set as it is).
+    var knownMissingNotes: Set<UUID>?
     /// Image hashes to remember (the cache, refreshed).
     var imageHashes: [String: ImageHashEntry] = [:]
     var records: [UUID: RecordSyncState] = [:]

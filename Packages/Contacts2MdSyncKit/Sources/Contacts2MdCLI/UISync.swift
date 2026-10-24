@@ -137,6 +137,8 @@ public struct UISyncPlanSummary: Hashable, Sendable {
     public var appleChanges: Int
     /// Apple changes that come from markdown edits (not stamps): "Changed in Markdown".
     public var changedInMarkdown: Int
+    /// Those changes by kind: "15 deletions, 9 updates" (empty when none).
+    public var changedInMarkdownKinds: String
     /// Stamps and unstamps among the Apple changes.
     public var stamps: Int
     /// Notes the next sync moves to the Trash (deletions confirmed in Contacts).
@@ -164,6 +166,8 @@ public struct UISyncPlanSummary: Hashable, Sendable {
         appleChanges = plan.appleChangeCount
         stamps = plan.apple.filter { $0.kind == .stamp || $0.kind == .unstamp }.count
         changedInMarkdown = appleChanges - stamps
+        changedInMarkdownKinds = AppleRecordChange.kindSummary(
+            plan.apple.filter { $0.kind != .stamp && $0.kind != .unstamp })
         trash = plan.trash.count
         hold = plan.appleHold
         breaker = plan.breaker
@@ -194,8 +198,10 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
     case breaker(BreakerTrip)
     /// More Apple changes than the limit. Action: Apply Anyway (confirmed), approving `count`.
     case blastRadius(count: Int, limit: Int)
-    /// Apple changes held because `apple_writes` is off. Action: Open Settings.
-    case appleWritesDisabled(held: Int)
+    /// Apple changes held because `apple_writes` is off; `kinds` is
+    /// "15 deletions, 9 updates". Action: Turn On… (the `apple_writes`
+    /// confirmation of Settings ▸ Accounts).
+    case appleWritesDisabled(held: Int, kinds: String)
     /// Another device leads syncing. Action: Take Over (confirmed).
     case waitingForDevice(name: String, since: Date, expires: Date)
     /// Another device leads syncing and this Mac has not synced the folder
@@ -226,18 +232,14 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
     public var message: String {
         switch self {
         case .breaker(let trip):
-            let noun = trip.vanished == 1 ? "contact" : "contacts"
-            return trip.side == "apple"
-                ? "Sync paused: \(trip.vanished) of \(trip.total) \(noun) disappeared from Contacts. "
-                    + "Is iCloud signed in? Nothing was written."
-                : "Sync paused: \(trip.vanished) of \(trip.total) notes disappeared from the notes folder. "
-                    + "Is the folder available? Nothing was written."
+            return Self.breakerMessage(trip)
         case .blastRadius(let count, let limit):
             return "\(count) changes to Apple Contacts wait for your approval "
                 + "(more than \(limit) in one sync). Notes were still updated."
-        case .appleWritesDisabled(let held):
-            return "\(held) \(held == 1 ? "change" : "changes") held for Apple Contacts — "
-                + "enable writing to Contacts in Settings."
+        case .appleWritesDisabled(let held, let kinds):
+            let detail = kinds.isEmpty ? "" : " (\(kinds))"
+            return "\(held) \(held == 1 ? "change" : "changes") for Apple Contacts\(detail) "
+                + "\(held == 1 ? "is" : "are") waiting because writing to Contacts is turned off."
         case .waitingForDevice(let name, let since, let expires):
             return "Waiting for \(name). It started syncing \(UIFormat.relativeDay(since)); "
                 + "this Mac syncs when it finishes (expires \(UIFormat.relativeDay(expires)))."
@@ -293,7 +295,8 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         case .blastRadius(let count, let limit)?: banners.append(.blastRadius(count: count, limit: limit))
         case .appleWritesDisabled? where (plan?.changedInMarkdown ?? 0) > 0:
             // Stamps alone are not worth a banner while writes are off.
-            banners.append(.appleWritesDisabled(held: plan?.changedInMarkdown ?? 0))
+            banners.append(
+                .appleWritesDisabled(held: plan?.changedInMarkdown ?? 0, kinds: plan?.changedInMarkdownKinds ?? ""))
         default: break
         }
         if let lease = otherLease(status: status, outcome: outcome, deviceID: deviceID, now: now) {
