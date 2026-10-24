@@ -25,6 +25,8 @@ final class CLIHarness: Sendable {
     let clock = TestClock(start: Date(timeIntervalSince1970: 1_800_000_000))
     /// Contacts.app scripting over `store` (used once `notes_sync` is on).
     let notes: FakeNotesProvider
+    /// Card writes through Contacts.app scripting over `store` (architecture §6 "Write routing").
+    let cards: FakeCardScripting
 
     init(
         store: FakeContactStore = Fixtures.store(), vault: InMemoryVault = InMemoryVault(),
@@ -34,6 +36,7 @@ final class CLIHarness: Sendable {
         self.vault = vault
         self.device = device
         notes = FakeNotesProvider(store: store)
+        cards = FakeCardScripting(store: store)
         stateDirectory = FileManager.default.temporaryDirectory.appending(path: "c2m-cli-\(UUID().uuidString)")
     }
 
@@ -48,6 +51,7 @@ final class CLIHarness: Sendable {
         let vault = self.vault
         let device = self.device
         let notes = self.notes
+        let cards = self.cards
         return CLIEnvironment(
             makeStore: { store },
             makeVault: { _ in vault },
@@ -66,7 +70,8 @@ final class CLIHarness: Sendable {
             sleep: { _ in },
             makeTriggerSources: sources,
             waitForInterrupt: waitForInterrupt,
-            makeNotesProvider: { _ in notes }
+            makeNotesProvider: { _ in notes },
+            makeCardScripting: { _, _ in cards }
         )
     }
 

@@ -56,9 +56,7 @@ public struct CNContactStoreAdapter: ContactStore {
             return AppleWriteResult(applied: batch.operations, createdCardIDs: saved.created)
         } catch {
             guard Self.units(of: batch.operations).count > 1 else {
-                let message = String(describing: error)
-                return AppleWriteResult(
-                    applied: [], failed: batch.operations.map { AppleWriteFailure(operation: $0, message: message) })
+                return AppleWriteResult(applied: [], failed: batch.operations.map { Self.failure($0, error) })
             }
         }
         var result = AppleWriteResult(applied: [])
@@ -68,11 +66,28 @@ public struct CNContactStoreAdapter: ContactStore {
                 result.applied += unit
                 result.createdCardIDs.merge(saved.created) { _, new in new }
             } catch {
-                let message = String(describing: error)
-                result.failed += unit.map { AppleWriteFailure(operation: $0, message: message) }
+                result.failed += unit.map { Self.failure($0, error) }
             }
         }
         return result
+    }
+
+    /// `NSCocoaErrorDomain` 134092 ("… occurred during faulting"): without the
+    /// notes entitlement, every save that updates a card with a note fails
+    /// this way and changes nothing (spike S15).
+    static func isNotedCardRejection(_ error: any Error) -> Bool {
+        let error = error as NSError
+        return error.domain == NSCocoaErrorDomain && error.code == 134_092
+    }
+
+    static func failure(_ operation: AppleWriteOperation, _ error: any Error) -> AppleWriteFailure {
+        let rejected = isNotedCardRejection(error)
+        let message =
+            rejected
+            ? "\(operation.summary): Contacts refused the save because the card has a note "
+                + "(NSCocoaErrorDomain 134092; needs the notes entitlement or Contacts.app scripting)"
+            : String(describing: error)
+        return AppleWriteFailure(operation: operation, message: message, rejectedForNote: rejected)
     }
 
     /// Operations grouped by target card (in first-seen order); each create alone.

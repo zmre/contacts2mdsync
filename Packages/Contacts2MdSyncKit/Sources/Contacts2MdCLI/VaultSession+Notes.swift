@@ -38,24 +38,33 @@ extension VaultSession {
     /// Never prompts: without permission the read fails and the run skips
     /// notes with a warning — not "off": the notes base is kept for the
     /// next run with permission.
+    ///
+    /// Card writes go through a `CardWriteRouter` (architecture §6 "Write
+    /// routing"): cards with a note (without the entitlement) and group
+    /// removals through Contacts.app scripting, sharing the notes provider's
+    /// Contacts.app session.
     func notesSetup(for base: any ContactStore, backups: URL) -> NotesSetup {
-        if (try? base.capabilities.notesAvailable) == true {
-            return NotesSetup(
-                store: base, status: NotesStatus(source: .entitlement),
-                handle: NotesRunHandle(provider: nil, bridge: nil))
-        }
         let settings = notesSettingsStore.load()
-        guard settings.notesSync, let provider = environment.makeNotesProvider(settings) else {
-            return NotesSetup(store: base, status: .off, handle: NotesRunHandle(provider: nil, bridge: nil))
+        if (try? base.capabilities.notesAvailable) == true {
+            let router = CardWriteRouter(inner: base, scripting: environment.makeCardScripting(settings, nil))
+            return NotesSetup(
+                store: router, status: NotesStatus(source: .entitlement),
+                handle: NotesRunHandle(provider: nil, bridge: nil, router: router))
         }
+        guard settings.notesSync, let provider = environment.makeNotesProvider(settings) else {
+            let router = CardWriteRouter(inner: base, scripting: environment.makeCardScripting(settings, nil))
+            return NotesSetup(
+                store: router, status: .off, handle: NotesRunHandle(provider: nil, bridge: nil, router: router))
+        }
+        let router = CardWriteRouter(inner: base, scripting: environment.makeCardScripting(settings, provider))
         let clock = environment.clock
         let backup = AppleNotesBackup(directory: backups, now: { clock.now })
         let bridge = NotesBridgedStore(
-            inner: base, provider: provider, ownWrites: environment.notesOwnWrites,
+            inner: router, provider: provider, ownWrites: environment.notesOwnWrites,
             backup: { notes in try backup.save(notes) }, now: { clock.now })
         return NotesSetup(
             store: bridge, status: NotesStatus(source: provider.source),
-            handle: NotesRunHandle(provider: provider, bridge: bridge))
+            handle: NotesRunHandle(provider: provider, bridge: bridge, router: router))
     }
 
     /// The warning of a run whose notes read failed.

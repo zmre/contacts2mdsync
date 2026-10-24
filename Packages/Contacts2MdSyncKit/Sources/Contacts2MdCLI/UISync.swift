@@ -51,6 +51,9 @@ public struct UISyncSummary: Hashable, Sendable {
     /// Apple changes not made, and why.
     public var held: Int
     public var hold: AppleHold?
+    /// Of `held`: changes that wait for permission to control Contacts.app
+    /// (contacts with notes, group removals; architecture §6 "Write routing").
+    public var heldForContactsControl: Int = 0
     public var failures: [String]
     public var contactsBackup: String?
     public var notesBackup: String?
@@ -84,12 +87,14 @@ public struct UISyncSummary: Hashable, Sendable {
             markdown: UIChangeCounts(
                 created: result.markdown.created.count, updated: result.markdown.updated.count - adopted,
                 deleted: result.trashed.count),
-            adopted: adopted, held: plan.appleWritesAllowed ? 0 : plan.apple.count, hold: plan.appleHold,
+            adopted: adopted, held: (plan.appleWritesAllowed ? 0 : plan.apple.count) + result.appleHeld.count,
+            hold: plan.appleHold,
             failures: result.markdown.failures.map { "\($0.path): \($0.message)" } + result.appleFailures
                 + result.skippedLinks.map { "\($0): contact not created; note left unlinked" },
             contactsBackup: result.backup?.url.path(percentEncoded: false),
             notesBackup: result.markdown.noteBackup?.path(percentEncoded: false),
             pendingReview: plan.markdown.reviews.filter(\.needsDecision).count)
+        heldForContactsControl = result.appleHeld.filter { $0.reason == CardWriteRouter.permissionReason }.count
     }
 
     /// Summary of a one-way export (first run on this Mac).
@@ -215,6 +220,9 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
     /// Contact notes are on but were skipped (no Automation permission for
     /// Contacts, a failed read). Action: Open Settings.
     case notesSkipped(String)
+    /// Apple changes to contacts with notes (and group removals) wait for
+    /// permission to control Contacts.app. Action: Allow… (the macOS prompt).
+    case contactsControlNeeded(held: Int)
 
     public var id: String {
         switch self {
@@ -225,6 +233,7 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         case .localRunInProgress: "local-lock"
         case .identity: "identity"
         case .notesSkipped: "notes-skipped"
+        case .contactsControlNeeded: "contacts-control"
         }
     }
 
@@ -255,6 +264,10 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
                 ? "Contact notes were skipped: this Mac does not allow Contacts2MdSync to control Contacts. "
                     + "Allow it in Settings ▸ Advanced ▸ Contact notes."
                 : "Contact notes were skipped this time: \(reason)."
+        case .contactsControlNeeded(let held):
+            return "\(held) \(held == 1 ? "change" : "changes") for Apple Contacts "
+                + "\(held == 1 ? "is" : "are") waiting: contacts that have notes are edited through Contacts.app, "
+                + "and this Mac does not allow Contacts2MdSync to control Contacts yet."
         }
     }
 
@@ -262,7 +275,7 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
     public var severity: Severity {
         switch self {
         case .breaker: .error
-        case .blastRadius, .identity, .notesSkipped: .warning
+        case .blastRadius, .identity, .notesSkipped, .contactsControlNeeded: .warning
         case .appleWritesDisabled, .waitingForDevice, .leaderElsewhere, .localRunInProgress: .info
         }
     }
@@ -291,14 +304,7 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         } else if case .breaker(let trip)? = outcome {
             banners.append(.breaker(trip))
         }
-        switch plan?.hold {
-        case .blastRadius(let count, let limit)?: banners.append(.blastRadius(count: count, limit: limit))
-        case .appleWritesDisabled? where (plan?.changedInMarkdown ?? 0) > 0:
-            // Stamps alone are not worth a banner while writes are off.
-            banners.append(
-                .appleWritesDisabled(held: plan?.changedInMarkdown ?? 0, kinds: plan?.changedInMarkdownKinds ?? ""))
-        default: break
-        }
+        if let hold = holdBanner(plan) { banners.append(hold) }
         if let lease = otherLease(status: status, outcome: outcome, deviceID: deviceID, now: now) {
             if let status, status.lastExport == nil {
                 banners.append(
@@ -316,7 +322,22 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         if let skipped = plan?.notes.skipped {
             banners.append(.notesSkipped(skipped.replacingOccurrences(of: "; notes skipped", with: "")))
         }
+        if let held = outcome?.summary?.heldForContactsControl, held > 0 {
+            banners.append(.contactsControlNeeded(held: held))
+        }
         return banners
+    }
+
+    /// The blast-radius or writes-off banner of the latest dry run.
+    static func holdBanner(_ plan: UISyncPlanSummary?) -> UIBanner? {
+        switch plan?.hold {
+        case .blastRadius(let count, let limit)?: return .blastRadius(count: count, limit: limit)
+        case .appleWritesDisabled? where (plan?.changedInMarkdown ?? 0) > 0:
+            // Stamps alone are not worth a banner while writes are off.
+            return .appleWritesDisabled(
+                held: plan?.changedInMarkdown ?? 0, kinds: plan?.changedInMarkdownKinds ?? "")
+        default: return nil
+        }
     }
 
     /// "Mac B is syncing this folder; this Mac will follow." The first
@@ -338,56 +359,5 @@ public enum UIBanner: Hashable, Sendable, Identifiable {
         if case .leaseHeldElsewhere(let lease)? = outcome { candidates.append(lease) }
         if let lease = status?.lease { candidates.append(lease) }
         return candidates.first { $0.deviceID != deviceID && $0.expiresAt > now }
-    }
-}
-
-// MARK: - Activity details
-
-/// Per-side counts of a sync started from the app before M5. `SessionRecord`
-/// stored Apple and markdown changes combined then, so the app kept this
-/// split (and the held count) in the device state's metadata, keyed by
-/// start time. M5 sessions carry `SessionRecord.sides` instead; these are
-/// still read for older sessions and never written any more.
-public struct UISessionDetail: Codable, Hashable, Sendable {
-    public var startedAt: Date
-    /// The session's trigger (`GUI`, …), so a detail never attaches to a
-    /// CLI run that started in the same instant.
-    public var trigger: String
-    public var apple: UIChangeCounts
-    public var markdown: UIChangeCounts
-    public var held: Int
-    /// `apple writes disabled`, `blast radius`, or `nil`.
-    public var holdReason: String?
-
-    /// Creates a detail.
-    public init(
-        startedAt: Date, trigger: String, apple: UIChangeCounts, markdown: UIChangeCounts, held: Int,
-        holdReason: String?
-    ) {
-        self.startedAt = startedAt
-        self.trigger = trigger
-        self.apple = apple
-        self.markdown = markdown
-        self.held = held
-        self.holdReason = holdReason
-    }
-
-    /// Metadata key in the device state.
-    static let metadataKey = "ui_sync_sessions"
-
-    /// Whether this detail belongs to `session`.
-    func matches(_ session: SessionRecord) -> Bool {
-        session.trigger == trigger && abs(session.startedAt.timeIntervalSince(startedAt)) < 0.001
-    }
-
-    static func load(_ state: any SyncStateStore) -> [UISessionDetail] {
-        guard let data = try? state.metadata(metadataKey) else { return [] }
-        return (try? decoder.decode([UISessionDetail].self, from: data)) ?? []
-    }
-
-    private static var decoder: JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        return decoder
     }
 }

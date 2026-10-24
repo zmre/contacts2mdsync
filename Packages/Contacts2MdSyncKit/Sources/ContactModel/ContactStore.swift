@@ -247,45 +247,6 @@ public enum AppleWriteOperation: Hashable, Sendable {
     }
 }
 
-/// A batch of Apple writes saved together.
-public struct AppleWriteBatch: Hashable, Sendable {
-    public var operations: [AppleWriteOperation]
-
-    /// Creates a batch.
-    public init(operations: [AppleWriteOperation]) { self.operations = operations }
-}
-
-/// Outcome of `ContactStore.apply`.
-public struct AppleWriteResult: Hashable, Sendable {
-    /// Operations that were saved.
-    public var applied: [AppleWriteOperation]
-    /// Operations that failed, with a message each.
-    public var failed: [AppleWriteFailure]
-    /// Card ids of created contacts, by `NewAppleContact.recordID`.
-    public var createdCardIDs: [UUID: String]
-
-    /// Creates a result.
-    public init(
-        applied: [AppleWriteOperation], failed: [AppleWriteFailure] = [], createdCardIDs: [UUID: String] = [:]
-    ) {
-        self.applied = applied
-        self.failed = failed
-        self.createdCardIDs = createdCardIDs
-    }
-}
-
-/// One failed Apple write.
-public struct AppleWriteFailure: Hashable, Sendable {
-    public var operation: AppleWriteOperation
-    public var message: String
-
-    /// Creates a failure.
-    public init(operation: AppleWriteOperation, message: String) {
-        self.operation = operation
-        self.message = message
-    }
-}
-
 /// Change-history result (M5, architecture §10).
 public enum HistoryResult: Hashable, Sendable {
     /// History is not available; take a full snapshot.

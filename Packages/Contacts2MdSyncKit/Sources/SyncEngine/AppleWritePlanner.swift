@@ -180,13 +180,17 @@ private struct RecordWrites {
         }
     }
 
-    /// The image: the target card only.
+    /// The image: the target card only, unless that card could not take
+    /// this image before (Contacts.app scripting has no usable image, §6).
     mutating func image(_ merge: MergeResult, data: Data?) {
+        let wanted: Data??
         switch merge.appleImage {
-        case .set?: if let data { add(.image(data), to: target.id, field: "image") }
-        case .remove?: add(.image(nil), to: target.id, field: "image")
-        case nil: break
+        case .set?: wanted = data.map { .some($0) }
+        case .remove?: wanted = .some(nil)
+        case nil: wanted = nil
         }
+        guard let wanted, !blocks(target.id, "image", SyncExecutor.imageAttempt(wanted)) else { return }
+        add(.image(wanted), to: target.id, field: "image")
     }
 
     // MARK: Lists
@@ -300,7 +304,7 @@ private struct RecordWrites {
             output.operations.append(.addMember(cardID: card.id, groupID: group.id))
             noteField("tags")
         }
-        for tag in merge.appleTagsRemoved {
+        for tag in merge.appleTagsRemoved where !blocks("*", "tags|\(tag)", "-") {
             for group in planner.groups where names(tag).contains(group.name) && contact.groupIDs.contains(group.id) {
                 for card in groupCards where card.containerID == group.containerID {
                     output.operations.append(.removeMember(cardID: card.id, groupID: group.id))

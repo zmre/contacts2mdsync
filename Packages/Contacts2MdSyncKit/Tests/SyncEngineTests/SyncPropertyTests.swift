@@ -38,7 +38,15 @@ struct SyncPropertyTests {
     /// With `scripted`, the store has no notes entitlement and notes go
     /// through a `FakeNotesProvider` (Contacts.app scripting), turned on
     /// after the first export: the first sync is the enablement migration.
-    static func world(stamps: Bool, notes: Bool, scripted: Bool = false) throws -> (SyncHarness, [Person]) {
+    ///
+    /// With `routed` (spike S15, architecture §6 "Write routing"), a random
+    /// subset of cards has a note, the fake framework refuses every update
+    /// of those cards (134092) and ignores group removals, and card writes
+    /// go through a `CardWriteRouter` with (fake) Contacts.app scripting.
+    static func world(
+        stamps: Bool, notes: Bool, scripted: Bool = false, routed: SeededRandom? = nil
+    ) throws -> (SyncHarness, [Person]) {
+        var noted = routed
         var contacts: [AppleContact] = []
         var people: [Person] = []
         let names = ["Ada", "Ben", "Cleo", "Dov", "Eva", "Fin", "Gus"]
@@ -55,7 +63,8 @@ struct SyncPropertyTests {
                     contact.emails = [Labeled("home", "\(given.lowercased())@home.example")]
                     contact.phones = [Labeled("mobile", "+1 415 555 01\(10 + index)")]
                     contact.jobTitle = "Start"
-                    contact.body = notes ? "first line\nsecond line\n" : nil
+                    contact.body = noted == nil ? (notes ? "first line\nsecond line\n" : nil) : nil
+                    if Self.coin(&noted) { contact.body = "note of \(given)\n" }
                 })
             people.append(
                 Person(slug: slug, path: "Inbox/\(given) Test.md", cards: ["\(slug):\(accounts[0].rawValue)"]))
@@ -64,14 +73,29 @@ struct SyncPropertyTests {
         if notes { for index in linked.cards.indices { linked.cards[index].values?.body = "first line\n" } }
         contacts.append(linked)
         people.append(Person(slug: "ann", path: "Inbox/Ann One.md", cards: ["ann:icloud", "ann:google"]))
+        if Self.coin(&noted), let index = contacts.indices.last {
+            contacts[index].cards[1].values?.body = "linked note\n"
+        }
         let world = SyncHarness(
-            contacts: contacts, notesEntitled: notes && !scripted, appleWrites: true, stampContacts: stamps)
+            contacts: contacts, notesEntitled: notes && !scripted && routed == nil, appleWrites: true,
+            stampContacts: stamps)
         world.store.setSynthesizeLinkedIDs(true)
         world.store.setNormalizePhonesOnSave(true)
         try world.export()
+        if routed != nil {
+            world.store.setModelsFrameworkWithoutNotesEntitlement(true)
+            world.enableCardWriteRouting(FakeCardScripting(store: world.store))
+        }
         if scripted { world.enableScriptedNotes(FakeNotesProvider(store: world.store), bulkThreshold: 3) }
         try world.sync(Self.options)
         return (world, people)
+    }
+
+    /// A coin toss from `random` (`false` without one).
+    static func coin(_ random: inout SeededRandom?) -> Bool {
+        guard var generator = random else { return false }
+        defer { random = generator }
+        return Bool.random(using: &generator)
     }
 
     static let options = SyncOptions(maxAppleChanges: 1000)
@@ -144,6 +168,7 @@ struct SyncPropertyTests {
 
     /// Counters that keep the test from passing vacuously.
     struct Totals {
+        var scripted = 0
         var apple = 0
         var markdown = 0
         var conflicts = 0
@@ -164,15 +189,23 @@ struct SyncPropertyTests {
         try Self.rounds(stamps: stamps, notes: true, scripted: true)
     }
 
-    static func rounds(stamps: Bool, notes: Bool, scripted: Bool) throws {
+    @Test(
+        "cards with notes routed through Contacts.app (S15): random edits → fixpoint, nothing refused, notes intact",
+        arguments: [false, true])
+    func randomRoundsRouted(scriptedNotes: Bool) throws {
+        try Self.rounds(stamps: false, notes: scriptedNotes, scripted: scriptedNotes, routed: true)
+    }
+
+    static func rounds(stamps: Bool, notes: Bool, scripted: Bool, routed: Bool = false) throws {
         var totals = Totals()
         for seed in UInt64(1)...4 {
-            var mutator = Mutator(
-                random: SeededRandom(
-                    seed: seed &* 7919 &+ (stamps ? 1 : 0) &+ (notes ? 2 : 0) &+ (scripted ? 4 : 0)),
-                notes: notes)
-            let (world, people) = try Self.world(stamps: stamps, notes: notes, scripted: scripted)
+            let salt: UInt64 = (stamps ? 1 : 0) &+ (notes ? 2 : 0) &+ (scripted ? 4 : 0) &+ (routed ? 8 : 0)
+            var mutator = Mutator(random: SeededRandom(seed: seed &* 7919 &+ salt), notes: notes)
+            let (world, people) = try Self.world(
+                stamps: stamps, notes: notes, scripted: scripted,
+                routed: routed ? SeededRandom(seed: seed &* 104_729) : nil)
             let contactCount = world.store.contacts.count
+            let notesBefore = world.store.scriptedNotes()
             var pending = Set<String>()
             for round in 0..<10 {
                 let context = "seed \(seed) round \(round) stamps \(stamps) notes \(notes) scripted \(scripted)"
@@ -183,7 +216,14 @@ struct SyncPropertyTests {
                         ($0.slug, Sides(apple: Self.appleKeys(world, $0), markdown: Self.noteKeys(world, $0)))
                     })
                 let run = try world.sync(Self.options)
+                if routed {
+                    #expect(run.result?.appleFailures == [], "\(context)")
+                    #expect(run.result?.appleHeld == [], "\(context)")
+                    #expect(world.store.rejectedForNote.isEmpty, "\(context): a noted card was sent to the framework")
+                    if !notes { #expect(world.store.scriptedNotes() == notesBefore, "\(context): notes changed") }
+                }
                 totals.apple += run.result?.apple.count ?? 0
+                totals.scripted += run.result.map { _ in world.store.scriptedOperations.count } ?? 0
                 totals.markdown += run.result?.markdown.updated.count ?? 0
                 totals.conflicts += run.plan.conflicts.count
                 try Self.checkInvariants(world, people, contactCount: contactCount, context: context)
@@ -196,6 +236,7 @@ struct SyncPropertyTests {
             }
         }
         #expect(totals.apple > 10 && totals.markdown > 10, "\(totals)")
+        if routed { #expect(totals.scripted > 10, "\(totals)") }
         #expect(totals.conflicts > 0 && totals.resolved > 0, "\(totals)")
     }
 

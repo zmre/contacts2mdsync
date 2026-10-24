@@ -251,6 +251,13 @@ extension Reporter {
         for trash in result.trashed { item("trashed", "md", "\(trash.path)  (deleted in Contacts; in the Trash)") }
         for change in result.apple { item(Self.appleVerb(change.kind, done: true), "apple", Self.describe(change)) }
         for failure in result.appleFailures { error("apple: \(failure)") }
+        for held in result.appleHeld { item("held", "apple", "\(held.title) — \(held.reason)") }
+        if result.appleHeld.contains(where: { $0.reason == CardWriteRouter.permissionReason }) {
+            warning(
+                "held",
+                "contacts with notes are edited through Contacts.app: allow Contacts2MdSync to control Contacts "
+                    + "(open the app: Settings ▸ Accounts, or System Settings ▸ Privacy & Security ▸ Automation)")
+        }
         for path in result.skippedLinks { warning("create", "\(path): contact not created; note left unlinked") }
         for entry in result.newUnapplyable {
             warning("unapplyable", "\(entry.field) not kept by card \(entry.cardID) — not retried while unchanged")
@@ -323,7 +330,8 @@ extension Reporter {
         let markdownCreated = result?.markdown.created.count ?? plan.markdown.creates.count
         let markdownUpdated = result?.markdown.updated.count ?? plan.markdown.updates.count
         let trashed = result?.trashed.count ?? plan.trash.count
-        let held = (plan.appleWritesAllowed ? 0 : plan.apple.count) + plan.accountHeld.count
+        let held =
+            (plan.appleWritesAllowed ? 0 : plan.apple.count) + plan.accountHeld.count + (result?.appleHeld.count ?? 0)
         let pending = plan.markdown.reviews.filter(\.needsDecision).count
         let line =
             "summary  apple c/u/d \(count([.create]))/\(count([.update, .stamp, .unstamp]))/\(count([.delete]))"

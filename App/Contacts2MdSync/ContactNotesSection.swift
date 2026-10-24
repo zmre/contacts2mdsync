@@ -53,6 +53,27 @@ final class ContactNotesModel {
         return permission
     }
 
+    /// Asks macOS for permission to control Contacts.app (the prompt, once)
+    /// without changing `notes_sync`: Apple writes to contacts that have a
+    /// note go through Contacts.app (architecture §6 "Write routing").
+    @discardableResult
+    func requestControlPermission() async -> NotesPermission {
+        isAsking = true
+        defer { isAsking = false }
+        let quit = settings.quitContactsAfterSync
+        let answer = await Task.detached { () -> NotesAvailability in
+            let session = ContactsAppSession(quitWhenDone: quit)
+            defer { session.finish() }  // quits Contacts.app if it was opened for this
+            return session.requestPermission()
+        }.value
+        switch answer {
+        case .scripting(let state): permission = state
+        case .entitlement: permission = .granted
+        case .unavailable: permission = .unknown
+        }
+        return permission
+    }
+
     func setQuitContacts(_ quit: Bool) {
         settings.quitContactsAfterSync = quit
         save()

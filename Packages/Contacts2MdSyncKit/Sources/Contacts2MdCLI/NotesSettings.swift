@@ -120,20 +120,26 @@ public final class NotesRunHandle: Sendable {
     public let provider: (any NotesProvider)?
     /// The bridge reading and writing notes (`nil` unless scripting is active).
     public let bridge: NotesBridgedStore?
+    /// The run's card-write routing (Contacts framework or Contacts.app).
+    public let router: CardWriteRouter?
     private let finished = Mutex(false)
 
-    init(provider: (any NotesProvider)?, bridge: NotesBridgedStore?) {
+    init(provider: (any NotesProvider)?, bridge: NotesBridgedStore?, router: CardWriteRouter? = nil) {
         self.provider = provider
         self.bridge = bridge
+        self.router = router
     }
 
-    /// Ends the provider's session (quits Contacts.app if this run launched it).
+    /// Ends the Contacts.app session of the notes provider and the card
+    /// writes (one shared session; quits Contacts.app if this run launched it).
     public func finish() {
         let first = finished.withLock { done in
             defer { done = true }
             return !done
         }
-        if first { provider?.finishSession() }
+        guard first else { return }
+        provider?.finishSession()
+        router?.scripting?.finishSession()
     }
 
     deinit { finish() }

@@ -11,6 +11,10 @@ public struct SyncResult: Sendable {
     public var apple: [AppleRecordChange] = []
     /// Apple operations that failed (`title: message`).
     public var appleFailures: [String] = []
+    /// Apple changes not made because they wait for the user (Contacts.app
+    /// scripting without Automation permission, architecture §6 "Write
+    /// routing"): not failures, retried on the next run.
+    public var appleHeld: [AppleHeldChange] = []
     /// The vCard backup taken before the Apple writes.
     public var backup: BackupReceipt?
     /// Writes cards did not keep (recorded, not retried).
@@ -26,6 +30,20 @@ public struct SyncResult: Sendable {
 
     /// Creates an empty result.
     public init() {}
+}
+
+/// An Apple change held at write time, with the reason.
+public struct AppleHeldChange: Hashable, Sendable {
+    public var recordID: UUID
+    public var title: String
+    public var reason: String
+
+    /// Creates a held change.
+    public init(recordID: UUID, title: String, reason: String) {
+        self.recordID = recordID
+        self.title = title
+        self.reason = reason
+    }
 }
 
 /// Errors that stop a sync before anything is written.
@@ -78,6 +96,7 @@ public struct SyncExecutor: Sendable {
         var postSnapshot: AppleSnapshot?
         var appliedUpdates: [(record: UUID, operation: AppleWriteOperation)] = []
         var deletedRecords = Set<UUID>()
+        var skipped: [UnapplyableEntry] = []
 
         if plan.appleWritesAllowed, !plan.apple.isEmpty {
             let receipt = try backup()
@@ -85,19 +104,8 @@ public struct SyncExecutor: Sendable {
             if let noteBackups { result.markdown.noteBackup = try backupNotes(plan, to: noteBackups) }
             let write = applyBatch(plan, receipt: receipt)
             created = write.createdCardIDs
-            let applied = Set(write.applied)
-            for change in plan.apple {
-                let failures = write.failed.filter { change.operations.contains($0.operation) }
-                if failures.isEmpty, change.operations.allSatisfy(applied.contains) {
-                    result.apple.append(change)
-                    if change.kind == .delete { deletedRecords.insert(change.recordID) }
-                } else {
-                    result.appleFailures += failures.map { "\(change.title): \($0.message)" }
-                }
-                for operation in change.operations where applied.contains(operation) {
-                    appliedUpdates.append((change.recordID, operation))
-                }
-            }
+            skipped = Self.unapplyable(write.skipped, plan: plan)
+            (appliedUpdates, deletedRecords) = Self.record(write, of: plan, in: &result)
             // Token first: our own saves are older than it, so they are never
             // reported back as changes (they are excluded by author as well).
             result.postWriteHistoryToken = try? store.currentHistoryToken()
@@ -112,6 +120,7 @@ public struct SyncExecutor: Sendable {
         if let postSnapshot, let context = plan.context {
             result.newUnapplyable = verify(plan, applied: appliedUpdates, after: postSnapshot, context: context)
         }
+        result.newUnapplyable += skipped.filter { !result.newUnapplyable.contains($0) }
         result.notesSynced = plan.notes.isActive && (postSnapshot?.notesAvailable ?? true)
         try timer.measure("save-state") {
             try saveState(
@@ -122,9 +131,36 @@ public struct SyncExecutor: Sendable {
         return result
     }
 
+    /// Sorts each planned change into made, failed or held; returns the
+    /// applied operations (for verification) and the deleted records.
+    private static func record(
+        _ write: AppleWriteResult, of plan: SyncPlan, in result: inout SyncResult
+    ) -> ([(record: UUID, operation: AppleWriteOperation)], Set<UUID>) {
+        let applied = Set(write.applied)
+        var appliedUpdates: [(record: UUID, operation: AppleWriteOperation)] = []
+        var deleted = Set<UUID>()
+        for change in plan.apple {
+            let failures = write.failed.filter { change.operations.contains($0.operation) }
+            if failures.isEmpty, change.operations.allSatisfy(applied.contains) {
+                result.apple.append(change)
+                if change.kind == .delete { deleted.insert(change.recordID) }
+            } else {
+                result.appleFailures += failures.map { "\(change.title): \($0.message)" }
+                if let hold = write.held.first(where: { change.operations.contains($0.operation) }) {
+                    result.appleHeld.append(
+                        AppleHeldChange(recordID: change.recordID, title: change.title, reason: hold.reason))
+                }
+            }
+            for operation in change.operations where applied.contains(operation) {
+                appliedUpdates.append((change.recordID, operation))
+            }
+        }
+        return (appliedUpdates, deleted)
+    }
+
     /// The one Apple batch; a thrown error fails every operation.
     private func applyBatch(_ plan: SyncPlan, receipt: BackupReceipt) -> AppleWriteResult {
-        let batch = AppleWriteBatch(operations: plan.apple.flatMap(\.operations))
+        let batch = AppleWriteBatch(operations: plan.apple.flatMap(\.operations), cardNotes: Self.cardNotes(plan))
         do {
             return try timer.measure("apple-write") {
                 try AppleWriter.apply(batch, in: store, backup: receipt, author: author)
@@ -194,52 +230,6 @@ public struct SyncExecutor: Sendable {
             }
         }
         return failed
-    }
-
-    // MARK: - Verification (unapplyable)
-
-    /// Re-reads every written card and records the writes it did not keep.
-    private func verify(
-        _ plan: SyncPlan, applied: [(record: UUID, operation: AppleWriteOperation)], after snapshot: AppleSnapshot,
-        context: SyncContext
-    ) -> [UnapplyableEntry] {
-        let byCard = Self.contactsByCard(snapshot)
-        let groupNames = Dictionary(snapshot.groups.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
-        var entries: [UnapplyableEntry] = []
-        for (record, operation) in applied {
-            switch operation {
-            case .update(let cardID, let edits):
-                guard let before = plan.records[record]?.apple,
-                    let beforeCard = before.cards.first(where: { $0.id == cardID }),
-                    let beforeValues = before.values(of: beforeCard), let after = byCard[cardID],
-                    let afterCard = after.cards.first(where: { $0.id == cardID }),
-                    let afterValues = after.values(of: afterCard)
-                else { continue }
-                let notesRead = snapshot.notesAvailable && after.notesUnknown != true  // notes verified only if re-read
-                let checked = notesRead ? edits : edits.filter { if case .note = $0 { false } else { true } }
-                entries += Verifier(builder: context.builder, record: record, card: cardID).check(
-                    checked, before: beforeValues, after: afterValues)
-            case .addMember(let cardID, let groupID):
-                guard let after = byCard[cardID], !after.groupIDs.contains(groupID),
-                    let name = groupNames[groupID], let tag = context.config.tag(forGroup: name)
-                else { continue }
-                entries.append(
-                    UnapplyableEntry(
-                        recordID: record, cardID: "*", field: "tags|\(ComparisonKeys.tag(tag))", attempted: "+",
-                        observed: "absent"))
-            default:
-                continue
-            }
-        }
-        return entries
-    }
-
-    static func contactsByCard(_ snapshot: AppleSnapshot) -> [String: AppleContact] {
-        var byCard: [String: AppleContact] = [:]
-        for contact in snapshot.contacts {
-            for card in contact.cards { byCard[card.id] = contact }
-        }
-        return byCard
     }
 
     // MARK: - State
@@ -326,73 +316,5 @@ public struct SyncExecutor: Sendable {
             aliases: index.aliases(record: record.recordID),
             notesSynced: builder.notesAvailable && apple.notesUnknown != true
         ).build()
-    }
-}
-
-/// Compares a card after a save with the edits sent to it.
-private struct Verifier {
-    let builder: ViewBuilder
-    let record: UUID
-    let card: String
-
-    private func entry(_ field: String, _ attempted: String, _ observed: String) -> UnapplyableEntry {
-        UnapplyableEntry(recordID: record, cardID: card, field: field, attempted: attempted, observed: observed)
-    }
-
-    func check(_ edits: [CardEdit], before: CanonicalContact, after: CanonicalContact) -> [UnapplyableEntry] {
-        edits.flatMap { edit -> [UnapplyableEntry] in
-            switch edit {
-            case .scalar(let apple, let value):
-                guard let field = ScalarField.allCases.first(where: { $0.apple == apple }) else { return [] }
-                let got = ScalarField.key(field.value(in: after))
-                return scalar(field.rawValue, wanted: ScalarField.key(value), got: got)
-            case .birthday(let date):
-                return scalar(
-                    ScalarField.birthday.rawValue, wanted: date?.iso, got: ScalarField.birthday.value(in: after))
-            case .note(let text):
-                return ComparisonKeys.body(text) == ComparisonKeys.body(after.body)
-                    ? [] : [entry("body", "text", "different")]
-            case .image:
-                return []  // the image may come back as a thumbnail only (spike S5): never "refused"
-            case .list(let appleField, let elements):
-                guard let field = ListField.allCases.first(where: { $0.apple == appleField }) else { return [] }
-                return list(field, elements, before: before, after: after)
-            }
-        }
-    }
-
-    private func scalar(_ field: String, wanted: String?, got: String?) -> [UnapplyableEntry] {
-        wanted == got ? [] : [entry(field, wanted ?? "∅", got ?? "∅")]
-    }
-
-    /// Additions missing, replacements missing, relabels not kept, removals still present.
-    private func list(
-        _ field: ListField, _ elements: [AppleListElement], before: CanonicalContact, after: CanonicalContact
-    ) -> [UnapplyableEntry] {
-        let beforeKeys = Set(builder.apple(before, tags: [], image: .none).list(field).map(\.key))
-        let afterLabels = Dictionary(
-            builder.apple(after, tags: [], image: .none).list(field).map { ($0.key, $0.label) },
-            uniquingKeysWith: { first, _ in first })
-        let name = field.rawValue
-        var entries: [UnapplyableEntry] = []
-        var kept = Set<String>()
-        for element in elements {
-            let key = builder.key(of: element.value, label: element.label, field: field)
-            guard let existing = element.existing else {
-                if afterLabels[key] == nil { entries.append(entry("\(name)|\(key)", "+", "absent")) }
-                continue
-            }
-            let old = builder.key(of: existing, label: element.existingLabel, field: field)
-            kept.insert(old)
-            if old != key {
-                if afterLabels[key] == nil { entries.append(entry("\(name)|\(old)", "~\(key)", "absent")) }
-            } else if element.label != element.existingLabel, let label = afterLabels[key], label != element.label {
-                entries.append(entry("\(name)|\(key)", "@\(element.label ?? "")", "@\(label ?? "")"))
-            }
-        }
-        for key in beforeKeys.subtracting(kept) where afterLabels[key] != nil {
-            entries.append(entry("\(name)|\(key)", "-", "present"))
-        }
-        return entries
     }
 }

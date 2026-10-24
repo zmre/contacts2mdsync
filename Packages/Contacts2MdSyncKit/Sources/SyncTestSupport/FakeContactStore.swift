@@ -55,6 +55,15 @@ public final class FakeContactStore: ContactStore {
         var failNextHistory = false
         var historyReads = 0
         var refetches: [[String]] = []
+        /// Spike S15: without the notes entitlement, every framework update
+        /// of a card that has a note fails with 134092 (nothing changes).
+        var notedCardsRejectUpdates = false
+        /// Spike S15: the framework's `removeMember` saves but changes nothing (iCloud).
+        var removeMemberIsNoOp = false
+        /// Framework updates rejected with 134092 so far.
+        var rejectedForNote: [AppleWriteOperation] = []
+        /// Operations written through (fake) Contacts.app scripting.
+        var scriptedOperations: [AppleWriteOperation] = []
     }
 
     let state: Mutex<State>
@@ -147,6 +156,20 @@ public final class FakeContactStore: ContactStore {
             }
             var result = AppleWriteResult(applied: [])
             for operation in batch.operations {
+                if Self.rejectsForNote(operation, state: state) {
+                    state.rejectedForNote.append(operation)
+                    result.failed.append(
+                        AppleWriteFailure(
+                            operation: operation,
+                            message: "\(operation.summary): Contacts refused the save because the card has a note "
+                                + "(NSCocoaErrorDomain 134092)",
+                            rejectedForNote: true))
+                    continue
+                }
+                if case .removeMember = operation, state.removeMemberIsNoOp {
+                    result.applied.append(operation)  // saved without error, membership unchanged (S15)
+                    continue
+                }
                 do {
                     let created = result.createdCardIDs
                     try Self.apply(operation, to: &state, result: &result)
@@ -180,7 +203,7 @@ public final class FakeContactStore: ContactStore {
         let description: String
     }
 
-    private static func apply(
+    static func apply(
         _ operation: AppleWriteOperation, to state: inout State, result: inout AppleWriteResult
     ) throws {
         if case .create(let new) = operation {
@@ -279,8 +302,11 @@ public final class FakeContactStore: ContactStore {
         result.createdCardIDs[new.recordID] = cardID
     }
 
+}
+
+extension FakeContactStore {
     /// History events a saved operation produces.
-    private static func events(
+    fileprivate static func events(
         for operation: AppleWriteOperation, createdBefore: [UUID: String], after: [UUID: String]
     ) -> [FakeHistoryEvent] {
         switch operation {
@@ -291,12 +317,12 @@ public final class FakeContactStore: ContactStore {
         }
     }
 
-    private static func isNote(_ edit: CardEdit) -> Bool {
+    fileprivate static func isNote(_ edit: CardEdit) -> Bool {
         if case .note = edit { return true }
         return false
     }
 
-    private static func isDropped(_ edit: CardEdit, kind: AccountKind, state: State) -> Bool {
+    fileprivate static func isDropped(_ edit: CardEdit, kind: AccountKind, state: State) -> Bool {
         let field: String =
             switch edit {
             case .scalar(let field, _): field.rawValue

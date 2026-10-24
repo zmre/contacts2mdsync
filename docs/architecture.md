@@ -288,6 +288,33 @@ Write targets:
 - **Never save a mutable copy of a unified contact.** Spike S4 showed that it writes the change to every linked card (the same new email, with the same labeled-value id, appeared on both cards, and the Google card's own job title was overwritten). All saves target underlying cards fetched with `unifyResults = false`.
 - **New contacts** (opted in from markdown) are created in the iCloud container.
 
+### Write routing (cards with notes, group removals)
+
+Without the notes entitlement, the Contacts framework cannot write two kinds of change ([spike S15](spikes.md#s15-findings-2026-10-24)):
+
+- **Every update of a card that has a note** (names, job title, emails, phones, URLs and the stamp, group add and remove) fails with `NSCocoaErrorDomain` 134092 ("… during faulting"). Nothing of the save is kept and the note is intact. No variant helps (minimal keys, `shouldRefetchContacts = false`, a fresh store, fetching `CNContactNoteKey`). About 1,572 of 3,781 real cards have a note, and the notes sync adds more. The framework also prints `CoreData: error … 134092` to stderr on each failed save.
+- **`removeMember(_:from:)`** saves without error but leaves the card in the group (iCloud), on every card.
+
+Contacts.app scripting can make every one of these changes. Deletes and creates work through the framework, notes or not. So `CardWriteRouter` (SyncEngine, a `ContactStore` around the Contacts-framework store, inside the notes bridge) sends each operation one of two ways:
+
+| Operation | Route |
+|-----------|-------|
+| create; delete (and every other operation of a card being deleted) | Contacts framework |
+| `removeMember` | Contacts.app scripting, always (also with the entitlement) |
+| update, stamp, unstamp, `addMember`, with the notes entitlement | Contacts framework |
+| … of a card this run knows has a note | Contacts.app scripting, directly (no failed save first, no CoreData stderr noise) |
+| … of a card known to have none | Contacts framework; on 134092 that card goes again through Contacts.app scripting |
+| … note unknown (notes off, or skipped) | Contacts.app scripting when the Automation permission is granted; else the framework first, as above |
+
+- **What the run knows.** `AppleWriteBatch.cardNotes` (card id → has a note) comes from the plan (`SyncExecutor.cardNotes`): each written card's note as read this run, through the notes bridge or the Contacts mirror. Cards whose note was not read are left out (unknown).
+- **The scripting writer.** `ScriptingCardWriter` (ContactsAdapter, `CardScripting`) reads the card through the Contacts framework (reads work on cards with notes; only saves fail), applies the operation's edits to a copy with the same `CardWriter` code the framework route uses, and turns the difference into Apple Events (`ScriptedCardPlan`): single-valued fields that differ are set; labeled values are matched by `CNLabeledValue.identifier`, which is Contacts.app's element `id` (S15): gone → `delete <element> id E of person id P`, changed → `set value|label of <element> id E …` (the id survives), new → `make new <element> at end of … with properties {label, value}`. Group changes are `add person id P to group id G` / `remove … from …` (CN group ids resolve as `group id`, S15); a member is added only when it is not one and removed only when it is. Then one `save` per card. Raw Apple Events through the `AppleEventSending` seam, ids and values as descriptors, never script source.
+- **Labels.** A value whose label did not change keeps its label (none is sent). A new value or a relabel sends the raw Contacts label, the same string `CNLabeledValue.label` holds (`_$!<Mobile>!$_`, `Summer House`). Contacts.app scripting shows the built-in labels as `mobile`, `home` …; that sending the raw constant stores the constant is still to be checked on scratch cards (the verification below catches it if not).
+- **Not scriptable** (`CardScriptingSupport`; the edit is left out, the rest of the operation applies): the image (scripting has a TIFF `image`, so our bytes would never round-trip), the birthday and custom dates (AppleScript `date`s are local date-times: no month-day birthdays, and the day can shift with the time zone), the phonetic organization name (no property), an instant-message service with no `service type` enumerator, and the note (written by the notes path). Fields are found missing by the usual verification and marked unapplyable; the image, which verification never calls refused (S5), gets an `image` entry from the write result (`AppleWriteResult.skipped`) and is not planned again until it changes. Reason text: "needs entitlement or not scriptable".
+- **Permission.** Scripted writes need the same Automation permission as scripted notes, also when `notes_sync` is off. Sync never prompts: without permission (denied, or never asked in a headless run) every write that needs scripting is **held** (`AppleWriteResult.held`, "needs permission for Contacts2MdSync to control Contacts"): not a failure, not unapplyable, planned again next run. The CLI prints `held apple <title> — …` and one `WARNING held` line, and counts them in `held`; the app shows a banner after Sync Now. Settings ▸ Accounts asks for the permission when `apple_writes` is turned on and offers Allow… while it is missing (docs/ui.md §9).
+- **One Contacts.app session per sync.** `ContactsAppSession` (launch hidden, permission, readiness, quit if we launched it) is shared by `ScriptingNotesProvider` and `ScriptingCardWriter`; the run's `NotesRunHandle` finishes it once.
+- **Errors.** A per-card scripting error fails that card's operations, named with their route (`update (job title, emails) via Contacts.app: …`); what was set before the error is still saved, so nothing stays unsaved in Contacts.app. A session-level error (Contacts.app not answering) fails the remaining scripted operations (retried next run).
+- **Verification and echoes.** After `save` the writer re-reads the card until the Contacts framework shows a change (S15 saw it at once; up to 1 s). The executor's post-write snapshot then verifies scripted writes like any other, including `removeMember`, which is now checked too (a membership that did not change is `tags|<tag>` `-` unapplyable). Contacts.app saves carry no `transactionAuthor`: as for scripted notes (§8), the history token is read after the batch, so their events are older than the next run's token, and a late event only makes the next run re-read the card, whose values equal the refreshed base. No ping-pong (`randomRoundsRouted` property test).
+
 ### Stamping is optional
 
 `stamp_contacts: true` in `.c2mdsync/config.yaml` turns stamping on. The default is off, because a single device does not need stamps. Stamps are Apple writes, so they also need `apple_writes: enabled` (§9). Without them they are reported as held.
@@ -453,7 +480,7 @@ Otherwise the body is markdown-only and excluded from the merge. Notes wanted bu
 
 **Permission.** `AEDeterminePermissionToAutomateTarget` for `com.apple.AddressBook`: `0` granted, `-1743` denied, `-1744` not decided yet, `-600` Contacts.app not running. Because macOS answers only for a running app, the first notes read of a run (and `availability()`) launches Contacts.app first when needed, then checks; without permission the read fails with `NotesUnavailableError(permissionDenied:)` and the run skips notes with the permission warning. A refusal is remembered for 15 minutes in the process (`NotesRefusalMemo`): while Contacts.app is not running, the next runs skip notes without launching it just to be told again; `requestPermission()` and a granted check clear it. While notes are skipped, the cached mirror has no notes, so runs read Contacts with a full snapshot (`notes turned on or off`) until notes can be read again. Sync never prompts. Only `requestPermission()` (Settings ▸ Advanced ▸ Contact notes, a user action) asks with `askUserIfNeeded = true`. The app declares `NSAppleEventsUsageDescription` and the entitlements `com.apple.security.automation.apple-events` and `com.apple.security.temporary-exception.apple-events = [com.apple.AddressBook]` (sandboxed, hardened runtime).
 
-**Contacts.app lifecycle.** When Contacts.app is not running, the provider launches it hidden and without activating it (`NSWorkspace.OpenConfiguration`: `activates = false`, `hides = true`, not added to recent items), waits until it finished launching, and retries a cheap `count every person` until it answers (15 s). Spike S14 saw a fresh launch report `hidden = false` despite `hides = true`, so a window could flash: the provider then calls `hide()` on the app it launched and polls until macOS reports it hidden (up to 1 s, every 50 ms), and hides it once more right after the first answered event if it shows again. A Contacts.app the user had open is never hidden, and Contacts.app is never activated. After the run, `finishSession()` quits it only if this provider launched it, it is still hidden and not frontmost (the user is not using it), and `quit_contacts_after_sync` is on (the default). The session ends through `NotesRunHandle.finish()` at the end of `executeSync` and `recordSyncPlan`, and at the latest when the prepared run is released.
+**Contacts.app lifecycle.** The launch, permission and quit logic is `ContactsAppSession`, shared with the scripted card writes (§6 "Write routing"), so a sync launches and quits Contacts.app at most once for both. When Contacts.app is not running, the provider launches it hidden and without activating it (`NSWorkspace.OpenConfiguration`: `activates = false`, `hides = true`, not added to recent items), waits until it finished launching, and retries a cheap `count every person` until it answers (15 s). Spike S14 saw a fresh launch report `hidden = false` despite `hides = true`, so a window could flash: the provider then calls `hide()` on the app it launched and polls until macOS reports it hidden (up to 1 s, every 50 ms), and hides it once more right after the first answered event if it shows again. A Contacts.app the user had open is never hidden, and Contacts.app is never activated. After the run, `finishSession()` quits it only if this provider launched it, it is still hidden and not frontmost (the user is not using it), and `quit_contacts_after_sync` is on (the default). The session ends through `NotesRunHandle.finish()` at the end of `executeSync` and `recordSyncPlan`, and at the latest when the prepared run is released.
 
 **The bridge.** `NotesBridgedStore` (SyncEngine) is a `ContactStore` that wraps the Contacts.framework store and adds notes:
 
@@ -486,7 +513,7 @@ The plan carries a `NotesBaseline` for every record merged without a body base: 
 
 **Long notes.** Notes are never truncated. S12 saw up to 49,152 characters. Diff3 handles them line by line (the LCS table is bounded at 4 million cells; beyond that the whole text is one hunk). `\r\n` and lone `\r` are normalized for comparison. A pulled note replaces the body after the blank lines it started with.
 
-**Not covered.** The first export (`export`) does not read notes; the first sync after it takes them. Whether notes propagate to iCloud.com and Google after a scripted write is not verified (S12). The raw Apple Events have not yet run against the real Contacts.app (S12 used `NSAppleScript`).
+**Not covered.** The first export (`export`) does not read notes; the first sync after it takes them. Whether notes propagate to iCloud.com and Google after a scripted write is not verified (S12). The raw Apple Events have not yet run against the real Contacts.app (S12 and S15 used `NSAppleScript`); that includes the card-write events of §6 "Write routing" (`make new … at end of …`, `delete … id`, `add … to group`), the raw-label behaviour, and element ids for addresses, related names, social profiles and instant messages (S15 compared ids for emails, phones and URLs only).
 
 ## 9. Safety rails
 
@@ -503,7 +530,8 @@ The plan carries a `NotesBaseline` for every record merged without a body base: 
 | Unknown notes            | a card Contacts.app scripting did not see makes the contact's note unknown, never empty; a failed notes read skips notes for the run (§8). |
 | File writes              | `NSFileCoordinator`, temp file + `replaceItemAt`, CAS on (mtime, size, sha), skip identical bytes, re-parse before write. |
 | Invalid YAML             | never written; listed in Activity.                                                                   |
-| Unapplyable fields       | fields Apple refuses or that don't stick are recorded and not retried until they change.            |
+| Unapplyable fields       | fields Apple refuses or that don't stick are recorded and not retried until they change. So are edits Contacts.app scripting cannot express on cards with a note (§6 "Write routing"). |
+| Write routing            | without the notes entitlement, cards with a note and every group removal are written through Contacts.app (§6); without Automation permission those writes are held, never failed or half-written. |
 
 A card id that vanishes while its stamp shows up on another card is identifier churn, not a delete (Google replaces cards we create, spike S9): the record is rebound silently. Only a card that is gone by id, stamp and cascade counts toward the Apple delete rail.
 
@@ -860,6 +888,7 @@ contacts2md reset-state [--root <dir>] [--yes]
 | GUI instance on this Mac is syncing                        | Wait up to 60 s for the local lock, then no-op as above                            |
 | Not configured / first sync not done                       | Error, exit 3                                                                      |
 | `notes_sync: on` without Automation permission for Contacts | Notes skipped (never prompts), `WARNING notes`, no body change on either side, exit code unaffected |
+| `apple_writes` on, a contact with a note (or a group removal) to write, no Automation permission | That change is held (never prompts): `held apple <title> — needs permission for Contacts2MdSync to control Contacts` and `WARNING held`; the other changes are written; exit code unaffected (§6 "Write routing") |
 | A Contacts account turned off, removed or in a partial state | Its cards kept as last seen, nothing removed from notes, changes touching its cards held, `WARNING account`, exit code unaffected (0 when nothing else); `review decide account-missing:<id> forget` removes it deliberately |
 
 Headless runs never resolve anything on the user's behalf. Queued items show up in the GUI's Review badges exactly as if the GUI had found them.
@@ -872,6 +901,7 @@ Plain text, one line per item, stable prefixes so `grep` works and cron mail is 
 contacts2md sync  2026-10-21T03:00:02-06:00  device=Patrick's MacBook Pro
 updated  md     Work/Jane Doe.md  (job_title, phones)
 updated  apple  Sam Lee  (emails)
+held     apple  Ann One — needs permission for Contacts2MdSync to control Contacts
 created  md     Inbox/Maria Gonzalez.md
 WARNING  conflict   Jane Doe: phones[mobile] differs (Contacts "+1 555 0199" vs Markdown "+1 555 0142") — skipped, resolve in app
 WARNING  duplicate  "Chris Martin" (iCloud) may match Work/Chris Martin.md (same email) — not created, review in app

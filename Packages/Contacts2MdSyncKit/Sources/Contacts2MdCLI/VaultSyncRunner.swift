@@ -178,8 +178,11 @@ public struct VaultSyncRunner: SyncRunner {
         summary.appleCreated = result.apple.filter { $0.kind == .create }.count
         summary.appleDeleted = result.apple.filter { $0.kind == .delete }.count
         summary.appleUpdated = result.apple.count - summary.appleCreated - summary.appleDeleted
-        summary.appleHeld = (plan.appleHold == nil ? 0 : plan.apple.count) + plan.accountHeld.count
-        summary.appleHoldReason = plan.appleHold?.reason ?? plan.accountHeld.first.map { "\($0.account) not visible" }
+        summary.appleHeld =
+            (plan.appleHold == nil ? 0 : plan.apple.count) + plan.accountHeld.count + result.appleHeld.count
+        summary.appleHoldReason =
+            plan.appleHold?.reason ?? plan.accountHeld.first.map { "\($0.account) not visible" }
+            ?? result.appleHeld.first?.reason
         summary.markdownCreated = result.markdown.created.count
         summary.markdownUpdated = result.markdown.updated.count
         summary.markdownTrashed = result.trashed.count

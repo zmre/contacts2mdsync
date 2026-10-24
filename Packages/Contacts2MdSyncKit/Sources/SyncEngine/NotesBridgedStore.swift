@@ -191,17 +191,21 @@ public final class NotesBridgedStore: ContactStore {
         let split = SplitBatch(batch)
         let innerResult =
             split.inner.isEmpty
-            ? AppleWriteResult(applied: []) : try inner.apply(AppleWriteBatch(operations: split.inner), author: author)
+            ? AppleWriteResult(applied: [])
+            : try inner.apply(AppleWriteBatch(operations: split.inner, cardNotes: batch.cardNotes), author: author)
         var result = AppleWriteResult(applied: [], createdCardIDs: innerResult.createdCardIDs)
-        var failedOriginals: [AppleWriteOperation: String] = [:]
-        for failure in innerResult.failed {
-            if let original = split.original[failure.operation] { failedOriginals[original] = failure.message }
+        var failedOriginals = split.originals(innerResult.failed.map { ($0.operation, $0.message) })
+        // Held (Contacts.app scripting not permitted): neither failed nor applied; no note either.
+        let heldOriginals = split.originals(innerResult.held.map { ($0.operation, $0.reason) })
+        result.skipped = innerResult.skipped.compactMap { skip in
+            split.original[skip.operation].map { AppleWriteSkip(operation: $0, edit: skip.edit, reason: skip.reason) }
         }
+        result.scripted = innerResult.scripted.compactMap { split.original[$0] }
         let appliedInner = Set(innerResult.applied)
         // Notes go only to cards whose framework part (if any) was saved.
         var targets: [String: String] = [:]
         var owners: [String: AppleWriteOperation] = [:]
-        for note in split.notes where failedOriginals[note.operation] == nil {
+        for note in split.notes where failedOriginals[note.operation] == nil && heldOriginals[note.operation] == nil {
             if let inner = split.innerPart[note.operation], !appliedInner.contains(inner) { continue }
             guard let card = note.cardID ?? note.recordID.flatMap({ innerResult.createdCardIDs[$0] }) else { continue }
             targets[card] = note.text
@@ -212,6 +216,8 @@ public final class NotesBridgedStore: ContactStore {
         for operation in batch.operations {
             if let message = failedOriginals[operation] {
                 result.failed.append(AppleWriteFailure(operation: operation, message: message))
+            } else if let reason = heldOriginals[operation] {
+                result.held.append(AppleWriteHold(operation: operation, reason: reason))
             } else if let inner = split.innerPart[operation], !appliedInner.contains(inner) {
                 result.failed.append(AppleWriteFailure(operation: operation, message: "not saved"))
             } else {
@@ -366,6 +372,11 @@ private struct SplitBatch {
                 add(operation, for: operation)
             }
         }
+    }
+
+    /// Inner operations' messages keyed by the batch operation they came from.
+    func originals(_ messages: [(AppleWriteOperation, String)]) -> [AppleWriteOperation: String] {
+        Dictionary(messages.compactMap { part, text in original[part].map { ($0, text) } }) { _, new in new }
     }
 
     private mutating func add(_ part: AppleWriteOperation, for operation: AppleWriteOperation) {

@@ -160,3 +160,49 @@ struct NotesUITests {
         #expect(syncs.contains("1 → Contacts · 1 → notes"))
     }
 }
+
+/// Apple writes to contacts with notes without the entitlement (spike S15,
+/// architecture §6 "Write routing").
+@Suite("contacts2md: writes to contacts with notes")
+struct NotedWritesCLITests {
+    @Test("headless without permission: the card with a note is held (exit 0), the others are written")
+    func heldHeadless() throws {
+        let store = notesStore()
+        let harness = CLIHarness.exported(store)
+        #expect(harness.run(["config", "--root", "/vault", "--apple-writes", "enabled"]).code == 0)
+        #expect(harness.sync().code == 0)
+        store.setModelsFrameworkWithoutNotesEntitlement(true)
+        harness.cards.setPermission(.notDetermined)
+        harness.editNote("Inbox/Ann One.md", "title: Ann One", with: "title: Ann One\njob_title: CTO")
+        harness.editNote("Inbox/Bob Two.md", "title: Bob Two", with: "title: Bob Two\njob_title: Chef")
+        let run = harness.sync()
+        #expect(run.code == 0, "\(run.out)\(run.err)")
+        let lines = harness.lines(run)
+        #expect(lines.contains("updated  apple  Bob Two  (job_title)"), "\(run.out)")
+        #expect(lines.contains("held     apple  Ann One — needs permission for Contacts2MdSync to control Contacts"))
+        #expect(
+            lines.contains { $0.hasPrefix("WARNING  held       contacts with notes are edited through Contacts.app") })
+        #expect(lines.contains { $0.hasPrefix("summary") && $0.contains("held 1") })
+        #expect(run.err.isEmpty, "a hold is not an error")
+        #expect(store.values(ofCard: "ann:icloud")?.jobTitle == nil)
+
+        harness.cards.setPermission(.granted)
+        let granted = harness.sync()
+        #expect(granted.code == 0)
+        #expect(harness.lines(granted).contains("updated  apple  Ann One  (job_title)"), "\(granted.out)")
+        #expect(store.values(ofCard: "ann:icloud")?.jobTitle == "CTO")
+        #expect(store.scriptedNotes()["ann:icloud"] == .some("Met at the 2019 conference."), "note intact")
+        #expect(!harness.lines(harness.sync()).contains { $0.hasPrefix("updated") }, "fixpoint")
+    }
+
+    @Test("changes held for Contacts.app control give a banner after Sync Now")
+    func contactsControlBanner() {
+        var summary = UISyncSummary(held: 2)
+        summary.heldForContactsControl = 2
+        let banners = UIBanner.banners(
+            status: nil, plan: nil, outcome: .synced(summary), deviceID: "d", now: Date())
+        #expect(banners == [.contactsControlNeeded(held: 2)])
+        #expect(banners.first?.message.hasPrefix("2 changes for Apple Contacts are waiting") == true)
+        #expect(banners.first?.severity == .warning)
+    }
+}

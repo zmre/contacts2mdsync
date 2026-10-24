@@ -52,6 +52,8 @@ public final class SyncHarness: Sendable {
     public let appleMode: AppleReadMode?
     /// Notes through (fake) Contacts.app scripting, when enabled.
     private let notesBridge = Mutex<NotesBridgedStore?>(nil)
+    /// Card-write routing (Contacts framework or fake Contacts.app), when enabled.
+    private let cardRouter = Mutex<CardWriteRouter?>(nil)
 
     /// Creates a world whose vault is configured with `apple_writes` and
     /// `stamp_contacts` as given (the vault id and region are fixed).
@@ -151,11 +153,33 @@ public final class SyncHarness: Sendable {
     /// with a warning otherwise.
     public func enableScriptedNotes(_ provider: FakeNotesProvider, bulkThreshold: Int = 40) {
         let clock = self.clock
+        let inner: any ContactStore = router ?? store
         notesBridge.withLock {
             $0 = NotesBridgedStore(
-                inner: store, provider: provider, bulkThreshold: bulkThreshold, now: { clock.now })
+                inner: inner, provider: provider, bulkThreshold: bulkThreshold, now: { clock.now })
         }
     }
+
+    // MARK: - Card-write routing (architecture §6)
+
+    /// Routes card writes like `VaultSession` (spike S15): cards with a note
+    /// (without the entitlement) and group removals through `scripting`
+    /// (`nil`: scripting unavailable, those writes are held). Re-creates the
+    /// notes bridge over the router when scripted notes are on.
+    public func enableCardWriteRouting(_ scripting: FakeCardScripting?) {
+        let router = CardWriteRouter(inner: store, scripting: scripting)
+        cardRouter.withLock { $0 = router }
+        let clock = self.clock
+        notesBridge.withLock { bridge in
+            guard let old = bridge else { return }
+            bridge = NotesBridgedStore(
+                inner: router, provider: old.provider, ownWrites: old.ownWrites, bulkThreshold: old.bulkThreshold,
+                now: { clock.now })
+        }
+    }
+
+    /// The card-write router in use (routing on).
+    public var router: CardWriteRouter? { cardRouter.withLock { $0 } }
 
     /// Turns scripted notes off again (`notes_sync: off`).
     public func disableScriptedNotes() { notesBridge.withLock { $0 = nil } }
@@ -165,12 +189,13 @@ public final class SyncHarness: Sendable {
 
     /// The store a run uses and how it handles notes (as `VaultSession` decides).
     public var notesSetup: (store: any ContactStore, status: NotesStatus) {
-        guard let bridge else { return (store, .off) }
+        let base: any ContactStore = router ?? store
+        guard let bridge else { return (base, .off) }
         switch bridge.provider.availability() {
         case .entitlement, .scripting(.granted): return (bridge, NotesStatus(source: .scripting))
         default:
             return (
-                store,
+                base,
                 NotesStatus(source: nil, skipped: "Automation permission for Contacts not granted; notes skipped")
             )
         }

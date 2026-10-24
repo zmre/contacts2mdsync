@@ -58,6 +58,12 @@ public struct CLIEnvironment: Sendable {
     /// settings (architecture §8); `nil` when not available (tests without a
     /// fake). Only used without the notes entitlement. Never prompts.
     public var makeNotesProvider: @Sendable (NotesSettings) -> (any NotesProvider)?
+    /// Card writes through Contacts.app scripting (architecture §6 "Write
+    /// routing"): cards with a note without the notes entitlement, and group
+    /// removals. Gets this run's notes provider (`nil`: notes off) so both
+    /// share one Contacts.app session. `nil`: not available (those writes
+    /// are held). Never prompts.
+    public var makeCardScripting: @Sendable (NotesSettings, (any NotesProvider)?) -> (any CardScripting)?
     /// Notes this process wrote through Contacts.app, shared by every run of
     /// the process (the app, `watch`), so the echo of our own write is not
     /// read back as a change.
@@ -89,9 +95,12 @@ public struct CLIEnvironment: Sendable {
         waitForInterrupt: @escaping @Sendable (SyncCoordinator) -> Void = CLIEnvironment.waitForControlC,
         triggerClock: any TriggerClock = SystemTriggerClock(),
         makeNotesProvider: @escaping @Sendable (NotesSettings) -> (any NotesProvider)? = { _ in nil },
+        makeCardScripting: @escaping @Sendable (NotesSettings, (any NotesProvider)?) -> (any CardScripting)? =
+            CLIEnvironment.noCardScripting,
         notesOwnWrites: NotesOwnWrites = NotesOwnWrites()
     ) {
         self.makeNotesProvider = makeNotesProvider
+        self.makeCardScripting = makeCardScripting
         self.notesOwnWrites = notesOwnWrites
         self.makeTriggerSources = makeTriggerSources
         self.waitForInterrupt = waitForInterrupt
@@ -121,6 +130,14 @@ public struct CLIEnvironment: Sendable {
     public static func openStateStore(_ directory: URL) throws -> any SyncStateStore {
         try GRDBSyncStateStore.open(directory: directory)
     }
+
+    /// No Contacts.app card scripting (tests without a fake): writes that need it are held.
+    @Sendable
+    public static func noCardScripting(
+        _ settings: NotesSettings, _ provider: (any NotesProvider)?
+    )
+        -> (any CardScripting)?
+    { nil }
 
     /// Contacts changes, FSEvents on `root`, wake (30 s delay) and a sweep timer.
     @Sendable
@@ -173,7 +190,14 @@ public struct CLIEnvironment: Sendable {
             device: { try DeviceIdentityFile(directory: state).loadOrCreate() },
             rootAccess: .bookmark(RootBookmark(directory: state)),
             trigger: "CLI",
-            makeNotesProvider: { settings in ScriptingNotesProvider(quitWhenDone: settings.quitContactsAfterSync) }
+            makeNotesProvider: { settings in ScriptingNotesProvider(quitWhenDone: settings.quitContactsAfterSync) },
+            makeCardScripting: { settings, provider in
+                // One Contacts.app session per run: the notes provider's when notes are on.
+                let session =
+                    (provider as? ScriptingNotesProvider)?.session
+                    ?? ContactsAppSession(quitWhenDone: settings.quitContactsAfterSync)
+                return ScriptingCardWriter(session: session)
+            }
         )
     }
 }

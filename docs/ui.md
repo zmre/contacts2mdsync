@@ -291,6 +291,14 @@ Folders   Notes root         ~/Notes/Contacts                 [Choose…]
 Accounts  Write to           iCloud   (fixed in v1)
           Read from          ☑ iCloud (1,031)  ☑ Google (217)
           Groups ↔ tags      18 managed tags  [Edit…]
+          [◉] Write changes back to Apple Contacts
+            Contacts with notes  Edited through Contacts.app   (Waiting for permission [Allow…] /
+                                                                Not permitted [Open Privacy Settings…] /
+                                                                Checked when Contacts.app runs [Allow…])
+            (caption) Apple only lets this build change contacts that have a note through Contacts.app,
+            so those edits (and removals from groups) are made by controlling Contacts.app, opened
+            hidden during the sync. macOS asks once for permission. Without it, those changes wait;
+            scheduled and command-line syncs never ask.
 
 Scope     (Planned — shown disabled)
           Include   ○ All contacts  ○ Only these groups…
@@ -317,6 +325,12 @@ Advanced  Contact notes
 - **Denied**: "Allow it in System Settings ▸ Privacy & Security ▸ Automation ▸ Contacts2MdSync ▸ Contacts, then sync again." [Open Privacy Settings…]. The setting stays on; syncs skip notes with a warning until it is allowed.
 
 Turning it off saves at once. The next sync with notes starts without a base again.
+
+**Writing to contacts that have a note** (architecture §6 "Write routing"). Without the notes entitlement, Apple refuses every change to a contact card that has a note, and removing a card from a group through the Contacts framework does nothing. Those writes go through Contacts.app instead, which needs the same "control Contacts" permission as contact notes, also when Contact notes are off. So:
+
+- The `apple_writes` confirmation (Settings ▸ Accounts and the held-changes banner's Turn On…) adds a point when the entitlement is missing: "Contacts that have a note are edited through Contacts.app (opened hidden during the sync), because Apple only lets this build change them that way. macOS asks once for permission to control Contacts." Turn On saves `apple_writes: enabled` and then asks macOS (the prompt, once).
+- With Apple writes on and no entitlement, Settings ▸ Accounts shows the **Contacts with notes** row (above) with the permission state, [Allow…] while it was never decided, and [Open Privacy Settings…] when it was refused.
+- Without permission, those changes wait (they are not errors). After Sync Now a warning banner says "3 changes for Apple Contacts are waiting: contacts that have notes are edited through Contacts.app, and this Mac does not allow Contacts2MdSync to control Contacts yet." with [Open Settings…]. Headless runs print `held apple <title> — needs permission for Contacts2MdSync to control Contacts` and never ask.
 
 ## 10. Menu bar extra
 

@@ -62,6 +62,9 @@ private struct FolderSettings: View {
 private struct AccountSettings: View {
     let model: AppModel
     @State private var confirming: OptionChange?
+    @State private var control = ContactNotesModel()
+
+    private var entitled: Bool { model.setup.notesAccess == .available }
 
     var body: some View {
         Form {
@@ -95,6 +98,9 @@ private struct AccountSettings: View {
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
+                if !entitled, model.displayedOptions?.appleWrites ?? false {
+                    ContactsControlRow(control: control)
+                }
                 Toggle(
                     "Add sync IDs to contacts (needed when several devices share this folder)",
                     isOn: optionBinding(\.stampContacts)
@@ -121,11 +127,15 @@ private struct AccountSettings: View {
         .sheet(item: $confirming) { change in
             OptionConfirmation(change: change, model: model) {
                 confirming = nil
-                Task { await model.setVaultOptions(change.options) }
+                Task {
+                    await model.setVaultOptions(change.options)
+                    if case .appleWrites = change, !entitled { await control.requestControlPermission() }
+                }
             } cancel: {
                 confirming = nil
             }
         }
+        .task { await control.refresh() }
     }
 
     private var optionsEnabled: Bool {
@@ -149,6 +159,47 @@ private struct AccountSettings: View {
     }
 }
 
+/// Settings ▸ Accounts, with Apple writes on and no notes entitlement:
+/// contacts that have a note are edited through Contacts.app, which needs
+/// the Automation permission (architecture §6 "Write routing").
+private struct ContactsControlRow: View {
+    let control: ContactNotesModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            LabeledContent("Contacts with notes") {
+                HStack(spacing: 8) {
+                    Text(stateText).foregroundStyle(control.permission == .granted ? Color.secondary : .orange)
+                    if control.permission == .denied {
+                        Button("Open Privacy Settings…") { control.openAutomationSettings() }
+                    } else if control.permission != .granted {
+                        Button("Allow…") { Task { await control.requestControlPermission() } }
+                            .disabled(control.isAsking)
+                    }
+                }
+            }
+            Text(
+                "Apple only lets this build change contacts that have a note through Contacts.app, so those "
+                    + "edits (and removals from groups) are made by controlling Contacts.app, opened hidden during "
+                    + "the sync. macOS asks once for permission. Without it, those changes wait; scheduled and "
+                    + "command-line syncs never ask."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var stateText: String {
+        switch control.permission {
+        case .granted: "Edited through Contacts.app"
+        case .notDetermined: "Waiting for permission"
+        case .denied: "Not permitted"
+        case .unknown: "Checked when Contacts.app runs"
+        }
+    }
+}
+
 /// Turning on a vault write switch, with what it means (Settings ▸
 /// Accounts, and the held-changes banner's Turn On…).
 enum OptionChange: Identifiable {
@@ -164,6 +215,8 @@ enum OptionChange: Identifiable {
         var cards: Int
         var devices: Int
         var appleWrites: Bool
+        /// The notes entitlement is present (no Contacts.app scripting needed).
+        var entitled: Bool
 
         /// The facts as `model` has them now.
         @MainActor init(_ model: AppModel) {
@@ -175,6 +228,7 @@ enum OptionChange: Identifiable {
             cards = records?.reduce(0) { $0 + $1.cardIDs.count } ?? 0
             devices = model.data?.deviceCount ?? 1
             appleWrites = model.vaultOptions?.appleWrites ?? false
+            entitled = model.setup.notesAccess == .available
         }
     }
 
@@ -225,6 +279,12 @@ enum OptionChange: Identifiable {
                 "More than \(facts.limit) contacts changed in one sync wait for your approval.",
                 "Nothing is deleted on its own: deletions wait in Deletions for your decision.",
             ]
+            if !facts.entitled {
+                points.append(
+                    "Contacts that have a note are edited through Contacts.app (opened hidden during the sync), "
+                        + "because Apple only lets this build change them that way. macOS asks once for "
+                        + "permission to control Contacts.")
+            }
             let asOf = facts.freshness.asOf()
             switch facts.heldChanges {
             case .some(let count) where count > 0:

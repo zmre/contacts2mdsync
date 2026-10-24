@@ -85,7 +85,12 @@ struct MainView: View {
         .sheet(item: $enablingWrites) { change in
             OptionConfirmation(change: change, model: model) {
                 enablingWrites = nil
-                Task { await model.setVaultOptions(change.options) }
+                Task {
+                    await model.setVaultOptions(change.options)
+                    if model.setup.notesAccess != .available {
+                        await ContactNotesModel().requestControlPermission()
+                    }
+                }
             } cancel: {
                 enablingWrites = nil
             }
@@ -180,7 +185,7 @@ struct MainView: View {
             } else {
                 SettingsLink { Text("Open Settings…") }
             }
-        case .identity, .notesSkipped:
+        case .identity, .notesSkipped, .contactsControlNeeded:
             SettingsLink { Text("Open Settings…") }
         case .waitingForDevice(let name, _, let expires), .leaderElsewhere(let name, let expires, _):
             Button("Take Over…") { confirming = .takeOver(device: name, expires: expires) }
