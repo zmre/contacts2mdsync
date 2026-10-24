@@ -74,7 +74,17 @@ struct S15NotedWrites: ParsableCommand {
                         """)
                 }
                 let icloud = try containerOptions.resolve(.icloud, in: store)
-                let google = try containerOptions.resolve(.google, in: store)
+                // Without a Google account the "C-Google" card goes to iCloud too: it won't link, so run
+                // with --allow-unlinked; every noted/un-noted write is still tested on iCloud cards.
+                let google: CNContainer
+                if let found = try? containerOptions.resolve(.google, in: store) {
+                    google = found
+                } else {
+                    google = icloud
+                    print(
+                        "NOTE: no Google account in Contacts; the C pair's second card is created in iCloud and will "
+                            + "not link. Use `run --yes --allow-unlinked`.")
+                }
                 let short = Stamp.short()
                 let sharedEmail = "zz-spike-s15-\(short.lowercased())-c@example.invalid"
                 let plan =
