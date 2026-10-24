@@ -1180,17 +1180,31 @@ final class S15Runner {
         let group = try scratchGroup(store)
         if want { request.addMember(card, to: group) } else { request.removeMember(card, from: group) }
         var how = "CNSaveRequest"
+        var cnFailed = false
         do {
             try catchingObjC { try store.execute(request) }
+            // Membership changes can surface a moment after the save; give it time before judging.
+            _ = try waitFor { try self.state(id).member == want }
         } catch {
             how = "scripting (CNSaveRequest: \(S15Outcome.classify(error).cell))"
+            cnFailed = true
+        }
+        if !cnFailed, try state(id).member != want {
+            how = "scripting (CNSaveRequest saved but membership unchanged after waiting)"
+            cnFailed = true
+        }
+        if cnFailed {
             try scriptGuard().checkTargets([id], allowedSpikes: [S15NotedWrites.spike])
             if want { try scripting().addToGroup(id, groupID: groupID) } else { try scripting().removeFromGroup(id, groupID: groupID) }
             _ = try waitFor { try self.state(id).member == want }
         }
         let now = try state(id).member
         report.say("  prep: \(kind.short) group member -> \(want) via \(how): \(now == want ? "ok" : "FAILED")")
-        if now != want { throw SpikeError("Could not set group membership of \(kind.short) to \(want) for the next step.") }
+        if now != want {
+            // Record it and carry on: the group ops for this card are suspect, but the other ops and
+            // cards (especially the noted ones) must still be tested.
+            report.check("4", "\(kind.short) group membership could be set to \(want) for the next step", false, how)
+        }
     }
 
     // MARK: Scripting attempts
