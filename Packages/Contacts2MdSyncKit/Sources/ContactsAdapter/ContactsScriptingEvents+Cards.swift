@@ -88,6 +88,20 @@
             static let insertionObject = fourCC("kobj")
             static let insertionPosition = fourCC("kpos")
             static let end = fourCC("end ")
+
+            // `whose` tests (AppleScript's `first <element> whose <a> = x and <b> = y`).
+            static let formTest = fourCC("test")
+            static let first = fourCC("firs")
+            static let comparison = fourCC("cmpd")
+            static let compareOperator = fourCC("relo")
+            static let equals = fourCC("=   ")
+            static let object1 = fourCC("obj1")
+            static let object2 = fourCC("obj2")
+            static let logical = fourCC("logi")
+            static let logicalOperator = fourCC("logc")
+            static let and = fourCC("AND ")
+            static let logicalTerms = fourCC("term")
+            static let examined = fourCC("exmn")
         }
 
         // MARK: - Specifiers
@@ -107,6 +121,59 @@
                 descriptorType: Code.absoluteOrdinal, bytes: &all, length: MemoryLayout<FourCharCode>.size)
             return specifier(
                 want: code, form: Code.formAbsolutePosition, data: ordinal ?? .null(), from: self.person(id: person))
+        }
+
+        /// `first <element class> of person id "P" whose <p1> = v1 and <p2> = v2 …`,
+        /// the specifier AppleScript builds for that phrase: an absolute-position
+        /// `first` over a `test` (whose) specifier of the person's elements. For
+        /// elements Contacts.app cannot resolve by `id` (instant messages, spike S16).
+        public static func firstElement(
+            _ code: FourCharCode, ofPerson person: String, whose terms: [(FourCharCode, NSAppleEventDescriptor)]
+        ) -> NSAppleEventDescriptor {
+            let tests = terms.map { property, value in
+                comparison(Self.property(property, of: examinedObject()), equals: value)
+            }
+            let test: NSAppleEventDescriptor
+            if tests.count == 1, let only = tests.first {
+                test = only
+            } else {
+                let list = NSAppleEventDescriptor.list()
+                for (index, term) in tests.enumerated() { list.insert(term, at: index + 1) }
+                let record = NSAppleEventDescriptor.record()
+                record.setDescriptor(
+                    NSAppleEventDescriptor(enumCode: CardCode.and), forKeyword: CardCode.logicalOperator)
+                record.setDescriptor(list, forKeyword: CardCode.logicalTerms)
+                test = record.coerce(toDescriptorType: CardCode.logical) ?? record
+            }
+            let matching = specifier(want: code, form: CardCode.formTest, data: test, from: self.person(id: person))
+            var first = CardCode.first
+            let ordinal = NSAppleEventDescriptor(
+                descriptorType: Code.absoluteOrdinal, bytes: &first, length: MemoryLayout<FourCharCode>.size)
+            return specifier(want: code, form: Code.formAbsolutePosition, data: ordinal ?? .null(), from: matching)
+        }
+
+        /// The object a `whose` test examines (`its`).
+        static func examinedObject() -> NSAppleEventDescriptor {
+            NSAppleEventDescriptor(descriptorType: CardCode.examined, data: nil) ?? .null()
+        }
+
+        /// `<lhs> = <rhs>` as a comparison descriptor.
+        static func comparison(
+            _ lhs: NSAppleEventDescriptor, equals rhs: NSAppleEventDescriptor
+        )
+            -> NSAppleEventDescriptor
+        {
+            let record = NSAppleEventDescriptor.record()
+            record.setDescriptor(
+                NSAppleEventDescriptor(enumCode: CardCode.equals), forKeyword: CardCode.compareOperator)
+            record.setDescriptor(lhs, forKeyword: CardCode.object1)
+            record.setDescriptor(rhs, forKeyword: CardCode.object2)
+            return record.coerce(toDescriptorType: CardCode.comparison) ?? record
+        }
+
+        /// `get id of person id "P"` (does Contacts.app resolve the person?).
+        public static func personID(_ person: String) -> NSAppleEventDescriptor {
+            get(property(Code.id, of: self.person(id: person)))
         }
 
         /// `group id "G"`.

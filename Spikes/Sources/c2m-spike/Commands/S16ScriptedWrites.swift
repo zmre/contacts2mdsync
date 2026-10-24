@@ -388,7 +388,9 @@ final class S16Runner {
         "1  B: last name + job title + in-place phone edit + new `work` email + delete a URL + stamp (via scripting)",
         "2  labels: new email's CN label; relabel phones to `mobile` and custom `summer`",
         "3  B add to / remove from \"\(S16ScriptedWrites.groupName)\" (via scripting)",
-        "4  B in-place edits: address street/city, related name, Twitter profile, Skype IM",
+        "4  B in-place edits: address street/city, related name, Twitter profile, Skype IM (IM: in place by id, or "
+            + "by `first instant message whose` after -1728, else skipped as unresolvable — never a card failure); "
+            + "4b the IM alone (person check, then the same IM outcomes)",
         "5  B clear job title (\"\"), add an email with no label",
         "6  A (no note): the step-1 update via the Contacts framework; A add to group (framework) and remove "
             + "(scripting)",
@@ -882,7 +884,7 @@ final class S16Runner {
             let relationName = relation.target?.displayName, !canonical.social.isEmpty,
             !canonical.im.isEmpty, let cnAddress = before.postalAddresses.first,
             let cnRelation = before.contactRelations.first, let cnSocial = before.socialProfiles.first,
-            let cnIM = before.instantMessageAddresses.first
+            !before.instantMessageAddresses.isEmpty
         else {
             report.check("4", "B has address, related name, social profile and IM", false, "missing (setup changed?)")
             return
@@ -914,6 +916,7 @@ final class S16Runner {
                 cardID: b,
                 edits: [.list(.addresses, addresses), .list(.relations, relations), .list(.social, socials), .list(.im, ims)])
         ]
+        let elementLogBefore = writer.elementLog
         let result = try apply("4", "B address + related name + social + IM", operations, expect: .exactlyOne)
         checkRoute("4", "B structured edits", operations, result, scripted: true)
         let after = try cardNow(b)
@@ -934,13 +937,85 @@ final class S16Runner {
             nowSocial.map {
                 "id kept; service=\($0.value.service) user=\($0.value.username) url=\($0.value.urlString) (before url=\(cnSocial.value.urlString))"
             } ?? "id \(cnSocial.identifier) gone; \(after.socialProfiles.map { "\($0.identifier)=\($0.value.username)" })")
-        let nowIM = after.instantMessageAddresses.first { $0.identifier == cnIM.identifier }
-        report.check(
-            "4", "IM username edited in place (id kept, service kept)",
-            nowIM.map { $0.value.username == newHandle && $0.value.service == cnIM.value.service } ?? false,
-            nowIM.map { "id kept; service=\($0.value.service) user=\($0.value.username) label \($0.label ?? "nil")" }
-                ?? "id \(cnIM.identifier) gone; \(after.instantMessageAddresses.map { "\($0.identifier)=\($0.value.username)" })")
+        checkIM("4", result, before: before, after: after, wanted: newHandle, log: elementLogBefore)
         unexpected("4", "B", before: before, after: after, allowed: ["address", "relation", "social", "im"])
+        try step4b()
+    }
+
+    /// 4b: the IM alone, so its element command is the card's first: if `id`
+    /// does not resolve, the writer checks `get id of person id P` before
+    /// falling back (and never fails the card for the IM).
+    func step4b() throws {
+        report.say("\n# 4b. B (noted): IM-only edit (first command is the IM element)")
+        let before = try cardNow(b)
+        let canonical = AppleContactMapper.canonical(from: before)
+        guard !canonical.im.isEmpty, !before.instantMessageAddresses.isEmpty else {
+            report.check("4b", "B has an IM", false, "missing (setup changed?)")
+            return
+        }
+        let newHandle = "zzspike16b\(runTag)x"
+        var ims = canonical.im.map {
+            AppleListElement(existing: .im($0.value), existingLabel: $0.label, label: $0.label, value: .im($0.value))
+        }
+        ims[0].value = .im(IMHandle(newHandle))
+        let operations: [AppleWriteOperation] = [.update(cardID: b, edits: [.list(.im, ims)])]
+        let log = writer.elementLog
+        let result = try apply("4b", "B IM only", operations, expect: .atMostOne)
+        checkRoute("4b", "B IM-only edit", operations, result, scripted: true)
+        let after = try cardNow(b)
+        checkIM("4b", result, before: before, after: after, wanted: newHandle, log: log)
+        unexpected("4b", "B", before: before, after: after, allowed: ["im"])
+    }
+
+    /// The IM outcomes the writer allows (architecture §6): edited in place
+    /// (by `id`, or by `first instant message whose user name … and service
+    /// type …` after `-1728`), else skipped as unresolvable with the rest of
+    /// the card applied. Never a card failure, never a different IM touched.
+    func checkIM(
+        _ step: String, _ result: AppleWriteResult, before beforeCard: CNContact,
+        after: CNContact, wanted: String, log: ScriptingCardWriter.ElementLog
+    ) {
+        guard let cnIM = beforeCard.instantMessageAddresses.first else { return }
+        let now = writer.elementLog
+        let byMatch = now.byMatch - log.byMatch
+        let unresolved = now.unresolved - log.unresolved
+        let nowIM = after.instantMessageAddresses.first { $0.identifier == cnIM.identifier }
+        let edited = nowIM.map { $0.value.username == wanted && $0.value.service == cnIM.value.service } ?? false
+        let unchanged = nowIM.map { $0.value == cnIM.value && $0.label == cnIM.label } ?? false
+        let imSkips = result.skipped.filter { if case .list(.im, _) = $0.edit { true } else { false } }
+        let skippedUnresolved = !imSkips.isEmpty
+            && imSkips.allSatisfy { $0.reason.hasPrefix(ScriptingCardWriter.unresolvedReason) }
+        let detail =
+            nowIM.map { "id kept; service=\($0.value.service) user=\($0.value.username) label \($0.label ?? "nil")" }
+            ?? "id \(cnIM.identifier) gone; \(after.instantMessageAddresses.map { "\($0.identifier)=\($0.value.username)" })"
+        report.check(
+            step, "IM addressing (writer element log)", .info,
+            "by whose: \(byMatch) command(s); unresolved: \(unresolved) element(s); "
+                + (byMatch > 0 ? "`instant message id` did not resolve, `whose` did" : unresolved > 0
+                    ? "neither `id` nor `whose` resolved" : "`instant message id` resolved"))
+        if edited {
+            report.check(step, "IM username edited in place (id kept, service kept)", true, detail)
+        } else if skippedUnresolved, unchanged {
+            report.check(
+                step, "IM username edited in place (id kept, service kept)", .warn,
+                "not resolvable by id or whose: skipped, card unchanged (\(detail))")
+        } else {
+            report.check(step, "IM username edited in place (id kept, service kept)", false, detail)
+        }
+        report.check(
+            step, "IM: edited, or skipped as unresolvable with the card applied (never a card failure)",
+            result.failed.isEmpty && (edited || (skippedUnresolved && unchanged)),
+            "failed \(result.failed.count), IM skips \(imSkips.map(\.reason))")
+        report.check(
+            step, "IM: nothing but an IM edit skipped", result.skipped.count == imSkips.count,
+            result.skipped.map { HarnessBatchGuard.describe($0.edit) }.joined(separator: "; "))
+        let others = { (card: CNContact) in
+            card.instantMessageAddresses.filter { $0.identifier != cnIM.identifier }
+                .map { "\($0.identifier)|\($0.label ?? "")|\($0.value.service)|\($0.value.username)" }.sorted()
+        }
+        report.check(
+            step, "IM: no other IM of B touched, none added", others(after) == others(beforeCard),
+            "\(others(beforeCard).count) other(s) before, \(others(after).count) after")
     }
 
     func step5() throws {

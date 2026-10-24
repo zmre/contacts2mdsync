@@ -2,6 +2,7 @@
     public import ContactModel
     internal import Contacts
     public import Foundation
+    internal import Synchronization
 
     /// Reads the cards and group members the scripting writer starts from
     /// (Contacts framework reads work on cards that have a note; only saves
@@ -43,6 +44,13 @@
     ///    id` is the card id; element ids are `CNLabeledValue` identifiers),
     ///    then `save`. A per-card error still saves what was set, so nothing
     ///    is left unsaved in Contacts.app, and fails that card's operations.
+    ///    An existing element Contacts.app cannot find (`-1728`; instant
+    ///    messages by `id`, spike S16) is tried by its `whose` form
+    ///    (`ScriptedCardPlan.matches`); failing that, only that element is
+    ///    left out: its list edit is reported in `skipped` and the rest of the
+    ///    card is applied (the executor's verification records, by value,
+    ///    what the card did not keep as unapplyable — not retried while
+    ///    unchanged).
     /// 3. Re-read the card until the change is visible to the Contacts
     ///    framework (S15 saw it at once; up to `visibleTimeout`), so the
     ///    executor's verification sees the write.
@@ -53,6 +61,18 @@
         /// How long to wait for a scripted change to show in the Contacts framework.
         public let visibleTimeout: TimeInterval
         let sleep: @Sendable (TimeInterval) -> Void
+        let elements = Mutex(ElementLog())
+
+        /// How existing elements were addressed so far (spike S16, `--verbose`).
+        public struct ElementLog: Hashable, Sendable {
+            /// Element commands sent through the `whose` form after `id` did not resolve.
+            public var byMatch = 0
+            /// Elements left out: neither form resolved (their list edit was skipped).
+            public var unresolved = 0
+        }
+
+        /// How existing elements were addressed so far.
+        public var elementLog: ElementLog { elements.withLock { $0 } }
 
         /// Creates a writer over `session` (the real Contacts framework reads).
         public convenience init(session: ContactsAppSession, visibleTimeout: TimeInterval = 1) {
@@ -133,6 +153,8 @@
         struct CardPlan {
             var commands: [ScriptCommand] = []
             var skipped: [AppleWriteSkip] = []
+            /// `whose` forms of existing elements Contacts.app may not resolve by id.
+            var matches: [String: ElementMatch] = [:]
         }
 
         /// Plans one card (pure: no store, no events). `members` answers a
@@ -147,6 +169,7 @@
             }
             let fields = ScriptedCardPlan(before: card, after: after)
             plan.commands = fields.commands + groups
+            plan.matches = fields.matches
             if fields.unsupported.contains("im") { plan.skipped += imSkips(unit) }
             return plan
         }
@@ -206,30 +229,14 @@
                 return ids
             }
             members = cache
-            if let failure = try send(plan.commands, to: unit.cardID) { throw failure }
-            if plan.commands.contains(where: \.changesFields) { waitUntilVisible(unit.cardID, before: card) }
+            let sent = try send(plan.commands, to: unit.cardID, matches: plan.matches)
+            if let failure = sent.failure { throw failure }
+            let unresolved = try Self.unresolvedSkips(sent.unresolved, of: unit)
+            if sent.changedFields { waitUntilVisible(unit.cardID, before: card) }
             Self.update(&members, after: plan.commands, cardID: unit.cardID)
             result.applied += unit.operations
             result.scripted += unit.operations
-            result.skipped += plan.skipped
-        }
-
-        /// Sends `commands` to person `cardID`, then `save` — also after a
-        /// per-object error, so nothing is left unsaved in Contacts.app.
-        /// Returns that error; session-level errors throw.
-        private func send(_ commands: [ScriptCommand], to cardID: String) throws -> (any Error)? {
-            guard !commands.isEmpty else { return nil }
-            var failure: (any Error)?
-            for command in commands {
-                do {
-                    _ = try session.send(command.event(person: cardID))
-                } catch let error as ContactsScriptingError {
-                    failure = error
-                    break
-                }
-            }
-            _ = try session.send(ContactsScriptingEvents.save())
-            return failure
+            result.skipped += plan.skipped + unresolved
         }
 
         /// The cached group members after `commands`.

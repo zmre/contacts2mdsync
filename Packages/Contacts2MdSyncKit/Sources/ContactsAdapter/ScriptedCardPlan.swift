@@ -28,6 +28,34 @@
         }
     }
 
+    /// How to find a labeled value Contacts.app does not resolve by `id`
+    /// (instant messages, spike S16): `first <element> whose` every term
+    /// equals its value — the element's values before the write, updated as
+    /// commands change them.
+    public struct ElementMatch: Hashable, Sendable {
+        public var element: FourCharCode
+        public var terms: [ScriptProperty]
+
+        /// Creates a match.
+        public init(element: FourCharCode, terms: [ScriptProperty]) {
+            self.element = element
+            self.terms = terms
+        }
+
+        /// The match after `property` was set on the element.
+        func updating(_ property: ScriptProperty) -> ElementMatch {
+            var copy = self
+            copy.terms = terms.map { $0.code == property.code ? property : $0 }
+            return copy
+        }
+
+        /// `first <element> of person id P whose …`.
+        func specifier(person cardID: String) -> NSAppleEventDescriptor {
+            ContactsScriptingEvents.firstElement(
+                element, ofPerson: cardID, whose: terms.map { ($0.code, $0.value.descriptor) })
+        }
+    }
+
     /// One Contacts.app scripting command on one person (card).
     public enum ScriptCommand: Hashable, Sendable {
         /// `set <property> of person id P to V`.
@@ -67,6 +95,30 @@
             }
         }
 
+        /// The same command on the element `match` finds instead of `<element> id E`
+        /// (`nil` for commands that do not address an existing element).
+        public func event(person cardID: String, matching match: ElementMatch) -> NSAppleEventDescriptor? {
+            typealias Events = ContactsScriptingEvents
+            switch self {
+            case .setElement(_, _, let property):
+                return Events.set(
+                    Events.property(property.code, of: match.specifier(person: cardID)),
+                    toDescriptor: property.value.descriptor)
+            case .delete:
+                return Events.delete(match.specifier(person: cardID))
+            default:
+                return nil
+            }
+        }
+
+        /// The existing element this command addresses by id (`set … of <element> id E`, `delete`).
+        public var target: (element: FourCharCode, id: String)? {
+            switch self {
+            case .setElement(let element, let id, _), .delete(let element, let id): (element, id)
+            default: nil
+            }
+        }
+
         /// `true` for commands that change the card's own fields (not groups).
         var changesFields: Bool {
             switch self {
@@ -93,10 +145,18 @@
     ///
     /// Not expressible (reported in `unsupported`): an instant-message
     /// service Contacts.app has no `service type` for.
+    ///
+    /// Instant messages: Contacts.app answers `-1728` for `instant message id
+    /// E` (spike S16), so `matches` also gives each existing IM a `whose`
+    /// form (`user name` + `service type`, the values before the write) for
+    /// the writer to fall back to. An IM whose user name and service another
+    /// IM of the card shares gets none (`first … whose` could pick the other).
     public struct ScriptedCardPlan: Hashable, Sendable {
         public var commands: [ScriptCommand] = []
         /// Fields with a change scripting cannot express (`im`).
         public var unsupported: Set<String> = []
+        /// `whose` forms of existing elements, by element id (instant messages only).
+        public var matches: [String: ElementMatch] = [:]
 
         /// The commands from `before` to `after`.
         public init(before: CNContact, after: CNContact) {
@@ -121,6 +181,19 @@
             list(Code.instantMessage, before.instantMessageAddresses, after.instantMessageAddresses, field: "im") {
                 Self.instantMessage($0)
             }
+            matches = Self.instantMessageMatches(before.instantMessageAddresses)
+        }
+
+        /// The `whose` form of each IM in `ims` that it identifies uniquely.
+        static func instantMessageMatches(_ ims: [CNLabeledValue<CNInstantMessageAddress>]) -> [String: ElementMatch] {
+            let forms = ims.compactMap { entry in instantMessage(entry.value).map { (entry.identifier, $0) } }
+            var counts: [[ScriptProperty]: Int] = [:]
+            for (_, terms) in forms { counts[terms, default: 0] += 1 }
+            var matches: [String: ElementMatch] = [:]
+            for (id, terms) in forms where counts[terms] == 1 {
+                matches[id] = ElementMatch(element: ContactsScriptingEvents.CardCode.instantMessage, terms: terms)
+            }
+            return matches
         }
 
         // MARK: Single-valued fields
