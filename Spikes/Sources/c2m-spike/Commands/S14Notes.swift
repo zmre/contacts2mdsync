@@ -358,14 +358,16 @@ struct S14Notes: ParsableCommand {
 /// Report, provider session and Contacts.app lifecycle for one command.
 final class S14Run {
     let report = S13Report()
-    let session = S14Session()
+    let session: S14Session
     private var appBefore = ContactsAppState.now()
     private var appAfterStart: ContactsAppState?
     private var scriptingInstance: ContactsScripting?
     /// Something was written or tried (the report is worth keeping).
     var attempted = false
 
-    init(title: String) {
+    /// `session`: S16 passes one over a shared `ContactsAppSession` (the card writer's).
+    init(title: String, session: S14Session = S14Session()) {
+        self.session = session
         report.say("c2m-spike \(title)  \(Stamp.iso())")
     }
 
@@ -489,7 +491,11 @@ final class S14Run {
 /// The production provider, called off the main thread (as the app does)
 /// while the main run loop keeps turning (NSWorkspace / NSRunningApplication).
 final class S14Session: Sendable {
-    let provider = ScriptingNotesProvider()
+    let provider: ScriptingNotesProvider
+
+    init(provider: ScriptingNotesProvider = ScriptingNotesProvider()) {
+        self.provider = provider
+    }
 
     func call<T: Sendable>(_ body: @escaping @Sendable (ScriptingNotesProvider) throws -> T) throws -> T {
         let provider = self.provider

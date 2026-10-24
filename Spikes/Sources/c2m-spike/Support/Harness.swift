@@ -20,8 +20,10 @@ enum Harness {
     /// Every scheme that identifies a harness marker, current first.
     static let markerSchemes = [markerScheme, legacyMarkerScheme]
     /// Exact names of the scratch groups the harness may create and delete,
-    /// by spike tag (S13, S15).
-    static let scratchGroupsBySpike: [String: String] = ["s13": "ZZ Spike S13 Group", "s15": "ZZ Spike S15 Group"]
+    /// by spike tag (S13, S15, S16).
+    static let scratchGroupsBySpike: [String: String] = [
+        "s13": "ZZ Spike S13 Group", "s15": "ZZ Spike S15 Group", "s16": "ZZ Spike S16 Group",
+    ]
     static let scratchGroupNames = Set(scratchGroupsBySpike.values)
 
     /// Keys needed to evaluate `isHarness`.
@@ -219,7 +221,7 @@ struct SafeWriter {
         try execute(request)
     }
 
-    // MARK: Scratch groups (S13, S15)
+    // MARK: Scratch groups (S13, S15, S16)
 
     /// Creates a scratch group. `name` must start with the harness name prefix
     /// and equal one of `Harness.scratchGroupNames`. Returns the new group id.

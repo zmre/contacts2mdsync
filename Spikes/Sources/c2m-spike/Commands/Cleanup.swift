@@ -4,8 +4,9 @@ import Foundation
 
 /// Deletes harness cards only: name prefix AND marker URL must both match,
 /// re-verified on a fresh fetch immediately before each delete. With no
-/// `--spike`, `--spike s13` or `--spike s15`, also deletes that spike's scratch
-/// group ("ZZ Spike S13 Group" / "ZZ Spike S15 Group"), but only a group with
+/// `--spike`, `--spike s13`, `--spike s15` or `--spike s16`, also deletes that
+/// spike's scratch group ("ZZ Spike S13 Group" / "ZZ Spike S15 Group" /
+/// "ZZ Spike S16 Group"), but only a group with
 /// exactly that name whose members are all harness cards (or none), re-checked
 /// right before the delete.
 ///
@@ -19,7 +20,7 @@ struct Cleanup: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Delete scratch cards created by this harness (name prefix AND marker URL both required).")
 
-    @Option(help: "Only delete cards of this spike tag (s1, s3, s4, s5, s12, s13, s14, s15).")
+    @Option(help: "Only delete cards of this spike tag (s1, s3, s4, s5, s12, s13, s14, s15, s16).")
     var spike: String?
 
     @Flag(help: "Do not fall back to Contacts.app scripting when a CNSaveRequest delete fails (noted cards).")

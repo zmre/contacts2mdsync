@@ -77,6 +77,10 @@ struct HarnessBatchGuard {
     let store: CNContactStore
     let spike: String
     let allowedGroupNames: Set<String>
+    /// Cards on which an `image` edit is allowed (S16: only a card that has a
+    /// note, so the router sends it to Contacts.app scripting, which skips it).
+    /// Empty for S13/S15: every image edit is refused.
+    var imageAllowedCardIDs: Set<String> = []
 
     /// Throws `SpikeError` (SAFETY) unless every operation targets harness
     /// material only. Nothing is written by this function.
@@ -157,9 +161,11 @@ struct HarnessBatchGuard {
                         "SAFETY: \(Self.describe(operation)): URL list edit would remove the harness marker. "
                             + "Refusing the whole batch.")
                 }
+            case .image where imageAllowedCardIDs.contains(card.identifier):
+                break
             case .note, .image:
                 throw SpikeError(
-                    "SAFETY: \(Self.describe(operation)): note/image edits are out of scope for S13. "
+                    "SAFETY: \(Self.describe(operation)): note/image edits are out of scope here. "
                         + "Refusing the whole batch.")
             default: break
             }

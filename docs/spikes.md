@@ -19,6 +19,7 @@ Each spike is a throwaway target under `Spikes/` with a written result here. Run
 | S13| Real M3 write path on scratch cards: does `CNContactStoreAdapter.apply` → `CardWriter` (behind a harness-only guard) add, edit and delete list values, write single-valued fields through to linked cards, stamp, manage group membership and edit relations correctly on real iCloud and Google cards? Labeled-value ids kept, no unified save, `transactionAuthor` excluded from history, values intact after a server round trip? | Go/no-go for `apple_writes: enabled` on the real address book. | `run`: every row PASS (WARN in steps 8–9 only if explained by a concurrent Google re-save). `check` after 15–30 min: values, stamps and ids survive, or each server rewrite is understood and covered by comparison keys. | todo |
 | S14| Production notes provider on the real Contacts.app: does `ScriptingNotesProvider` (raw Apple Events, `LiveContactsApp`) read every card's note identically to the S12 `NSAppleScript` reader (bulk and per-card paths, ids = CN card ids), write notes exactly (CRLF/Unicode/quotes/backslashes/emoji, ~49k chars, clear, both cards of a linked pair in one call), fail per card on an id that does not exist, and launch Contacts.app hidden and quit it after? | Go/no-go for notes scripting in the app (architecture §8 "As implemented (notes scripting)"). | `check`: every row PASS (parity by per-card SHA-256, no note text printed). `write`: every row PASS; WARN in case 1 only if Contacts rewrites line endings (then the body normalization covers it); CN identifiers and other fields unchanged, history only on target cards. | **pass** (2026-10-22; launch-hidden cosmetic fail) |
 | S15| CNSaveRequest on cards that HAVE a note, without the notes entitlement: reports (forums 723695, FB23452026, mattt/iMCP#148) say updates fail with `NSCocoaErrorDomain 134092` "Unhandled error … occurred during faulting". S13 passed only because its scratch cards had no notes; ~1,572 of 3,781 real cards have one. Exactly which operations fail (names/job title, add email, in-place phone edit, group add/remove, URLs + stamp, delete), does a failed save leave partial changes, do cheap variations (minimal keys, `shouldRefetchContacts = false`, fresh store, `CNContactNoteKey`) avoid it, does the kit adapter fail, and can Contacts.app scripting do each failing operation instead (ids kept, history only on the target, scripting labeled-value ids = `CNLabeledValue.identifier`?) | Go/no-go for `apple_writes` on a real address book without the entitlement; which writes must go through Contacts.app scripting (architecture §6/§8). | `run`: a matrix of card × operation × path. Decision: for every operation that fails with 134092 on noted cards, either a scripting path that verifies (fields, labeled-value ids, card id, history only on target, note intact) or the planner refuses that write for noted cards. No `PARTIAL` after a failed save. | **done** (2026-10-24) |
+| S16| Production write routing on scratch cards: does `CardWriteRouter` (real `CNContactStoreAdapter` + real `ScriptingCardWriter`, one `ContactsAppSession` shared with the notes provider, `cardNotes` from the provider) route and write correctly against the real Contacts.app? Noted card: names/job title, in-place phone edit, new email, URL delete + stamp, group add/remove, in-place address / related name / social profile / IM edits, clearing a field, an unlabeled value; what raw `_$!<Work>!$_` / `_$!<Mobile>!$_` / custom labels are stored as; element ids kept; image and birthday skipped; un-noted card via the framework (removeMember via scripting); one history event per card per batch | Go/no-go for the write routing in architecture §6 on a real address book without the notes entitlement; closes the S15 open items. | `run`: every row PASS (WARN in step 8 only if explained by concurrent sync); the label and element-id answers recorded; B's note byte-exact at the end; Contacts.app left as found. | todo |
 
 ## Results (2026-10-21 UTC run)
 
@@ -355,6 +356,38 @@ Run the steps in this order. Steps 2–7 touch the real address book, but only s
    - the `ID` rows: do Contacts.app email/phone/url ids equal `CNLabeledValue.identifier`?
 
 4. **Clean up:** `c2m-spike cleanup --spike s15 --yes`. The noted cards (B, C-iCloud, and D if it survived) can't be deleted through CNSaveRequest, so `cleanup` deletes them through Contacts.app scripting after checking both sides. Then check iCloud.com and contacts.google.com for leftover "ZZ Spike S15" cards.
+
+### S16 run steps
+
+`c2m-spike s16-scripted-writes` runs the app's real write routing, `CardWriteRouter` → `ScriptingCardWriter` / `CNContactStoreAdapter`, against the real Contacts store and Contacts.app. Writes go only to `ZZ Spike S16 …` scratch cards and `ZZ Spike S16 Group`: before every `router.apply`, each target is checked in CNContactStore (the S13 batch guard, spike tag `s16`) and in Contacts.app (the S14 guard); one failing target refuses the whole batch. iCloud only; no Google account and no waiting needed. For what each step checks, see [`Spikes/README.md`](../Spikes/README.md#s16-the-production-write-routing-cardwriterouter--scriptingcardwriter-on-scratch-cards).
+
+1. **Rebuild** (step 1 above). S16 also links `SyncEngine` from the working-tree kit.
+
+2. **Setup.** Creates B (note, set by the production `ScriptingNotesProvider`; emails, phones, URLs, address, related name, Twitter profile, Skype IM) and A (same fields, no note), and the scratch group.
+
+   ```sh
+   c2m-spike s16-scripted-writes setup          # dry run
+   c2m-spike s16-scripted-writes setup --yes    # → Spikes/results/s16-setup-<date>.md
+   ```
+
+3. **Run.**
+
+   ```sh
+   c2m-spike s16-scripted-writes run            # dry run: CNContactStore reads only
+   c2m-spike s16-scripted-writes run --yes      # PASS/FAIL table → Spikes/results/s16-<date>.md
+   ```
+
+   Look for these:
+
+   - steps 1–5 and 7 "routed via Contacts.app scripting", step 6 "routed via the Contacts framework" (and A's `removeMember` via scripting);
+   - the labels: step-1 email = `CNLabelWork`? step-2 phones = `CNLabelPhoneNumberMobile` and `Summer`? step 5: the CN label of an email made with no label;
+   - step 4: address, related name, social profile and IM edited under the same labeled-value id;
+   - step 8: one `UpdateContactEvent` per card per batch, none for step 7, none on other cards;
+   - step 9: B's note byte-exact.
+
+   If `run` reports `scripting(not-determined)`, run `c2m-spike s14-notes check --request-permission` once and allow the prompt.
+
+4. **Clean up:** `c2m-spike cleanup --spike s16 --yes`. B has a note, so `cleanup` deletes it through Contacts.app scripting after checking both sides; it also deletes `ZZ Spike S16 Group`. Then check iCloud.com for leftover "ZZ Spike S16" cards.
 
 ---
 
@@ -740,4 +773,4 @@ Results: `Spikes/results/s15-2026-10-24T1003.md` (iCloud only; Google account of
 - Scripting `id`s of emails/phones/urls **equal `CNLabeledValue.identifier`**; `phone id <CN id>` edits in place keeping the id; `make new email/url` return the new id. `group id <CNGroup.identifier>` resolves.
 - Contacts' `CoreData: error … 134092` lines are printed to stderr by the framework on each failed save.
 - Design consequence: card writes route through Contacts.app scripting for cards that have a note (or when a CN save fails with 134092), and group removals always go through scripting (CN `removeMember` is a silent no-op). Without Automation permission those writes are held with a clear reason.
-- Implemented (2026-10-24): `CardWriteRouter` + `ScriptingCardWriter`, architecture §6 "Write routing". Still to check on scratch cards with the production writer: the raw-event forms (`make new … at end of …`, `delete … id`, `add/remove … group`), what label a raw `_$!<Work>!$_` is stored as, and element ids for addresses, related names, social profiles and IMs.
+- Implemented (2026-10-24): `CardWriteRouter` + `ScriptingCardWriter`, architecture §6 "Write routing". Still to check on scratch cards with the production writer: the raw-event forms (`make new … at end of …`, `delete … id`, `add/remove … group`), what label a raw `_$!<Work>!$_` is stored as, and element ids for addresses, related names, social profiles and IMs. These are spike S16 (`c2m-spike s16-scripted-writes`, [run steps](#s16-run-steps)).
