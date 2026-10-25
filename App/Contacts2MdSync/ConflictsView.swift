@@ -24,7 +24,7 @@ struct ConflictsView: View {
                 }
             } else {
                 HStack(spacing: 0) {
-                    list.frame(width: 250)
+                    list.frame(minWidth: 200, idealWidth: 240, maxWidth: 240)
                     Divider()
                     if let record = current {
                         ConflictDetail(
@@ -36,6 +36,9 @@ struct ConflictsView: View {
                             advance(from: record)
                         }
                         .id(record.id)
+                        // Never wider than the space left: an HStack wider than
+                        // the detail column is centred and slides under the sidebar.
+                        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
                 }
             }
@@ -69,14 +72,7 @@ struct ConflictsView: View {
 
     private var list: some View {
         List(records, selection: $selection) { record in
-            VStack(alignment: .leading, spacing: 2) {
-                Text(record.title).lineLimit(1)
-                Text("\(record.fields.count) \(record.fields.count == 1 ? "field" : "fields") · \(record.folderText)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            .tag(record.id)
+            ConflictRow(record: record).tag(record.id)
         }
     }
 
@@ -128,7 +124,39 @@ struct ConflictsView: View {
     }
 }
 
-/// One record's fields with Keep choices.
+/// A row of the conflicts list: name, what changed on which side, when, folder.
+private struct ConflictRow: View {
+    let record: UIConflictRecord
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(record.title).lineLimit(1)
+            Text(record.listSummary)
+                .font(.caption)
+                .lineLimit(2)
+            Text(details)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .monospacedDigit()
+        }
+        .padding(.vertical, 2)
+        .help(record.changeLines())
+    }
+
+    /// `2 fields · Since Today 9:02 AM · Work/`.
+    private var details: String {
+        let count = record.fields.count
+        var parts = ["\(count) \(count == 1 ? "field" : "fields")"]
+        if let since = record.since { parts.append("Since \(UIFormat.relativeDay(since))") }
+        parts.append(record.folderText)
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// One record's fields with Keep choices. Lays out inside the detail column
+/// at any width: the field table stacks below `ConflictFieldsView.tableWidth`
+/// and the action bar wraps.
 private struct ConflictDetail: View {
     let record: UIConflictRecord
     @Binding var choices: [String: UIConflictResolution]
@@ -136,6 +164,7 @@ private struct ConflictDetail: View {
     let apply: () async -> Void
     let skip: () -> Void
     @State private var comparing: BodyComparison?
+    @State private var isCompact = false
 
     var body: some View {
         content.sheet(item: $comparing) { comparison in
@@ -144,58 +173,14 @@ private struct ConflictDetail: View {
     }
 
     private var content: some View {
-        ScrollView {
+        // Captured, not read inside the (Sendable) geometry closure.
+        let compactBelow = ConflictFieldsView.tableWidth + 2 * Self.padding
+        return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(record.title).font(.title2.weight(.semibold))
-                        Spacer()
-                        Text(record.path).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                    }
-                    if let since = record.since {
-                        Text("Changed on both sides since \(UIFormat.relativeDay(since))")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                }
-                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
-                    GridRow {
-                        Text("Field")
-                        Text("Previous")
-                        Text("Contacts")
-                        Text("Markdown")
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    ForEach(record.fields) { field in
-                        Divider().gridCellColumns(4)
-                        GridRow {
-                            VStack(alignment: .leading) {
-                                Text(field.name).help(field.fieldPath)
-                                if let label = field.label { Text(label).font(.caption).foregroundStyle(.secondary) }
-                            }
-                            Text(field.previous ?? "—").foregroundStyle(.secondary)
-                            Text(field.contacts)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(field.markdown)
-                                if let contacts = field.contactsText, let markdown = field.markdownText {
-                                    Button("Compare…") {
-                                        comparing = BodyComparison(contacts: contacts, markdown: markdown)
-                                    }
-                                    .controlSize(.small)
-                                    .help("Show both notes line by line")
-                                }
-                            }
-                        }
-                        GridRow {
-                            Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
-                            Picker("Keep", selection: choice(for: field)) {
-                                ForEach(field.options) { Text($0.title).tag(Optional($0)) }
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .gridCellColumns(3)
-                        }
+                header
+                ConflictFieldsView(fields: record.fields, isCompact: isCompact, choices: $choices) { field in
+                    if let contacts = field.contactsText, let markdown = field.markdownText {
+                        comparing = BodyComparison(contacts: contacts, markdown: markdown)
                     }
                 }
                 Text(
@@ -205,29 +190,82 @@ private struct ConflictDetail: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Menu("Choose for All Fields") {
-                        ForEach(Array(UIConflictResolution.allCases.enumerated()), id: \.element) { index, resolution in
-                            Button(resolution.title) { chooseAll(resolution) }
-                                .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
-                        }
-                    }
-                    .fixedSize()
-                    Spacer()
-                    Button("Skip", action: skip)
-                    Button("Apply to \(record.title)") { Task { await apply() } }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.return, modifiers: .command)
-                        .disabled(!canApply || choices.count < record.fields.count)
-                        .help(canApply ? "" : ReviewCapabilities.unsupportedHelp)
-                }
+                actionBar
             }
-            .padding(20)
+            .padding(Self.padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onGeometryChange(for: Bool.self) { proxy in
+            proxy.size.width < compactBelow
+        } action: {
+            isCompact = $0
         }
     }
 
-    private func choice(for field: UIConflictField) -> Binding<UIConflictResolution?> {
-        Binding(get: { choices[field.id] }, set: { choices[field.id] = $0 })
+    private static let padding: CGFloat = 20
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(record.title).font(.title2.weight(.semibold)).lineLimit(2)
+            Text(record.path)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(record.path)
+            Text(changedLine)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var changedLine: String {
+        let count = record.fields.count
+        let fields = count == 1 ? "1 field" : "\(count) fields"
+        let since = record.since.map { " since \(UIFormat.relativeDay($0))" } ?? ""
+        return "\(fields) changed in both Contacts and Markdown\(since). Choose what to keep for each."
+    }
+
+    /// Choose for All Fields on the left, Skip / Apply on the right; when the
+    /// column is narrow they wrap instead (one copy each, so the ⌘1–3 and
+    /// ⌘↩ shortcuts are registered once).
+    @ViewBuilder private var actionBar: some View {
+        if isCompact {
+            FlowLayout {
+                chooseAllMenu
+                Button("Skip", action: skip)
+                applyButton
+            }
+        } else {
+            HStack {
+                chooseAllMenu
+                Spacer()
+                Button("Skip", action: skip)
+                applyButton
+            }
+        }
+    }
+
+    private var chooseAllMenu: some View {
+        Menu("Choose for All Fields") {
+            ForEach(Array(UIConflictResolution.allCases.enumerated()), id: \.element) { index, resolution in
+                Button(resolution.title) { chooseAll(resolution) }
+                    .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
+            }
+        }
+        .fixedSize()
+    }
+
+    private var applyButton: some View {
+        Button {
+            Task { await apply() }
+        } label: {
+            Text("Apply to \(record.title)").lineLimit(1).truncationMode(.middle)
+        }
+        .buttonStyle(.borderedProminent)
+        .keyboardShortcut(.return, modifiers: .command)
+        .disabled(!canApply || choices.count < record.fields.count)
+        .help(canApply ? "Record these choices; the next sync applies them" : ReviewCapabilities.unsupportedHelp)
     }
 
     private func chooseAll(_ resolution: UIConflictResolution) {
@@ -308,3 +346,55 @@ private struct BodyComparisonView: View {
         }
     }
 }
+
+// MARK: - Previews
+
+private enum ConflictPreviewData {
+    static let body =
+        "Met at the 2019 conference in Lisbon; talked about distributed systems and the office move.\n"
+        + "Follow up about the contract renewal before the end of the quarter."
+
+    static let record = UIConflictRecord(
+        recordID: UUID(), title: "Jane Doe", path: "Work/Clients/Europe/Jane Doe.md",
+        since: Date(timeIntervalSinceNow: -3 * 86_400), cardIDs: [],
+        fields: [
+            UIConflictField(
+                id: "conflict-job", name: "Job", previous: "Engineer", contacts: "Senior Engineer",
+                markdown: "Staff Engineer, Platform Infrastructure and Developer Productivity",
+                options: [.keepContacts, .keepMarkdown], fieldPath: "job_title",
+                since: Date(timeIntervalSinceNow: -3 * 86_400)),
+            UIConflictField(
+                id: "conflict-phone", name: "Phone", label: "mobile", previous: "+1 555 0100",
+                contacts: "+1 555 0199", markdown: UIConflictField.removedText,
+                options: [.keepContacts, .keepMarkdown, .keepBoth], fieldPath: "phones[mobile]",
+                since: Date(timeIntervalSinceNow: -86_400)),
+            UIConflictField(
+                id: "conflict-body", name: "Notes", previous: nil, contacts: "Met at the 2019 conference in Lisbon…",
+                markdown: "Met at the 2019 conference in Lisbon (edited)…",
+                options: [.keepContacts, .keepMarkdown, .keepBoth], fieldPath: "body",
+                contactsText: body, markdownText: body + "\nAlso: prefers email."),
+        ])
+}
+
+/// The Conflicts screen's list + detail in a detail column of `width`.
+private struct ConflictPreview: View {
+    let width: CGFloat
+    @State private var choices: [String: UIConflictResolution] = [:]
+
+    var body: some View {
+        HStack(spacing: 0) {
+            List([ConflictPreviewData.record]) { ConflictRow(record: $0) }
+                .frame(minWidth: 200, idealWidth: 240, maxWidth: 240)
+            Divider()
+            ConflictDetail(record: ConflictPreviewData.record, choices: $choices, canApply: true) {
+            } skip: {
+            }
+            .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(width: width, height: 640)
+    }
+}
+
+#Preview("Conflicts, wide") { ConflictPreview(width: 1_100) }
+#Preview("Conflicts, narrow") { ConflictPreview(width: 560) }
+#Preview("Conflicts, inspector open at minimum width") { ConflictPreview(width: 380) }

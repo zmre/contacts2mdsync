@@ -20,18 +20,22 @@ struct DuplicatesView: View {
                 }
             } else {
                 HStack(spacing: 0) {
-                    groupList.frame(width: 250)
+                    groupList.frame(minWidth: 200, idealWidth: 240, maxWidth: 240)
                     Divider()
                     if let group = groups.first(where: { $0.id == selectedID }) ?? groups.first {
-                        if group.kind == .contacts {
-                            // Keyed by membership too: cards linked in Contacts keep the
-                            // item id but renumber the members a partition refers to.
-                            ClusterDetail(model: model, group: group)
-                                .id(group.memberIdentity)
-                        } else {
-                            DuplicateDetail(model: model, group: group)
-                                .id(group.id)
+                        Group {
+                            if group.kind == .contacts {
+                                // Keyed by membership too: cards linked in Contacts keep the
+                                // item id but renumber the members a partition refers to.
+                                ClusterDetail(model: model, group: group)
+                                    .id(group.memberIdentity)
+                            } else {
+                                DuplicateDetail(model: model, group: group)
+                                    .id(group.id)
+                            }
                         }
+                        // Never wider than the space left (see ConflictsView).
+                        .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
                 }
             }

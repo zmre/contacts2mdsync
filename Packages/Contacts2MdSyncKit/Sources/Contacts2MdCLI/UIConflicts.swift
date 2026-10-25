@@ -68,10 +68,13 @@ public struct UIConflictField: Identifiable, Hashable, Sendable {
     /// previews), for the line comparison; `nil` for other fields.
     public var contactsText: String?
     public var markdownText: String?
+    /// When this conflict was first seen (`nil`: unknown).
+    public var since: Date?
 
-    /// Builds the row for `conflict`.
-    public init(_ conflict: SyncConflict) {
+    /// Builds the row for `conflict`, first seen at `since`.
+    public init(_ conflict: SyncConflict, since: Date? = nil) {
         id = conflict.id
+        self.since = since
         name = Self.displayName(conflict.field)
         fieldPath = conflict.fieldPath
         // Show labels only when they are what differs (label conflicts).
@@ -88,7 +91,8 @@ public struct UIConflictField: Identifiable, Hashable, Sendable {
     /// Creates a field (previews and tests).
     public init(
         id: String, name: String, label: String? = nil, previous: String? = nil, contacts: String, markdown: String,
-        options: [UIConflictResolution], fieldPath: String? = nil
+        options: [UIConflictResolution], fieldPath: String? = nil, since: Date? = nil,
+        contactsText: String? = nil, markdownText: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -98,11 +102,17 @@ public struct UIConflictField: Identifiable, Hashable, Sendable {
         self.markdown = markdown
         self.options = options
         self.fieldPath = fieldPath ?? name
+        self.since = since
+        self.contactsText = contactsText
+        self.markdownText = markdownText
     }
+
+    /// Shown for a side that deleted the value.
+    public static let removedText = "(removed)"
 
     /// `value`, `label: value`, or `(removed)` for an absent side.
     static func text(_ side: ConflictSide, withLabel: Bool) -> String {
-        guard let value = side.value else { return "(removed)" }
+        guard let value = side.value else { return removedText }
         guard withLabel, let label = side.label, !label.isEmpty else { return value }
         return "\(label): \(value)"
     }
@@ -170,7 +180,8 @@ public struct UIConflictRecord: Identifiable, Hashable, Sendable {
             guard let conflicts = byRecord[recordID], let first = conflicts.first?.0 else { return nil }
             return UIConflictRecord(
                 recordID: recordID, title: first.title, path: first.path, since: conflicts.map(\.1).min(),
-                cardIDs: records.records[recordID]?.cardIDs ?? [], fields: conflicts.map { UIConflictField($0.0) })
+                cardIDs: records.records[recordID]?.cardIDs ?? [],
+                fields: conflicts.map { UIConflictField($0.0, since: $0.1) })
         }
         .sorted { ($0.title.localizedLowercase, $0.path) < ($1.title.localizedLowercase, $1.path) }
     }
@@ -204,6 +215,71 @@ extension UIConflictRecord {
         fields.filter { $0.options.contains(preferred) }.map {
             UIConflictChoice(recordID: id, fieldID: $0.id, resolution: preferred)
         }
+    }
+}
+
+// MARK: - Change summaries
+
+extension UIConflictField {
+    /// `Phone (mobile)`, or just the name.
+    public var title: String { label.map { "\(name) (\($0))" } ?? name }
+
+    /// What each side did since the last sync:
+    /// `Contacts → “Sr Engineer”, Markdown → “Staff Eng”`. A side that
+    /// deleted the value reads `Contacts removed it`; with no previous value,
+    /// `Contacts added “…”`. Values are cut to their first line and `limit`
+    /// characters (the screen shows the full text in tooltips and Compare…).
+    public func changeSummary(limit: Int = 40) -> String {
+        Self.change("Contacts", contacts, previous: previous, limit: limit) + ", "
+            + Self.change("Markdown", markdown, previous: previous, limit: limit)
+    }
+
+    /// `Changed in both since Today 9:02 AM: Contacts → “X”, Markdown → “Y”`.
+    public func changeLine(
+        now: Date = Date(), calendar: Calendar = .current, locale: Locale = .current, limit: Int = 40
+    ) -> String {
+        let when = since.map { " since " + UIFormat.relativeDay($0, now: now, calendar: calendar, locale: locale) }
+        return "Changed in both\(when ?? ""): \(changeSummary(limit: limit))"
+    }
+
+    static func change(_ side: String, _ value: String, previous: String?, limit: Int) -> String {
+        if value == removedText { return "\(side) removed it" }
+        if value == previous { return "\(side) unchanged" }
+        let quoted = "“\(clip(value, limit: limit))”"
+        return previous == nil ? "\(side) added \(quoted)" : "\(side) → \(quoted)"
+    }
+
+    /// The first non-empty line of `text`, at most `limit` characters; `…`
+    /// marks anything cut (more characters or more lines).
+    public static func clip(_ text: String, limit: Int) -> String {
+        let lines = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard let first = lines.first(where: { !$0.isEmpty }) else { return text }
+        if first.count > limit {
+            return first.prefix(max(limit - 1, 1)).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        return lines.count(where: { !$0.isEmpty }) > 1 ? first + " …" : first
+    }
+}
+
+extension UIConflictRecord {
+    /// The list row's summary: for one field `Job: Contacts → “X”, Markdown
+    /// → “Y”`, else `Job, Phone and Notes changed in both`.
+    public var listSummary: String {
+        if fields.count == 1, let field = fields.first {
+            return "\(field.title): \(field.changeSummary(limit: 24))"
+        }
+        var names: [String] = []
+        for name in fields.map(\.name) where !names.contains(name) { names.append(name) }
+        guard let last = names.last else { return "Changed in both" }
+        let list = names.count > 1 ? names.dropLast().joined(separator: ", ") + " and " + last : last
+        return "\(list) changed in both"
+    }
+
+    /// Every field's change line (`Job: Changed in both since …`), one per
+    /// line, for the list row's tooltip.
+    public func changeLines(now: Date = Date(), calendar: Calendar = .current, locale: Locale = .current) -> String {
+        fields.map { "\($0.title): \($0.changeLine(now: now, calendar: calendar, locale: locale, limit: 80))" }
+            .joined(separator: "\n")
     }
 }
 

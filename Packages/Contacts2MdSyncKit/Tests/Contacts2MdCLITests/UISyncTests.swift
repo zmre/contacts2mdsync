@@ -61,6 +61,8 @@ struct UISyncTests {
         #expect(job.contacts == "Contacts")
         #expect(job.markdown == "Markdown")
         #expect(job.previous == "Engineer")
+        #expect(job.since == harness.clock.now)
+        #expect(job.changeSummary() == "Contacts → “Contacts”, Markdown → “Markdown”")
         #expect(job.options == [.keepContacts, .keepMarkdown])
         #expect(job.id.hasPrefix("conflict-"))
         let email = try #require(ann.fields.first { $0.name == "Email" })

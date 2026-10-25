@@ -49,7 +49,9 @@ struct MainView: View {
                 .navigationSplitViewColumnWidth(min: 190, ideal: 210)
         } detail: {
             detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // minWidth 0 + leading: a screen wider than the column can never
+                // widen it or be centred out from under the sidebar's edge.
+                .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 .safeAreaInset(edge: .top, spacing: 0) { banners }
                 .inspector(isPresented: $model.isInspectorPresented) {
                     InspectorView(model: model)

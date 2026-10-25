@@ -98,9 +98,9 @@ struct ClusterDetail: View {
         }
     }
 
-    /// Actions on the selected cards.
+    /// Actions on the selected cards; wraps in a narrow detail column.
     private var selectionBar: some View {
-        HStack(spacing: 8) {
+        FlowLayout(spacing: 8) {
             Text(selection.isEmpty ? "No cards selected" : "\(selection.count) selected")
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
@@ -114,7 +114,6 @@ struct ClusterDetail: View {
             Button("Don't Sync") { edit { $0.dontSync(selection) } }
                 .disabled(selection.isEmpty)
                 .help("Leave the selected cards out of sync; nothing is deleted, but a note they have stops syncing")
-            Divider().frame(height: 16)
             Button("Select All") { selection = Set(cards.compactMap(\.member)) }
                 .keyboardShortcut("a", modifiers: .command)
             Button("Select None") { selection = [] }
@@ -124,9 +123,11 @@ struct ClusterDetail: View {
     }
 
     /// The resulting partition, then Undo / Reset / Apply and the shortcuts.
+    /// Chips and button groups wrap, so a big cluster or a narrow detail
+    /// column never makes the screen wider than the column.
     private var partitionBar: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
+            FlowLayout(spacing: 6, lineSpacing: 6) {
                 ForEach(partition.chips) { chip in
                     Text(chip.text)
                         .font(.callout)
@@ -147,29 +148,32 @@ struct ClusterDetail: View {
                     }
                 }
             }
-            HStack(spacing: 8) {
-                Button("Apply") { confirming = .apply }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!partition.isComplete)
-                    .help(
-                        partition.isComplete
-                            ? "Record this answer; the next sync applies it"
-                            : "Every card needs a person or Don't Sync")
-                Button("Undo") { partition.undo() }
-                    .disabled(!partition.canUndo)
-                    .keyboardShortcut("z", modifiers: .command)
-                Button("Reset") {
-                    partition.reset()
-                    selection = []
+            FlowLayout(spacing: 24) {
+                HStack(spacing: 8) {
+                    Button("Apply") { confirming = .apply }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .disabled(!partition.isComplete)
+                        .help(
+                            partition.isComplete
+                                ? "Record this answer; the next sync applies it"
+                                : "Every card needs a person or Don't Sync")
+                    Button("Undo") { partition.undo() }
+                        .disabled(!partition.canUndo)
+                        .keyboardShortcut("z", modifiers: .command)
+                    Button("Reset") {
+                        partition.reset()
+                        selection = []
+                    }
+                    .disabled(!partition.isEdited)
                 }
-                .disabled(!partition.isEdited)
-                Spacer()
-                Button("Not Duplicates") { confirming = .notDuplicates }
-                    .help("Every card is a different person (remembered)")
-                Button(actions.ignoreTitle) { actions.ignore(group.id) }
-                    .help(actions.ignoreHelp)
-                if isWorking { ProgressView().controlSize(.small) }
+                HStack(spacing: 8) {
+                    Button("Not Duplicates") { confirming = .notDuplicates }
+                        .help("Every card is a different person (remembered)")
+                    Button(actions.ignoreTitle) { actions.ignore(group.id) }
+                        .help(actions.ignoreHelp)
+                    if isWorking { ProgressView().controlSize(.small) }
+                }
             }
         }
     }
