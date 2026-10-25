@@ -167,7 +167,7 @@ struct ScriptingCardWriterTests {
         #expect(app.saved(Self.cardID).flatMap(AppleContactMapper.stampID(of:)) == nil)
     }
 
-    @Test("addresses, related names, social profiles and IM edits keep ids; unknown IM service is skipped")
+    @Test("addresses, related names and social profiles keep ids; the IM edit is skipped (not scriptable)")
     func structured() throws {
         let card = Self.card()
         card.socialProfiles = [
@@ -182,7 +182,8 @@ struct ScriptingCardWriterTests {
         let update = AppleWriteOperation.update(cardID: Self.cardID, edits: edits)
         let result = try Self.writer(app).apply([update])
         #expect(result.failed == [])
-        #expect(result.skipped.map(\.edit) == [edits[3]], "Contacts.app has no service type for this IM service")
+        #expect(result.skipped.map(\.edit) == [edits[3]], "Contacts.app refuses every IM change (S16)")
+        #expect(result.skipped.first?.reason == CardScriptingSupport.instantMessageReason)
         let saved = try #require(app.saved(Self.cardID))
         #expect(saved.postalAddresses.first?.identifier == card.postalAddresses.first?.identifier)
         #expect(saved.postalAddresses.first?.value.street == "2 Oak Ave")
@@ -191,10 +192,10 @@ struct ScriptingCardWriterTests {
         #expect(saved.contactRelations.first?.value.name == "Beatrice")
         #expect(saved.socialProfiles.first?.identifier == card.socialProfiles.first?.identifier)
         #expect(saved.socialProfiles.first?.value.username == "ann2")
-        #expect(saved.instantMessageAddresses.map(\.value.username) == ["ann"], "the unknown service is not added")
+        #expect(saved.instantMessageAddresses.map(\.value.username) == ["ann"], "the IMs are left as they were")
     }
 
-    /// An address moved, a relation renamed, a social handle changed, an IM kept plus one with an unknown service.
+    /// An address moved, a relation renamed, a social handle changed, an IM kept plus a new one.
     static func structuredEdits(_ sister: RelationshipRef) -> [CardEdit] {
         [
             .list(
@@ -256,23 +257,26 @@ struct ScriptingCardWriterSessionTests {
     static func card() -> CNMutableContact { ScriptingCardWriterTests.card() }
     static func writer(_ app: FakeScriptingApp) -> ScriptingCardWriter { ScriptingCardWriterTests.writer(app) }
 
-    @Test("an element error fails that card (named, via Contacts.app) but still saves; other cards are written")
+    @Test("a person-level error fails that card (named, via Contacts.app) but still saves; other cards are written")
     func perCardFailure() throws {
         let first = Self.card()
         let second = Self.card()
-        let app = FakeScriptingApp(cards: [Self.cardID: first, "C2:ABPerson": second])
+        let app = FakeScriptingApp(cards: [Self.cardID: first, "C2:ABPerson": second], groups: ["G1": []])
         app.withState { _ = $0.failing.insert(Self.cardID) }
         let edits: [CardEdit] = [
-            .scalar(.jobTitle, "CTO"),
-            .list(.emails, [AppleListElement(label: "work", value: .text("ann@work.example"))]),
+            .list(.emails, [AppleListElement(label: "work", value: .text("ann@work.example"))])
         ]
         let failing = AppleWriteOperation.update(cardID: Self.cardID, edits: edits)
+        let join = AppleWriteOperation.addMember(cardID: Self.cardID, groupID: "G1")
         let fine = AppleWriteOperation.update(cardID: "C2:ABPerson", edits: edits)
-        let result = try Self.writer(app).apply([failing, fine])
+        let result = try Self.writer(app).apply([failing, join, fine])
         #expect(result.applied == [fine])
-        #expect(result.failed.map(\.operation) == [failing])
-        #expect(result.failed.first?.message.contains("update (job title, emails) via Contacts.app") == true)
-        #expect(app.saved(Self.cardID)?.jobTitle == "CTO", "what was set before the error is saved, never left pending")
+        #expect(result.failed.map(\.operation) == [failing, join])
+        #expect(result.failed.first?.message.contains("update (emails) via Contacts.app") == true)
+        #expect(
+            app.saved(Self.cardID)?.emailAddresses.map(\.value) == ["ann@work.example"],
+            "what was set before the error is saved, never left pending")
+        #expect(app.members("G1").isEmpty)
         #expect(app.saves == 2)
     }
 

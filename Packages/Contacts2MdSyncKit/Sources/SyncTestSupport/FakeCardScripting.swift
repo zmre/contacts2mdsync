@@ -9,10 +9,10 @@ public final class FakeCardScripting: CardScripting {
     struct State {
         var permission: NotesPermission = .granted
         var failSession = false
-        /// Cards whose scripted writes fail (`-1728`-style, per card).
+        /// Cards whose scripted writes fail at the person level (the whole card fails).
         var failing = Set<String>()
-        /// List fields whose existing elements Contacts.app cannot find (`-1728`), by card.
-        var unresolvable: [String: Set<AppleListField>] = [:]
+        /// List fields whose elements Contacts.app refuses to change, with the error number, by card.
+        var refused: [String: [AppleListField: Int]] = [:]
         var calls: [[AppleWriteOperation]] = []
         var availabilityChecks = 0
         var finishedSessions = 0
@@ -33,20 +33,14 @@ public final class FakeCardScripting: CardScripting {
     public func setPermission(_ permission: NotesPermission) { state.withLock { $0.permission = permission } }
     /// Every call throws a session-level error (Contacts.app not answering).
     public func setFailSession(_ fail: Bool) { state.withLock { $0.failSession = fail } }
-    /// Scripted writes to these cards fail.
+    /// Scripted writes to these cards fail at the person level (the whole card fails).
     public func failCards(_ cardIDs: [String]) { state.withLock { $0.failing.formUnion(cardIDs) } }
-    /// Contacts.app cannot find existing `field` elements of `cardID`
-    /// (`-1728`, e.g. instant messages, spike S16): as `ScriptingCardWriter`
-    /// does, that list edit is left out and reported skipped; the rest of the
-    /// operation is applied.
-    public func setUnresolvable(_ field: AppleListField, ofCard cardID: String, _ unresolvable: Bool = true) {
-        state.withLock { state in
-            if unresolvable {
-                state.unresolvable[cardID, default: []].insert(field)
-            } else {
-                state.unresolvable[cardID]?.remove(field)
-            }
-        }
+    /// Contacts.app refuses every change to `field` elements of `cardID`
+    /// with Apple Event error `error` (e.g. `-1719`, spike S16; `nil` lifts
+    /// it): as `ScriptingCardWriter` does, that list edit is left out and
+    /// reported skipped with the error; the rest of the operation is applied.
+    public func setRefused(_ field: AppleListField, ofCard cardID: String, error: Int? = -1719) {
+        state.withLock { $0.refused[cardID, default: [:]][field] = error }
     }
 
     // MARK: - Counters
@@ -66,9 +60,9 @@ public final class FakeCardScripting: CardScripting {
     }
 
     public func apply(_ operations: [AppleWriteOperation]) throws -> AppleWriteResult {
-        let (permission, failSession, failing, unresolvable) = state.withLock { state in
+        let (permission, failSession, failing, refusedFields) = state.withLock { state in
             state.calls.append(operations)
-            return (state.permission, state.failSession, state.failing, state.unresolvable)
+            return (state.permission, state.failSession, state.failing, state.refused)
         }
         guard permission == .granted else {
             throw NotesUnavailableError("Automation permission for Contacts not granted", permissionDenied: true)
@@ -78,7 +72,7 @@ public final class FakeCardScripting: CardScripting {
         var original: [AppleWriteOperation: AppleWriteOperation] = [:]
         var skipped: [AppleWriteSkip] = []
         let sent = operations.filter { !refused.contains($0) }.map { operation in
-            let (effective, left) = Self.leavingOut(unresolvable, from: operation)
+            let (effective, left) = Self.leavingOut(refusedFields, from: operation)
             original[effective] = operation
             skipped += left
             return effective
@@ -100,20 +94,22 @@ public final class FakeCardScripting: CardScripting {
         return result
     }
 
-    /// `operation` without its list edits of unresolvable fields, and those edits as skips.
+    /// `operation` without its list edits of refused fields, and those edits as skips.
     private static func leavingOut(
-        _ unresolvable: [String: Set<AppleListField>], from operation: AppleWriteOperation
+        _ refused: [String: [AppleListField: Int]], from operation: AppleWriteOperation
     ) -> (AppleWriteOperation, [AppleWriteSkip]) {
-        guard case .update(let cardID, let edits) = operation, let fields = unresolvable[cardID], !fields.isEmpty
+        guard case .update(let cardID, let edits) = operation, let fields = refused[cardID], !fields.isEmpty
         else { return (operation, []) }
         var kept: [CardEdit] = []
         var skipped: [AppleWriteSkip] = []
         for edit in edits {
-            if case .list(let field, _) = edit, fields.contains(field) {
+            if case .list(let field, _) = edit, let error = fields[field], CardScriptingSupport.unsupported(edit) == nil
+            {
+                let message = "Contacts.app scripting error \(error): Apple Event failed"
                 skipped.append(
                     AppleWriteSkip(
                         operation: operation, edit: edit,
-                        reason: "Contacts.app could not find the element to change (-1728) (\(field.rawValue))"))
+                        reason: CardScriptingSupport.elementFailureReason(field, error: message)))
             } else {
                 kept.append(edit)
             }

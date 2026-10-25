@@ -38,19 +38,20 @@
     /// 1. Read the card through the Contacts framework and apply the
     ///    operations' edits to a copy with `CardWriter`, exactly as the
     ///    framework route would (`ScriptedCardPlan` explains the diff).
-    ///    Edits scripting cannot express (`CardScriptingSupport`) are left
-    ///    out and reported in `skipped`.
+    ///    Edits scripting cannot express (`CardScriptingSupport`, among
+    ///    them every instant-message edit) are left out and reported in
+    ///    `skipped`; no Apple Event is sent for them.
     /// 2. Send the commands as raw Apple Events through the session (`person
     ///    id` is the card id; element ids are `CNLabeledValue` identifiers),
-    ///    then `save`. A per-card error still saves what was set, so nothing
-    ///    is left unsaved in Contacts.app, and fails that card's operations.
-    ///    An existing element Contacts.app cannot find (`-1728`; instant
-    ///    messages by `id`, spike S16) is tried by its `whose` form
-    ///    (`ScriptedCardPlan.matches`); failing that, only that element is
-    ///    left out: its list edit is reported in `skipped` and the rest of the
-    ///    card is applied (the executor's verification records, by value,
-    ///    what the card did not keep as unapplyable — not retried while
-    ///    unchanged).
+    ///    then `save`. A person-level error (the person does not resolve, a
+    ///    person property or group command fails, `save` fails) still saves
+    ///    what was set, so nothing is left unsaved in Contacts.app, and fails
+    ///    that card's operations. An element command Contacts.app refuses
+    ///    (any per-object error, e.g. `-1719`, `-1728`, `-10000`; spike S16)
+    ///    leaves only that element out: its list edit is reported in
+    ///    `skipped` with the error, and the rest of the card is applied (the
+    ///    executor's verification records, by value, what the card did not
+    ///    keep as unapplyable — not retried while unchanged).
     /// 3. Re-read the card until the change is visible to the Contacts
     ///    framework (S15 saw it at once; up to `visibleTimeout`), so the
     ///    executor's verification sees the write.
@@ -63,15 +64,15 @@
         let sleep: @Sendable (TimeInterval) -> Void
         let elements = Mutex(ElementLog())
 
-        /// How existing elements were addressed so far (spike S16, `--verbose`).
+        /// Element commands so far (spike S16, `--verbose`).
         public struct ElementLog: Hashable, Sendable {
-            /// Element commands sent through the `whose` form after `id` did not resolve.
-            public var byMatch = 0
-            /// Elements left out: neither form resolved (their list edit was skipped).
-            public var unresolved = 0
+            /// Element commands Contacts.app took, by element class.
+            public var sent: [FourCharCode: Int] = [:]
+            /// Element commands Contacts.app refused (each left its element out).
+            public var refused = 0
         }
 
-        /// How existing elements were addressed so far.
+        /// Element commands so far.
         public var elementLog: ElementLog { elements.withLock { $0 } }
 
         /// Creates a writer over `session` (the real Contacts framework reads).
@@ -153,8 +154,6 @@
         struct CardPlan {
             var commands: [ScriptCommand] = []
             var skipped: [AppleWriteSkip] = []
-            /// `whose` forms of existing elements Contacts.app may not resolve by id.
-            var matches: [String: ElementMatch] = [:]
         }
 
         /// Plans one card (pure: no store, no events). `members` answers a
@@ -169,8 +168,6 @@
             }
             let fields = ScriptedCardPlan(before: card, after: after)
             plan.commands = fields.commands + groups
-            plan.matches = fields.matches
-            if fields.unsupported.contains("im") { plan.skipped += imSkips(unit) }
             return plan
         }
 
@@ -205,18 +202,6 @@
             return []
         }
 
-        /// The instant-message edits of `unit`, skipped: one of their services has no `service type`.
-        private static func imSkips(_ unit: Unit) -> [AppleWriteSkip] {
-            unit.operations.compactMap { operation in
-                guard case .update(_, let edits) = operation,
-                    let edit = edits.first(where: { if case .list(.im, _) = $0 { true } else { false } })
-                else { return nil }
-                return AppleWriteSkip(
-                    operation: operation, edit: edit, reason: "\(CardScriptingSupport.reason) (instant message service)"
-                )
-            }
-        }
-
         private func write(
             _ unit: Unit, card: CNContact?, members: inout [String: Set<String>], result: inout AppleWriteResult
         ) throws {
@@ -229,14 +214,14 @@
                 return ids
             }
             members = cache
-            let sent = try send(plan.commands, to: unit.cardID, matches: plan.matches)
+            let sent = try send(plan.commands, to: unit.cardID)
             if let failure = sent.failure { throw failure }
-            let unresolved = try Self.unresolvedSkips(sent.unresolved, of: unit)
+            let refused = try Self.refusedSkips(sent.refused, of: unit)
             if sent.changedFields { waitUntilVisible(unit.cardID, before: card) }
             Self.update(&members, after: plan.commands, cardID: unit.cardID)
             result.applied += unit.operations
             result.scripted += unit.operations
-            result.skipped += plan.skipped + unresolved
+            result.skipped += plan.skipped + refused
         }
 
         /// The cached group members after `commands`.

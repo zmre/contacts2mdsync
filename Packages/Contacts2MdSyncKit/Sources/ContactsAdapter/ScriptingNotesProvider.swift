@@ -207,11 +207,16 @@
         }
 
         /// Sends one event; session-level failures become `NotesUnavailableError`,
-        /// per-object ones stay `ContactsScriptingError`.
-        public func send(_ event: NSAppleEventDescriptor) throws -> NSAppleEventDescriptor? {
+        /// per-object ones stay `ContactsScriptingError`. Error numbers in
+        /// `perObject` stay per-object for this event even when they are
+        /// usually session-level (an element command's `-1708`).
+        public func send(
+            _ event: NSAppleEventDescriptor, perObject: Set<Int> = []
+        ) throws -> NSAppleEventDescriptor? {
             do {
                 return try ContactsScriptingEvents.result(of: sender.send(event, timeout: eventTimeout))
-            } catch let error as ContactsScriptingError where error.isSessionLevel {
+            } catch let error as ContactsScriptingError where error.isSessionLevel && !perObject.contains(error.number)
+            {
                 state.withLock { $0.ready = false }
                 throw NotesUnavailableError(error.description, permissionDenied: error.isPermissionDenied)
             }

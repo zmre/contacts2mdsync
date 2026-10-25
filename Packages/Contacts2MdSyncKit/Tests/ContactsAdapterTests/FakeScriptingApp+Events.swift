@@ -25,6 +25,7 @@ extension FakeScriptingApp {
         case "core/cnte":
             break
         case "core/save":
+            if let error = state.saveError { throw ContactsScriptingError(number: error, message: "save failed") }
             state.saves += 1
             for (id, card) in state.pending { state.saved[id] = card.copy() as? CNContact }
             state.savedGroups = state.pendingGroups
@@ -37,13 +38,11 @@ extension FakeScriptingApp {
                 guard let card = state.pending[id], !state.missingPeople.contains(id) else {
                     throw noSuchObject("person id \(id)")
                 }
+                try refusePerson(id, state)
                 try setPerson(property, value.stringValue ?? "", on: card)
             default:
-                let found = try resolve(target, state)
+                let found = try resolve(target, &state)
                 guard let card = state.pending[found.person] else { throw noSuchObject("person id \(found.person)") }
-                if state.failing.contains(found.person) {
-                    throw ContactsScriptingError(number: -10000, message: "refused")
-                }
                 try setElement(found.element, found.entry, property, value, on: card)
             }
         case "core/getd":
@@ -54,7 +53,7 @@ extension FakeScriptingApp {
             try makeElement(event, &state)
         case "core/delo":
             guard let direct else { throw noSuchObject("element") }
-            let found = try resolve(direct, state)
+            let found = try resolve(direct, &state)
             guard let card = state.pending[found.person] else { throw noSuchObject("element") }
             try delete(found.element, found.entry, on: card)
         case "az00/az44", "az00/az46":
@@ -62,6 +61,7 @@ extension FakeScriptingApp {
                 case .group(let group)? = Spec.decode(
                     event.paramDescriptor(forKeyword: code(kind == "az00/az44" ? "az45" : "az47")))
             else { throw noSuchObject("person or group") }
+            try refusePerson(id, state)
             if kind == "az00/az44" {
                 state.pendingGroups[group, default: []].insert(id)
             } else {
@@ -79,33 +79,25 @@ extension FakeScriptingApp {
         var person: String
     }
 
-    /// An existing element: `<element> id E of person id P`, or `first
-    /// <element> of person id P whose …` (instant messages only) → its id.
-    private static func resolve(_ spec: Spec, _ state: State) throws -> Resolved {
-        switch spec {
-        case .element(let element, let entry, .person(let id)):
-            if state.missingPeople.contains(id) { throw noSuchObject("person id \(id)") }
-            if element == Card.instantMessage, state.imByIDUnresolvable {
-                throw noSuchObject("instant message id \"\(entry)\" of person id \"\(id)\"")
-            }
-            return Resolved(element: element, entry: entry, person: id)
-        case .firstWhose(Card.instantMessage, let terms, .person(let id)):
-            guard !state.imWhoseUnresolvable, !state.missingPeople.contains(id), let card = state.pending[id],
-                let entry = card.instantMessageAddresses.first(where: { entry in
-                    terms.allSatisfy { term in
-                        switch (term.code, term.value) {
-                        case (Card.userName, .text(let text)): entry.value.username == text
-                        case (Card.serviceType, .enumerated(let code)): imService(code) == entry.value.service
-                        case (Card.label, .text(let text)): entry.label == text
-                        default: false
-                        }
-                    }
-                })
-            else { throw noSuchObject("first instant message whose …") }
-            return Resolved(element: Card.instantMessage, entry: entry.identifier, person: id)
-        default:
-            throw noSuchObject("element")
+    /// Person-level commands of a `failing` card fail (`-10000`).
+    private static func refusePerson(_ id: String, _ state: State) throws {
+        if state.failing.contains(id) { throw ContactsScriptingError(number: -10000, message: "refused") }
+    }
+
+    /// Records an element command of class `element`; throws its configured error.
+    private static func receive(_ element: FourCharCode, _ state: inout State) throws {
+        state.elementCommands.append(element)
+        if let error = state.elementErrors[element] {
+            throw ContactsScriptingError(number: error, message: "Apple Event failed")
         }
+    }
+
+    /// An existing element: `<element> id E of person id P` → its id.
+    private static func resolve(_ spec: Spec, _ state: inout State) throws -> Resolved {
+        guard case .element(let element, let entry, .person(let id)) = spec else { throw noSuchObject("element") }
+        if state.missingPeople.contains(id) { throw noSuchObject("person id \(id)") }
+        try receive(element, &state)
+        return Resolved(element: element, entry: entry, person: id)
     }
 
     /// `make new <element> at end of <elements> of person id P with properties {…}`.
@@ -118,7 +110,7 @@ extension FakeScriptingApp {
             let card = state.pending[id]
         else { throw noSuchObject("insertion location") }
         if state.missingPeople.contains(id) { throw noSuchObject("person id \(id)") }
-        if state.failing.contains(id) { throw ContactsScriptingError(number: -10000, message: "refused") }
+        try receive(element, &state)
         var properties: [FourCharCode: NSAppleEventDescriptor] = [:]
         if let record = event.paramDescriptor(forKeyword: Self.code("prdt")), record.numberOfItems > 0 {
             for index in 1...record.numberOfItems {
@@ -211,26 +203,9 @@ extension FakeScriptingApp {
                 return entry.settingValue(
                     CNSocialProfile(urlString: url, username: user, userIdentifier: ident, service: service))
             }
-        case Card.instantMessage:
-            card.instantMessageAddresses = try edit(card.instantMessageAddresses) { entry in
-                if isLabel { return entry.settingLabel(text) }
-                var (user, service) = (entry.value.username, entry.value.service)
-                switch property {
-                case Card.userName: user = text
-                case Card.serviceType:
-                    guard let name = imService(value.enumCodeValue) else { return nil }
-                    service = name
-                default: return nil
-                }
-                return entry.settingValue(CNInstantMessageAddress(username: user, service: service))
-            }
         default:
             throw noSuchObject("element class \(Self.text(element))")
         }
-    }
-
-    static func imService(_ code: FourCharCode) -> String? {
-        ScriptedCardPlan.serviceTypes.first { $0.value == code }?.key
     }
 
     private static func make(
@@ -260,13 +235,6 @@ extension FakeScriptingApp {
                 userIdentifier: properties[Card.userIdentifier]?.stringValue,
                 service: properties[Card.serviceName]?.stringValue)
             card.socialProfiles.append(CNLabeledValue(label: nil, value: profile))
-        case Card.instantMessage:
-            guard let service = properties[Card.serviceType].flatMap({ imService($0.enumCodeValue) }) else {
-                throw noSuchObject("service type")
-            }
-            card.instantMessageAddresses.append(
-                CNLabeledValue(
-                    label: label, value: CNInstantMessageAddress(username: text(Card.userName), service: service)))
         default:
             throw noSuchObject("element class \(Self.text(element))")
         }
@@ -284,7 +252,6 @@ extension FakeScriptingApp {
         case Card.relatedName: card.contactRelations = try remove(card.contactRelations)
         case Card.address: card.postalAddresses = try remove(card.postalAddresses)
         case Card.socialProfile: card.socialProfiles = try remove(card.socialProfiles)
-        case Card.instantMessage: card.instantMessageAddresses = try remove(card.instantMessageAddresses)
         default: throw noSuchObject("element class \(Self.text(element))")
         }
     }

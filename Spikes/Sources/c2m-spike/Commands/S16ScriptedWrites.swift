@@ -388,9 +388,9 @@ final class S16Runner {
         "1  B: last name + job title + in-place phone edit + new `work` email + delete a URL + stamp (via scripting)",
         "2  labels: new email's CN label; relabel phones to `mobile` and custom `summer`",
         "3  B add to / remove from \"\(S16ScriptedWrites.groupName)\" (via scripting)",
-        "4  B in-place edits: address street/city, related name, Twitter profile, Skype IM (IM: in place by id, or "
-            + "by `first instant message whose` after -1728, else skipped as unresolvable — never a card failure); "
-            + "4b the IM alone (person check, then the same IM outcomes)",
+        "4  B in-place edits: address street/city, related name, Twitter profile (reported applied), Skype IM "
+            + "(IM: skipped up front — needs the notes entitlement — no IM Apple Event, card applied, never a card "
+            + "failure); 4b the IM alone (the same IM outcome, nothing sent)",
         "5  B clear job title (\"\"), add an email with no label",
         "6  A (no note): the step-1 update via the Contacts framework; A add to group (framework) and remove "
             + "(scripting)",
@@ -919,6 +919,7 @@ final class S16Runner {
         let elementLogBefore = writer.elementLog
         let result = try apply("4", "B address + related name + social + IM", operations, expect: .exactlyOne)
         checkRoute("4", "B structured edits", operations, result, scripted: true)
+        checkReportedApplied("4", result, operations, fields: [.addresses, .relations, .social])
         let after = try cardNow(b)
         let nowAddress = after.postalAddresses.first { $0.identifier == cnAddress.identifier }
         report.check(
@@ -938,13 +939,12 @@ final class S16Runner {
                 "id kept; service=\($0.value.service) user=\($0.value.username) url=\($0.value.urlString) (before url=\(cnSocial.value.urlString))"
             } ?? "id \(cnSocial.identifier) gone; \(after.socialProfiles.map { "\($0.identifier)=\($0.value.username)" })")
         checkIM("4", result, before: before, after: after, wanted: newHandle, log: elementLogBefore)
-        unexpected("4", "B", before: before, after: after, allowed: ["address", "relation", "social", "im"])
+        unexpected("4", "B", before: before, after: after, allowed: ["address", "relation", "social"])
         try step4b()
     }
 
-    /// 4b: the IM alone, so its element command is the card's first: if `id`
-    /// does not resolve, the writer checks `get id of person id P` before
-    /// falling back (and never fails the card for the IM).
+    /// 4b: the IM alone. The writer skips it before planning, so nothing is
+    /// sent to Contacts.app for the card; the operation counts as applied.
     func step4b() throws {
         report.say("\n# 4b. B (noted): IM-only edit (first command is the IM element)")
         let before = try cardNow(b)
@@ -964,51 +964,63 @@ final class S16Runner {
         checkRoute("4b", "B IM-only edit", operations, result, scripted: true)
         let after = try cardNow(b)
         checkIM("4b", result, before: before, after: after, wanted: newHandle, log: log)
-        unexpected("4b", "B", before: before, after: after, allowed: ["im"])
+        unexpected("4b", "B", before: before, after: after, allowed: [])
     }
 
-    /// The IM outcomes the writer allows (architecture §6): edited in place
-    /// (by `id`, or by `first instant message whose user name … and service
-    /// type …` after `-1728`), else skipped as unresolvable with the rest of
-    /// the card applied. Never a card failure, never a different IM touched.
+    /// Step 4's address, related name and social edits: the operation is
+    /// applied and none of those edits is in `skipped`.
+    func checkReportedApplied(
+        _ step: String, _ result: AppleWriteResult, _ operations: [AppleWriteOperation], fields: [AppleListField]
+    ) {
+        let applied = operations.allSatisfy(result.applied.contains)
+        let skippedFields = result.skipped.compactMap { skip -> AppleListField? in
+            if case .list(let field, _) = skip.edit, fields.contains(field) { return field }
+            return nil
+        }
+        report.check(
+            step, "address, related name and social edits reported applied (not skipped, not failed)",
+            applied && skippedFields.isEmpty && result.failed.isEmpty,
+            "operation applied: \(applied); skipped among them: \(skippedFields.map(\.rawValue)); "
+                + "failed \(result.failed.count)")
+    }
+
+    /// The IM outcome the writer allows (architecture §6, S16 re-run):
+    /// Contacts.app refuses every IM change (`-1719`), so the IM edit is
+    /// skipped up front with `CardScriptingSupport.instantMessageReason`, no
+    /// IM Apple Event is sent, the IM is unchanged and the card is applied.
+    /// Never a card failure, never a different IM touched.
     func checkIM(
         _ step: String, _ result: AppleWriteResult, before beforeCard: CNContact,
         after: CNContact, wanted: String, log: ScriptingCardWriter.ElementLog
     ) {
         guard let cnIM = beforeCard.instantMessageAddresses.first else { return }
         let now = writer.elementLog
-        let byMatch = now.byMatch - log.byMatch
-        let unresolved = now.unresolved - log.unresolved
+        let imCode = ContactsScriptingEvents.CardCode.instantMessage
+        let imSent = (now.sent[imCode] ?? 0) - (log.sent[imCode] ?? 0)
+        let refused = now.refused - log.refused
         let nowIM = after.instantMessageAddresses.first { $0.identifier == cnIM.identifier }
-        let edited = nowIM.map { $0.value.username == wanted && $0.value.service == cnIM.value.service } ?? false
         let unchanged = nowIM.map { $0.value == cnIM.value && $0.label == cnIM.label } ?? false
         let imSkips = result.skipped.filter { if case .list(.im, _) = $0.edit { true } else { false } }
-        let skippedUnresolved = !imSkips.isEmpty
-            && imSkips.allSatisfy { $0.reason.hasPrefix(ScriptingCardWriter.unresolvedReason) }
+        let skippedUpFront = !imSkips.isEmpty
+            && imSkips.allSatisfy { $0.reason == CardScriptingSupport.instantMessageReason }
+        let applied = imSkips.allSatisfy { result.applied.contains($0.operation) }
         let detail =
             nowIM.map { "id kept; service=\($0.value.service) user=\($0.value.username) label \($0.label ?? "nil")" }
             ?? "id \(cnIM.identifier) gone; \(after.instantMessageAddresses.map { "\($0.identifier)=\($0.value.username)" })"
         report.check(
-            step, "IM addressing (writer element log)", .info,
-            "by whose: \(byMatch) command(s); unresolved: \(unresolved) element(s); "
-                + (byMatch > 0 ? "`instant message id` did not resolve, `whose` did" : unresolved > 0
-                    ? "neither `id` nor `whose` resolved" : "`instant message id` resolved"))
-        if edited {
-            report.check(step, "IM username edited in place (id kept, service kept)", true, detail)
-        } else if skippedUnresolved, unchanged {
-            report.check(
-                step, "IM username edited in place (id kept, service kept)", .warn,
-                "not resolvable by id or whose: skipped, card unchanged (\(detail))")
-        } else {
-            report.check(step, "IM username edited in place (id kept, service kept)", false, detail)
-        }
+            step, "IM element commands (writer element log)", .info,
+            "IM commands sent: \(imSent); element commands refused: \(refused)")
         report.check(
-            step, "IM: edited, or skipped as unresolvable with the card applied (never a card failure)",
-            result.failed.isEmpty && (edited || (skippedUnresolved && unchanged)),
-            "failed \(result.failed.count), IM skips \(imSkips.map(\.reason))")
+            step, "IM: no Apple Event sent for the IM", imSent == 0, "IM commands sent: \(imSent)")
+        report.check(
+            step, "IM unchanged (id, service, user name, label kept; \(wanted) not written)", unchanged, detail)
+        report.check(
+            step, "IM: skipped (\"\(CardScriptingSupport.instantMessageReason)\") with the card applied (never a card failure)",
+            result.failed.isEmpty && skippedUpFront && applied && unchanged,
+            "failed \(result.failed.count), applied \(applied), IM skips \(imSkips.map(\.reason))")
         report.check(
             step, "IM: nothing but an IM edit skipped", result.skipped.count == imSkips.count,
-            result.skipped.map { HarnessBatchGuard.describe($0.edit) }.joined(separator: "; "))
+            result.skipped.map { "\(HarnessBatchGuard.describe($0.edit)) — \($0.reason)" }.joined(separator: "; "))
         let others = { (card: CNContact) in
             card.instantMessageAddresses.filter { $0.identifier != cnIM.identifier }
                 .map { "\($0.identifier)|\($0.label ?? "")|\($0.value.service)|\($0.value.username)" }.sorted()

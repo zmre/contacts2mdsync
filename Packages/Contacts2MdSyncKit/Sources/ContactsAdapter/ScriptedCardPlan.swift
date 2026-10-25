@@ -5,13 +5,10 @@
     /// A value in a Contacts.app scripting command.
     public enum ScriptValue: Hashable, Sendable {
         case text(String)
-        /// An enumerator (`instant message service type`).
-        case enumerated(FourCharCode)
 
         var descriptor: NSAppleEventDescriptor {
             switch self {
             case .text(let text): NSAppleEventDescriptor(string: text)
-            case .enumerated(let code): NSAppleEventDescriptor(enumCode: code)
             }
         }
     }
@@ -25,34 +22,6 @@
         public init(_ code: FourCharCode, _ value: ScriptValue) {
             self.code = code
             self.value = value
-        }
-    }
-
-    /// How to find a labeled value Contacts.app does not resolve by `id`
-    /// (instant messages, spike S16): `first <element> whose` every term
-    /// equals its value — the element's values before the write, updated as
-    /// commands change them.
-    public struct ElementMatch: Hashable, Sendable {
-        public var element: FourCharCode
-        public var terms: [ScriptProperty]
-
-        /// Creates a match.
-        public init(element: FourCharCode, terms: [ScriptProperty]) {
-            self.element = element
-            self.terms = terms
-        }
-
-        /// The match after `property` was set on the element.
-        func updating(_ property: ScriptProperty) -> ElementMatch {
-            var copy = self
-            copy.terms = terms.map { $0.code == property.code ? property : $0 }
-            return copy
-        }
-
-        /// `first <element> of person id P whose …`.
-        func specifier(person cardID: String) -> NSAppleEventDescriptor {
-            ContactsScriptingEvents.firstElement(
-                element, ofPerson: cardID, whose: terms.map { ($0.code, $0.value.descriptor) })
         }
     }
 
@@ -95,26 +64,13 @@
             }
         }
 
-        /// The same command on the element `match` finds instead of `<element> id E`
-        /// (`nil` for commands that do not address an existing element).
-        public func event(person cardID: String, matching match: ElementMatch) -> NSAppleEventDescriptor? {
-            typealias Events = ContactsScriptingEvents
-            switch self {
-            case .setElement(_, _, let property):
-                return Events.set(
-                    Events.property(property.code, of: match.specifier(person: cardID)),
-                    toDescriptor: property.value.descriptor)
-            case .delete:
-                return Events.delete(match.specifier(person: cardID))
-            default:
-                return nil
-            }
-        }
-
-        /// The existing element this command addresses by id (`set … of <element> id E`, `delete`).
-        public var target: (element: FourCharCode, id: String)? {
+        /// The element class this command changes (`set … of <element> id E`,
+        /// `make new <element>`, `delete <element> id E`), with the id of an
+        /// existing element; `nil` for person-level commands.
+        public var element: (code: FourCharCode, id: String?)? {
             switch self {
             case .setElement(let element, let id, _), .delete(let element, let id): (element, id)
+            case .make(let element, _): (element, nil)
             default: nil
             }
         }
@@ -143,20 +99,11 @@
     ///   `Summer House`), which is what `CNLabeledValue.label` holds.
     /// - Order is not kept: new values go to the end.
     ///
-    /// Not expressible (reported in `unsupported`): an instant-message
-    /// service Contacts.app has no `service type` for.
-    ///
-    /// Instant messages: Contacts.app answers `-1728` for `instant message id
-    /// E` (spike S16), so `matches` also gives each existing IM a `whose`
-    /// form (`user name` + `service type`, the values before the write) for
-    /// the writer to fall back to. An IM whose user name and service another
-    /// IM of the card shares gets none (`first … whose` could pick the other).
+    /// Instant messages are not planned: Contacts.app resolves `instant
+    /// message id E` but refuses every change to it (`-1719`, spike S16), so
+    /// the writer skips IM edits before planning (`CardScriptingSupport`).
     public struct ScriptedCardPlan: Hashable, Sendable {
         public var commands: [ScriptCommand] = []
-        /// Fields with a change scripting cannot express (`im`).
-        public var unsupported: Set<String> = []
-        /// `whose` forms of existing elements, by element id (instant messages only).
-        public var matches: [String: ElementMatch] = [:]
 
         /// The commands from `before` to `after`.
         public init(before: CNContact, after: CNContact) {
@@ -178,22 +125,6 @@
             list(
                 Code.socialProfile, before.socialProfiles, after.socialProfiles, labeled: false, properties: Self.social
             )
-            list(Code.instantMessage, before.instantMessageAddresses, after.instantMessageAddresses, field: "im") {
-                Self.instantMessage($0)
-            }
-            matches = Self.instantMessageMatches(before.instantMessageAddresses)
-        }
-
-        /// The `whose` form of each IM in `ims` that it identifies uniquely.
-        static func instantMessageMatches(_ ims: [CNLabeledValue<CNInstantMessageAddress>]) -> [String: ElementMatch] {
-            let forms = ims.compactMap { entry in instantMessage(entry.value).map { (entry.identifier, $0) } }
-            var counts: [[ScriptProperty]: Int] = [:]
-            for (_, terms) in forms { counts[terms, default: 0] += 1 }
-            var matches: [String: ElementMatch] = [:]
-            for (id, terms) in forms where counts[terms] == 1 {
-                matches[id] = ElementMatch(element: ContactsScriptingEvents.CardCode.instantMessage, terms: terms)
-            }
-            return matches
         }
 
         // MARK: Single-valued fields
@@ -220,11 +151,11 @@
         // MARK: Labeled values
 
         /// Adds the commands for one labeled-value list. `properties` is the
-        /// scripting form of a value (`nil`: not expressible); unlabeled
-        /// classes (`social profile` has no `label`) never send one.
+        /// scripting form of a value; unlabeled classes (`social profile` has
+        /// no `label`) never send one.
         private mutating func list<Value>(
             _ element: FourCharCode, _ before: [CNLabeledValue<Value>], _ after: [CNLabeledValue<Value>],
-            labeled: Bool = true, field: String? = nil, properties: (Value) -> [ScriptProperty]?
+            labeled: Bool = true, properties: (Value) -> [ScriptProperty]
         ) where Value: NSObject {
             let label = ContactsScriptingEvents.CardCode.label
             let afterIDs = Set(after.map(\.identifier))
@@ -233,14 +164,9 @@
                 commands.append(.delete(element, id: entry.identifier))
             }
             for entry in after {
-                guard let wanted = properties(entry.value) else {
-                    if old[entry.identifier].map({ !Self.same($0, entry) }) ?? true {
-                        unsupported.insert(field ?? "\(element)")
-                    }
-                    continue
-                }
+                let wanted = properties(entry.value)
                 guard let original = old[entry.identifier] else {
-                    var initial = wanted.filter { if case .text(let text) = $0.value { !text.isEmpty } else { true } }
+                    var initial = wanted.filter { $0.value != .text("") }
                     if labeled, let text = entry.label { initial.insert(ScriptProperty(label, .text(text)), at: 0) }
                     commands.append(.make(element, properties: initial))
                     continue
@@ -250,15 +176,11 @@
                         .setElement(
                             element, id: entry.identifier, property: ScriptProperty(label, .text(entry.label ?? ""))))
                 }
-                let current = properties(original.value) ?? []
+                let current = properties(original.value)
                 for property in wanted where !current.contains(property) {
                     commands.append(.setElement(element, id: entry.identifier, property: property))
                 }
             }
-        }
-
-        private static func same<Value: NSObject>(_ lhs: CNLabeledValue<Value>, _ rhs: CNLabeledValue<Value>) -> Bool {
-            lhs.label == rhs.label && lhs.value.isEqual(rhs.value)
         }
 
         static func address(_ address: CNPostalAddress) -> [ScriptProperty] {
@@ -281,27 +203,5 @@
             ]
         }
 
-        /// `service type` + `user name`; `nil` for a service Contacts.app has no enumerator for.
-        static func instantMessage(_ address: CNInstantMessageAddress) -> [ScriptProperty]? {
-            typealias Code = ContactsScriptingEvents.CardCode
-            guard let type = serviceTypes[address.service] else { return nil }
-            return [
-                ScriptProperty(Code.serviceType, .enumerated(type)),
-                ScriptProperty(Code.userName, .text(address.username)),
-            ]
-        }
-
-        /// Contacts framework IM services → `instant message service type` enumerators.
-        static let serviceTypes: [String: FourCharCode] = {
-            typealias Code = ContactsScriptingEvents.CardCode
-            return [
-                CNInstantMessageServiceAIM: Code.serviceAIM, CNInstantMessageServiceFacebook: Code.serviceFacebook,
-                CNInstantMessageServiceGaduGadu: Code.serviceGaduGadu,
-                CNInstantMessageServiceGoogleTalk: Code.serviceGoogleTalk, CNInstantMessageServiceICQ: Code.serviceICQ,
-                CNInstantMessageServiceJabber: Code.serviceJabber, CNInstantMessageServiceMSN: Code.serviceMSN,
-                CNInstantMessageServiceQQ: Code.serviceQQ, CNInstantMessageServiceSkype: Code.serviceSkype,
-                CNInstantMessageServiceYahoo: Code.serviceYahoo,
-            ]
-        }()
     }
 #endif

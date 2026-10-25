@@ -14,8 +14,6 @@ indirect enum Spec: Equatable {
     case every(FourCharCode, parent: Spec)
     case property(FourCharCode, parent: Spec)
     case group(String)
-    /// `first <element> of <parent> whose <terms all equal>`.
-    case firstWhose(FourCharCode, terms: [ScriptProperty], parent: Spec)
     case app
 
     static func decode(_ descriptor: NSAppleEventDescriptor?) -> Spec? {
@@ -33,11 +31,6 @@ indirect enum Spec: Equatable {
         case ContactsScriptingEvents.fourCC("prop"):
             return .property(data?.typeCodeValue ?? 0, parent: container)
         case ContactsScriptingEvents.fourCC("indx"):
-            if data?.enumCodeValue == ContactsScriptingEvents.fourCC("firs") || data.map(isFirst) == true,
-                case .whose(let terms, let parent) = decodeTest(key("from"))
-            {
-                return .firstWhose(want, terms: terms, parent: parent)
-            }
             return .every(want, parent: container)
         case ContactsScriptingEvents.fourCC("ID  "):
             let id = data?.stringValue ?? ""
@@ -47,52 +40,6 @@ indirect enum Spec: Equatable {
         default:
             return nil
         }
-    }
-
-    private static func isFirst(_ ordinal: NSAppleEventDescriptor) -> Bool {
-        ordinal.data.count == 4
-            && ordinal.data.withUnsafeBytes { $0.load(as: FourCharCode.self) }
-                == ContactsScriptingEvents.fourCC("firs")
-    }
-
-    /// A `whose` test specifier: the equal-to terms and the container.
-    enum Test { case whose([ScriptProperty], Spec), none }
-
-    static func decodeTest(_ descriptor: NSAppleEventDescriptor?) -> Test {
-        let reco = ContactsScriptingEvents.fourCC("reco")
-        guard let record = descriptor?.coerce(toDescriptorType: reco),
-            record.forKeyword(ContactsScriptingEvents.fourCC("form"))?.enumCodeValue
-                == ContactsScriptingEvents.fourCC("test"),
-            let test = record.forKeyword(ContactsScriptingEvents.fourCC("seld"))
-        else { return .none }
-        let parent = decode(record.forKeyword(ContactsScriptingEvents.fourCC("from"))) ?? .app
-        var comparisons: [NSAppleEventDescriptor] = [test]
-        if test.descriptorType == ContactsScriptingEvents.fourCC("logi"),
-            let logical = test.coerce(toDescriptorType: reco),
-            logical.forKeyword(ContactsScriptingEvents.fourCC("logc"))?.enumCodeValue
-                == ContactsScriptingEvents.fourCC("AND "),
-            let list = logical.forKeyword(ContactsScriptingEvents.fourCC("term")), list.numberOfItems > 0
-        {
-            comparisons = (1...list.numberOfItems).compactMap { list.atIndex($0) }
-        }
-        var terms: [ScriptProperty] = []
-        for comparison in comparisons {
-            guard comparison.descriptorType == ContactsScriptingEvents.fourCC("cmpd"),
-                let fields = comparison.coerce(toDescriptorType: reco),
-                fields.forKeyword(ContactsScriptingEvents.fourCC("relo"))?.enumCodeValue
-                    == ContactsScriptingEvents.fourCC("=   "),
-                let lhs = fields.forKeyword(ContactsScriptingEvents.fourCC("obj1"))?.coerce(toDescriptorType: reco),
-                lhs.forKeyword(ContactsScriptingEvents.fourCC("from"))?.descriptorType
-                    == ContactsScriptingEvents.fourCC("exmn"),
-                let property = lhs.forKeyword(ContactsScriptingEvents.fourCC("seld"))?.typeCodeValue,
-                let rhs = fields.forKeyword(ContactsScriptingEvents.fourCC("obj2"))
-            else { return .none }
-            let value: ScriptValue =
-                rhs.descriptorType == ContactsScriptingEvents.fourCC("enum")
-                ? .enumerated(rhs.enumCodeValue) : .text(rhs.stringValue ?? "")
-            terms.append(ScriptProperty(property, value))
-        }
-        return .whose(terms, parent)
     }
 }
 
@@ -112,12 +59,17 @@ final class FakeScriptingApp: AppleEventSending, ContactsAppControlling, Scripti
         var permission: Int32 = 0
         var events: [String] = []
         var saves = 0
-        /// Card ids whose element edits fail (`-10000`, per card).
+        /// Card ids whose person-level commands (person properties, group
+        /// adds and removes) fail (`-10000`).
         var failing = Set<String>()
-        /// `instant message id E` does not resolve (`-1728`), as on macOS 27 (spike S16).
-        var imByIDUnresolvable = false
-        /// `first instant message whose …` does not resolve either (`-1728`).
-        var imWhoseUnresolvable = false
+        /// Element classes whose every command (`set`, `make`, `delete`)
+        /// fails with this error number, as instant messages do with `-1719`
+        /// on macOS 27 (spike S16).
+        var elementErrors: [FourCharCode: Int] = [:]
+        /// `save` fails with this error number.
+        var saveError: Int?
+        /// The element class of every element command received, in order.
+        var elementCommands: [FourCharCode] = []
         /// `person id P` does not resolve in Contacts.app (`-1728`) for these cards.
         var missingPeople = Set<String>()
     }
@@ -146,6 +98,7 @@ final class FakeScriptingApp: AppleEventSending, ContactsAppControlling, Scripti
 
     var events: [String] { withState { $0.events } }
     var saves: Int { withState { $0.saves } }
+    var elementCommands: [FourCharCode] { withState { $0.elementCommands } }
     func saved(_ id: String) -> CNContact? { withState { $0.saved[id] } }
     func members(_ group: String) -> Set<String> { withState { $0.savedGroups[group] ?? [] } }
 

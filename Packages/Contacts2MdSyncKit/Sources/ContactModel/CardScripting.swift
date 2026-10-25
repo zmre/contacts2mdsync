@@ -46,11 +46,26 @@ public enum CardScriptingSupport {
     /// The reason recorded for edits scripting cannot express.
     public static let reason = "needs entitlement or not scriptable"
 
+    /// The reason recorded for instant-message edits on the scripting route:
+    /// Contacts.app resolves `instant message id E of person id P` but every
+    /// change to it fails (`-1719`, spike S16), so none is attempted.
+    public static let instantMessageReason =
+        "instant messages can't be changed through Contacts.app (needs the notes entitlement)"
+
+    /// The reason recorded for a list edit whose element Contacts.app
+    /// refused to change (any per-object Apple Event error, e.g. `-1719`,
+    /// `-1728`, `-10000`): only that element was left out (spike S16).
+    public static func elementFailureReason(_ field: AppleListField, error: String) -> String {
+        "Contacts.app could not change this \(field.rawValue) element (\(error))"
+    }
+
     /// Why `edit` cannot be written through Contacts.app scripting; `nil`
-    /// when it can (element-level limits, such as an instant-message service
-    /// Contacts.app has no `service type` for, are found by the writer).
+    /// when it can (an element Contacts.app refuses at write time is found
+    /// by the writer).
     ///
     /// - The note goes through the notes path (`NotesBridgedStore`), never here.
+    /// - Instant messages: resolvable, but never changeable (`-1719`, spike
+    ///   S16) — skipped up front, no Apple Event is sent for them.
     /// - `image` is a TIFF picture in scripting: Contacts would keep a TIFF
     ///   instead of our JPEG/PNG bytes, so the image never round-trips.
     /// - `birth date` and custom dates are AppleScript `date`s (local
@@ -63,6 +78,7 @@ public enum CardScriptingSupport {
         case .image: "\(reason) (image)"
         case .birthday: "\(reason) (birthday)"
         case .list(.dates, _): "\(reason) (dates)"
+        case .list(.im, _): instantMessageReason
         case .scalar(.phoneticOrganizationName, _): "\(reason) (phonetic organization name)"
         case .scalar, .list: nil
         }
