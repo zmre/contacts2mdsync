@@ -59,6 +59,9 @@ struct MergeResult: Sendable {
     var markdownImage: ImageChange?
     var appleImage: ImageChange?
     var conflicts: [SyncConflict] = []
+    /// List elements (`field|base key`) whose recorded refusal decided a
+    /// slot this run (their unapplyable entries stay; the rest expire).
+    var refusalsUsed: Set<String> = []
     /// Changed fields per side, for output.
     var markdownFields: [String] = []
     var appleFields: [String] = []
@@ -83,13 +86,16 @@ struct RecordMerger {
     let resolution: (String) -> ConflictDecision?
     /// Unapplyable scalar writes by field name.
     let aliases: [String: ScalarAlias]
+    /// Unapplyable list writes: `field|base key` → what we tried (`+`, `-`,
+    /// `~<key>`, `@<label>`, …), on any card of the record.
+    let listRefusals: [String: Set<String>]
 
     var result = MergeResult()
 
     init(
         recordID: UUID, title: String, path: String, base: BaseView, apple: FieldView, markdown: FieldView,
         resolution: @escaping (String) -> ConflictDecision? = { _ in nil },
-        aliases: [String: ScalarAlias] = [:]
+        aliases: [String: ScalarAlias] = [:], listRefusals: [String: Set<String>] = [:]
     ) {
         self.recordID = recordID
         self.title = title
@@ -99,6 +105,7 @@ struct RecordMerger {
         self.markdown = markdown
         self.resolution = resolution
         self.aliases = aliases
+        self.listRefusals = listRefusals
     }
 
     /// Runs the merge.

@@ -176,13 +176,15 @@ extension PlanningRun {
         // A card whose note could not be read: the body is unknown, not empty.
         if contact.notesUnknown == true { appleView.body = nil }
         let aliases = sync?.unapplyable.aliases(record: id) ?? [:]
+        let listRefusals = sync?.unapplyable.listRefusals(record: id) ?? [:]
         let decisions = self.decisions
         let markdownView = tools.builder.markdown(existing, image: noteImage.state)
         let merge = RecordMerger.merge(
             RecordMerger(
                 recordID: id, title: candidate.title, path: candidate.path, base: base, apple: appleView,
                 markdown: markdownView,
-                resolution: { decisions.resolution(ofConflict: $0) }, aliases: aliases))
+                resolution: { decisions.resolution(ofConflict: $0) }, aliases: aliases, listRefusals: listRefusals))
+        sync?.unapplyable.markListRefusalsUsed(record: id, fields: merge.refusalsUsed)
         for (field, alias) in aliases
         where ScalarField(rawValue: field).map({ ScalarField.key(appleView.scalars[$0]) == alias.observed }) == true {
             sync?.unapplyable.markAliasUsed(record: id, field: field)

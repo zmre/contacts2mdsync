@@ -60,6 +60,23 @@ struct UnapplyableIndex: Sendable {
         return aliases
     }
 
+    /// List writes the record's cards refused: `field|key` → attempted values.
+    func listRefusals(record: UUID) -> [String: Set<String>] {
+        var refusals: [String: Set<String>] = [:]
+        let elements = (byRecord[record] ?? []).filter {
+            ScalarField(rawValue: $0.field) == nil && $0.field.contains("|")
+        }
+        for entry in elements {
+            refusals[entry.field, default: []].insert(entry.attempted)
+        }
+        return refusals
+    }
+
+    /// Marks the list refusals of `fields` (`field|key`) used (they decided a merge slot).
+    mutating func markListRefusalsUsed(record: UUID, fields: Set<String>) {
+        for entry in byRecord[record] ?? [] where fields.contains(entry.field) { used.insert(entry) }
+    }
+
     /// Marks the alias of `field` used (it applied in the merge).
     mutating func markAliasUsed(record: UUID, field: String) {
         for entry in byRecord[record] ?? [] where entry.field == field { used.insert(entry) }

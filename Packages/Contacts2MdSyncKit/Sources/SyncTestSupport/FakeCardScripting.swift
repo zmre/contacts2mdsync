@@ -13,6 +13,8 @@ public final class FakeCardScripting: CardScripting {
         var failing = Set<String>()
         /// List fields whose elements Contacts.app refuses to change, with the error number, by card.
         var refused: [String: [AppleListField: Int]] = [:]
+        /// List fields whose changed elements Contacts.app removes but never re-adds, by card.
+        var losing: [String: Set<AppleListField>] = [:]
         var calls: [[AppleWriteOperation]] = []
         var availabilityChecks = 0
         var finishedSessions = 0
@@ -43,6 +45,23 @@ public final class FakeCardScripting: CardScripting {
         state.withLock { $0.refused[cardID, default: [:]][field] = error }
     }
 
+    /// Contacts.app drops every element of `field` on `cardID` that a
+    /// write changes or adds: the old value is removed (its `delete` took)
+    /// but the new one never appears (`make new` refused with `-10000`).
+    /// Unchanged elements stay. As `ScriptingCardWriter` reports element
+    /// errors, the list edit is reported skipped and the rest applied. This
+    /// is what the related names of two noted cards did on a real Mac
+    /// (2026-10-25): the relations were gone after the write.
+    public func setLosesChangedElements(_ field: AppleListField, ofCard cardID: String, _ loses: Bool = true) {
+        state.withLock { state in
+            if loses {
+                state.losing[cardID, default: []].insert(field)
+            } else {
+                state.losing[cardID]?.remove(field)
+            }
+        }
+    }
+
     // MARK: - Counters
 
     /// The operations of each `apply` call.
@@ -60,9 +79,9 @@ public final class FakeCardScripting: CardScripting {
     }
 
     public func apply(_ operations: [AppleWriteOperation]) throws -> AppleWriteResult {
-        let (permission, failSession, failing, refusedFields) = state.withLock { state in
+        let (permission, failSession, failing, refusedFields, losing) = state.withLock { state in
             state.calls.append(operations)
-            return (state.permission, state.failSession, state.failing, state.refused)
+            return (state.permission, state.failSession, state.failing, state.refused, state.losing)
         }
         guard permission == .granted else {
             throw NotesUnavailableError("Automation permission for Contacts not granted", permissionDenied: true)
@@ -72,9 +91,10 @@ public final class FakeCardScripting: CardScripting {
         var original: [AppleWriteOperation: AppleWriteOperation] = [:]
         var skipped: [AppleWriteSkip] = []
         let sent = operations.filter { !refused.contains($0) }.map { operation in
-            let (effective, left) = Self.leavingOut(refusedFields, from: operation)
+            let (refusedOut, left) = Self.leavingOut(refusedFields, from: operation)
+            let (effective, lost) = Self.losingChanges(losing, from: refusedOut, original: operation)
             original[effective] = operation
-            skipped += left
+            skipped += left + lost
             return effective
         }
         let written = store.scriptedApply(sent)
@@ -113,6 +133,27 @@ public final class FakeCardScripting: CardScripting {
             } else {
                 kept.append(edit)
             }
+        }
+        return (.update(cardID: cardID, edits: kept), skipped)
+    }
+
+    /// `operation` with the changed and new elements of losing fields removed, and those edits as skips.
+    private static func losingChanges(
+        _ losing: [String: Set<AppleListField>], from operation: AppleWriteOperation, original: AppleWriteOperation
+    ) -> (AppleWriteOperation, [AppleWriteSkip]) {
+        guard case .update(let cardID, let edits) = operation, let fields = losing[cardID], !fields.isEmpty
+        else { return (operation, []) }
+        var skipped: [AppleWriteSkip] = []
+        let kept = edits.map { edit -> CardEdit in
+            guard case .list(let field, let elements) = edit, fields.contains(field) else { return edit }
+            let unchanged = elements.filter { $0.existing == $0.value && $0.existingLabel == $0.label }
+            guard unchanged.count < elements.count else { return edit }
+            let message = "Contacts.app scripting error -10000: Apple Event failed"
+            skipped.append(
+                AppleWriteSkip(
+                    operation: original, edit: edit,
+                    reason: CardScriptingSupport.elementFailureReason(field, error: message)))
+            return .list(field, unchanged)
         }
         return (.update(cardID: cardID, edits: kept), skipped)
     }

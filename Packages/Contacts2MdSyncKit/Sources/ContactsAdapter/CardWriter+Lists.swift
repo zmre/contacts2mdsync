@@ -83,6 +83,7 @@ extension CardWriter {
                     }
                 },
                 label: relationLabel,
+                sameLabel: sameRelationLabel,
                 make: { value in
                     guard case .relation(let name, _, _) = value else { return nil }
                     return CNContactRelation(name: name)
@@ -98,6 +99,17 @@ extension CardWriter {
         LabelMap.appleLabel(fromMarkdown: element.label, existing: existing)
     }
 
+    /// A relation's Contacts label carries its type and label (`_$!<Child>!$_`
+    /// is `child`; `_$!<Daughter>!$_` is `child`/`daughter`), so a type change
+    /// is a label change even when the markdown `label` stayed the same.
+    private static func sameRelationLabel(_ element: AppleListElement) -> Bool {
+        guard element.label == element.existingLabel else { return false }
+        guard case .relation(_, let type, let label)? = element.existing,
+            case .relation(_, let newType, let newLabel) = element.value
+        else { return true }
+        return type == newType && label == newLabel
+    }
+
     private static func relationLabel(_ element: AppleListElement, _ existing: String?) -> String? {
         guard case .relation(_, let type, let label) = element.value else { return existing }
         if let existing, RelationLabelMap.mbr(fromApple: existing) == (type, label) { return existing }
@@ -111,6 +123,7 @@ extension CardWriter {
         _ current: [CNLabeledValue<Value>], _ elements: [AppleListElement],
         canonical: (CNLabeledValue<Value>) -> AppleValue?,
         label: (AppleListElement, String?) -> String?,
+        sameLabel: (AppleListElement) -> Bool = { $0.label == $0.existingLabel },
         make: (AppleValue) -> Value?,
         makeLabeled: ((AppleListElement, CNLabeledValue<Value>?) -> CNLabeledValue<Value>?)? = nil
     ) -> [CNLabeledValue<Value>] {
@@ -137,8 +150,7 @@ extension CardWriter {
                 }
                 continue
             }
-            let sameLabel = element.label == element.existingLabel
-            let newLabel = sameLabel ? original.label : label(element, original.label)
+            let newLabel = sameLabel(element) ? original.label : label(element, original.label)
             if element.existing == element.value, newLabel == original.label {
                 result.append(original)
             } else if let value = element.existing == element.value ? original.value : make(element.value) {

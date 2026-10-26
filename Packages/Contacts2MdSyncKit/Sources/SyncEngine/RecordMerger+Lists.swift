@@ -24,8 +24,8 @@ extension RecordMerger {
         for element in Self.unique(markdown.list(field)) {
             if let slot = index[element.key] { slots[slot].markdown = element } else { markdownAdded.append(element) }
         }
-        Self.pairEdits(&slots, &appleAdded, side: \.apple)
-        Self.pairEdits(&slots, &markdownAdded, side: \.markdown)
+        Self.pairEdits(&slots, &appleAdded, side: \.apple, field: field)
+        Self.pairEdits(&slots, &markdownAdded, side: \.markdown, field: field)
         for element in appleAdded {
             index[element.key] = slots.count
             slots.append(ListSlot(id: element.key, apple: element))
@@ -54,10 +54,21 @@ extension RecordMerger {
     /// one edit when their labels match, or — when the base label is unknown
     /// (an M2 base) — when they are the only removed/added pair. A removal
     /// plus an addition with another label stays a delete and an add.
+    ///
+    /// Relationships (key `type|target`, label usually none) pair only
+    /// within one relationship type, so `spouse Mara` → `[[Mara
+    /// Quill]]` is one edit and is never paired with `child Cora` → `[[Cora
+    /// Quill]]` just because both have no label. A type change (`sibling` →
+    /// `child`, same target) pairs by target instead.
     private static func pairEdits(
-        _ slots: inout [ListSlot], _ added: inout [MergeElement], side: WritableKeyPath<ListSlot, MergeElement?>
+        _ slots: inout [ListSlot], _ added: inout [MergeElement], side: WritableKeyPath<ListSlot, MergeElement?>,
+        field: ListField
     ) {
         var removed = slots.indices.filter { slots[$0].base != nil && slots[$0][keyPath: side] == nil }
+        if field == .relationships {
+            pairRelations(&slots, &added, removed: removed, side: side)
+            return
+        }
         for slot in removed {
             guard case .known(let label)? = slots[slot].base?.label,
                 let match = added.firstIndex(where: { $0.label == label })
@@ -67,6 +78,30 @@ extension RecordMerger {
         removed = removed.filter { slots[$0][keyPath: side] == nil }
         if removed.count == 1, added.count == 1, slots[removed[0]].base?.label == .unknown {
             slots[removed[0]][keyPath: side] = added.removeFirst()
+        }
+    }
+
+    /// The relationship type and target of a relationship element key (`type|r:<id>`, `type|n:<name>`).
+    static func relationParts(_ key: String) -> (type: Substring, target: Substring) {
+        guard let bar = key.firstIndex(of: "|") else { return (Substring(key), "") }
+        return (key[..<bar], key[key.index(after: bar)...])
+    }
+
+    /// Relationship edits: same type and label first (a new target), then
+    /// same target and label (a new type). Nothing else pairs.
+    private static func pairRelations(
+        _ slots: inout [ListSlot], _ added: inout [MergeElement], removed: [Int],
+        side: WritableKeyPath<ListSlot, MergeElement?>
+    ) {
+        let sameType = { (lhs: String, rhs: String) in relationParts(lhs).type == relationParts(rhs).type }
+        let sameTarget = { (lhs: String, rhs: String) in relationParts(lhs).target == relationParts(rhs).target }
+        for matches in [sameType, sameTarget] {
+            for slot in removed where slots[slot][keyPath: side] == nil {
+                guard let base = slots[slot].base, case .known(let label) = base.label,
+                    let index = added.firstIndex(where: { $0.label == label && matches(base.key, $0.key) })
+                else { continue }
+                slots[slot][keyPath: side] = added.remove(at: index)
+            }
         }
     }
 
@@ -118,9 +153,44 @@ extension RecordMerger {
                 labelConflict(&slot, field: field, baseLabel: base.label)
             }
         default:
+            if settlesWithoutConflict(&slot, base: base, field: field) { return }
             let both = appleElement != nil && markdownElement != nil
             elementConflict(&slot, field: field, options: both ? [.keepApple, .keepMarkdown, .keepBoth] : nil)
         }
+    }
+
+    /// Deletes and edits that are not a real conflict:
+    ///
+    /// - **A value we could not write.** Apple lost a base element after we
+    ///   tried to change it (an unapplyable `~<new key>` replace or
+    ///   `@<label>` relabel: e.g. a scripted write removed it but could not
+    ///   add the replacement). That is Apple *unchanged* — a value Contacts
+    ///   could not take — never an Apple deletion: markdown wins locally,
+    ///   and the write planner does not retry what the card refused.
+    /// - **Relationships.** The element key is (type, target), so an edit
+    ///   re-points the relation (a new target or type): a relation the
+    ///   other side never had. The other side's deletion (or different
+    ///   edit) of the old relation says nothing about it, so the edits are
+    ///   unioned like additions and the old relation is gone on both sides.
+    private mutating func settlesWithoutConflict(
+        _ slot: inout ListSlot, base: (key: String, label: BaseLabel), field: ListField
+    ) -> Bool {
+        let refusals = listRefusals["\(field.rawValue)|\(base.key)"] ?? []
+        let changeRefused = refusals.contains { $0.hasPrefix("~") || $0.hasPrefix("@") }
+        if slot.apple == nil, slot.markdown != nil, changeRefused {
+            result.refusalsUsed.insert("\(field.rawValue)|\(base.key)")
+            slot.appleFinal = slot.markdownFinal
+            return true
+        }
+        guard field == .relationships else { return false }
+        var both: [MergeElement] = []
+        for element in [slot.markdown, slot.apple].compactMap({ $0 })
+        where !both.contains(where: { $0.key == element.key }) {
+            both.append(element)
+        }
+        slot.appleFinal = both
+        slot.markdownFinal = both
+        return true
     }
 
     /// Same element on both sides: the label changed on one side wins.

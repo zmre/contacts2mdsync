@@ -218,7 +218,13 @@ private struct RecordWrites {
             if let kept = slot.appleFinal.first(where: { $0.key == apple.key }) {
                 extra.removeAll { $0.key == apple.key }
                 for card in holders where !blocks(card.id, elementField, "@\(kept.label ?? "")") {
-                    update(field, card: card.id, key: apple.key) { $0.label = kept.label }
+                    update(field, card: card.id, key: apple.key) { element in
+                        element.label = kept.label
+                        // A relation's label lives in its value too (the adapter maps type + label).
+                        if case .relation(let name, let type, _) = element.value {
+                            element.value = .relation(name: name, type: type, label: kept.label)
+                        }
+                    }
                 }
             } else if let replacement = slot.appleFinal.first {
                 extra.removeFirst()

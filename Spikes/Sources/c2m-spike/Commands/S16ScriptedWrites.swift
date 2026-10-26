@@ -390,7 +390,9 @@ final class S16Runner {
         "3  B add to / remove from \"\(S16ScriptedWrites.groupName)\" (via scripting)",
         "4  B in-place edits: address street/city, related name, Twitter profile (reported applied), Skype IM "
             + "(IM: skipped up front — needs the notes entitlement — no IM Apple Event, card applied, never a card "
-            + "failure); 4b the IM alone (the same IM outcome, nothing sent)",
+            + "failure); 4b the IM alone (the same IM outcome, nothing sent); 4c related names: add one "
+            + "(`make new related name`), re-point two in one batch (one to A's name, an existing contact, as a sync "
+            + "does for `to: \"[[Title]]\"`), delete the added one (`delete related name id`)",
         "5  B clear job title (\"\"), add an email with no label",
         "6  A (no note): the step-1 update via the Contacts framework; A add to group (framework) and remove "
             + "(scripting)",
@@ -477,6 +479,7 @@ final class S16Runner {
         try step2()
         try step3()
         try step4()
+        try step4c()
         try step5()
         try step6()
         try step7()
@@ -965,6 +968,98 @@ final class S16Runner {
         let after = try cardNow(b)
         checkIM("4b", result, before: before, after: after, wanted: newHandle, log: log)
         unexpected("4b", "B", before: before, after: after, allowed: [])
+    }
+
+    /// 4c: related names beyond the in-place edit of step 4 (never verified
+    /// before; a real sync on 2026-10-25 left two noted cards without the
+    /// related names it re-pointed). Each batch goes through the same guards.
+    func step4c() throws {
+        report.say("\n# 4c. B (noted): add, re-point two at once, delete a related name")
+        let before = try cardNow(b)
+        guard let friend = before.contactRelations.first else {
+            report.check("4c", "B has a related name", false, "missing (setup changed?)")
+            return
+        }
+        let kept = { (card: CNContact) in S13View.keptRelations(AppleContactMapper.canonical(from: card).relationships) }
+        let ids = { (card: CNContact) in card.contactRelations.map { "\($0.identifier)=\($0.value.name) \($0.label ?? "nil")" } }
+
+        // 1. Add.
+        let added = "ZZ Spike S16 Sibling \(runTag)"
+        let addOps: [AppleWriteOperation] = [
+            .update(
+                cardID: b,
+                edits: [
+                    .list(
+                        .relations,
+                        kept(before) + [AppleListElement(label: nil, value: .relation(name: added, type: "sibling", label: nil))])
+                ])
+        ]
+        let addResult = try apply("4c", "B add a related name", addOps, expect: .exactlyOne)
+        checkRoute("4c", "B add related name", addOps, addResult, scripted: true)
+        let afterAdd = try cardNow(b)
+        let newEntry = afterAdd.contactRelations.first { $0.value.name == added }
+        report.check(
+            "4c", "related name added (`make new related name`), label sibling",
+            newEntry.map { RelationLabelMap.mbr(fromApple: $0.label).type == "sibling" } ?? false,
+            newEntry.map { "id \($0.identifier) label \($0.label ?? "nil")" } ?? "not added; now \(ids(afterAdd))")
+        report.check(
+            "4c", "the existing related name kept its id (add)",
+            afterAdd.contactRelations.contains { $0.identifier == friend.identifier }, "\(ids(afterAdd))")
+        report.check(
+            "4c", "add reported applied, not skipped", addResult.skipped.isEmpty && addResult.failed.isEmpty,
+            addResult.skipped.map(\.reason).joined(separator: "; "))
+        unexpected("4c", "B", before: before, after: afterAdd, allowed: ["relation"])
+
+        // 2. Re-point both in one batch; the friend to A's name (an existing contact).
+        let aCard = try cardNow(a)
+        let aName = [aCard.givenName, aCard.familyName].filter { !$0.isEmpty }.joined(separator: " ")
+        let renamed = "ZZ Spike S16 Sibling \(runTag)b"
+        var repoint = kept(afterAdd)
+        for index in repoint.indices {
+            guard case .relation(let name, let type, let label)? = repoint[index].existing else { continue }
+            if name == friend.value.name { repoint[index].value = .relation(name: aName, type: type, label: label) }
+            if name == added { repoint[index].value = .relation(name: renamed, type: type, label: label) }
+        }
+        let repointOps: [AppleWriteOperation] = [.update(cardID: b, edits: [.list(.relations, repoint)])]
+        let repointResult = try apply("4c", "B re-point two related names", repointOps, expect: .exactlyOne)
+        checkRoute("4c", "B re-point related names", repointOps, repointResult, scripted: true)
+        let afterRepoint = try cardNow(b)
+        let nowFriend = afterRepoint.contactRelations.first { $0.identifier == friend.identifier }
+        let nowAdded = newEntry.flatMap { entry in afterRepoint.contactRelations.first { $0.identifier == entry.identifier } }
+        report.check(
+            "4c", "both re-pointed in place (ids kept), one to an existing contact's name",
+            nowFriend?.value.name == aName && nowAdded?.value.name == renamed,
+            "now \(ids(afterRepoint)) (wanted \"\(aName)\" and \"\(renamed)\")")
+        report.check(
+            "4c", "no related name lost by the re-point",
+            afterRepoint.contactRelations.count == afterAdd.contactRelations.count,
+            "\(afterAdd.contactRelations.count) -> \(afterRepoint.contactRelations.count)")
+        unexpected("4c", "B", before: afterAdd, after: afterRepoint, allowed: ["relation"])
+        // On the real Mac the related names looked unchanged right after the
+        // write and were gone a few minutes later: look again after a pause.
+        Thread.sleep(forTimeInterval: 10)
+        let later = try cardNow(b)
+        report.check(
+            "4c", "both re-pointed related names still there 10 s later",
+            later.contactRelations.contains { $0.identifier == friend.identifier && $0.value.name == aName }
+                && later.contactRelations.contains { $0.value.name == renamed },
+            "now \(ids(later))")
+
+        // 3. Delete the added one.
+        let deleteOps: [AppleWriteOperation] = [
+            .update(
+                cardID: b,
+                edits: [.list(.relations, kept(afterRepoint).filter { $0.existing != .relation(name: renamed, type: "sibling", label: nil) })])
+        ]
+        let deleteResult = try apply("4c", "B delete a related name", deleteOps, expect: .exactlyOne)
+        checkRoute("4c", "B delete related name", deleteOps, deleteResult, scripted: true)
+        let afterDelete = try cardNow(b)
+        report.check(
+            "4c", "related name deleted (`delete related name id`), the other kept (id kept)",
+            !afterDelete.contactRelations.contains { $0.value.name == renamed }
+                && afterDelete.contactRelations.contains { $0.identifier == friend.identifier },
+            "now \(ids(afterDelete))")
+        unexpected("4c", "B", before: afterRepoint, after: afterDelete, allowed: ["relation"])
     }
 
     /// Step 4's address, related name and social edits: the operation is

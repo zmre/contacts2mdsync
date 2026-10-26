@@ -83,7 +83,12 @@ struct MergeBaseBuilder {
     }
 
     /// Elements both sides hold; elements on one side only keep their old
-    /// base membership (none when the old list had no base).
+    /// base membership (none when the old list had no base). An element
+    /// neither side holds any more is gone from the base: both sides agree
+    /// on its absence (e.g. our own write replaced it, or a scripted write
+    /// removed it without adding its replacement). Keeping it would make
+    /// the next merge read Apple's absence as a deletion and raise a false
+    /// delete-vs-edit conflict against the markdown edit that replaced it.
     private mutating func list(_ field: ListField) {
         let unique = { (elements: [MergeElement]) in
             Dictionary(elements.map { ($0.key, $0) }, uniquingKeysWith: { first, _ in first })
@@ -99,7 +104,7 @@ struct MergeBaseBuilder {
                 label =
                     fromApple.label == fromMarkdown.label
                     ? .known(fromApple.label) : (oldList.elements[key]?.label ?? .unknown)
-            } else if oldList.known, let previous = oldList.elements[key] {
+            } else if fromApple != nil || fromMarkdown != nil, oldList.known, let previous = oldList.elements[key] {
                 label = previous.label
             } else {
                 continue
