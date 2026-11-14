@@ -9,6 +9,7 @@ struct GeneralSettings: View {
     let model: AppModel
     @AppStorage(AppPreferences.showInMenuBar) private var showInMenuBar = true
     @AppStorage(AppPreferences.hideDockIconWhenClosed) private var hideDockIcon = true
+    @AppStorage(AppPreferences.startInBackground) private var startInBackground = true
     @State private var services = BackgroundServices()
     @State private var backgroundHours = UIBackgroundSync.intervals[0]
 
@@ -33,6 +34,8 @@ struct GeneralSettings: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 Toggle("Launch at login", isOn: loginBinding)
+                Toggle("Start in the background (menu bar only)", isOn: $startInBackground)
+                    .disabled(!services.launchesAtLogin || !showInMenuBar)
                 if services.loginStatus == .requiresApproval {
                     approvalRow
                 }

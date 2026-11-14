@@ -182,3 +182,9 @@ The app is installed to `/Applications/Nix Apps/Contacts2MdSync.app`, and `conta
 - Check it with `launchctl print gui/$(id -u)/org.nixos.contacts2mdsync-sync`. Run it right away with `launchctl kickstart gui/$(id -u)/org.nixos.contacts2mdsync-sync`.
 
 Also available: `overlays.default` (adds `pkgs.contacts2mdsync`, and `pkgs.contacts2mdsync-release` once a release exists) and `nix flake check` (swift-format lint, plus validation of the fixture notes with the real mbr from `github:zmre/mbr-markdown-browser`, fetched from zmre.cachix.org, and an evaluation test of the nix-darwin module's schedule options).
+
+## License
+
+Copyright (C) 2026 Patrick Walsh
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed WITHOUT ANY WARRANTY; see [LICENSE](LICENSE) for the full text.

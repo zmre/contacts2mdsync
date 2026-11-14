@@ -1,4 +1,5 @@
 import AppKit
+import Contacts2MdCLI
 import SwiftUI
 
 /// The SwiftUI app. Launched from `EntryPoint.main()` when the binary is not
@@ -55,8 +56,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let model = AppModel()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let opensWindow = UILoginLaunch.opensWindow(
+            launchedAtLogin: Self.wasLaunchedAtLogin, startInBackground: AppPreferences.startsInBackground,
+            menuBarShown: AppPreferences.isMenuBarShown)
+        if !opensWindow { startInBackground() }
         DockIconController.shared.start()
         Task { await model.launch() }
+    }
+
+    /// macOS marks the launch event of a login item (`SMAppService.mainApp`).
+    /// Valid here because `didFinishLaunching` is posted while that event is handled.
+    private static var wasLaunchedAtLogin: Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent else { return false }
+        return event.eventID == kAEOpenApplication
+            && event.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+    }
+
+    /// Menu bar only: no Dock icon, and the main window closed as soon as
+    /// SwiftUI creates it (now, or on the next pass of the run loop).
+    private func startInBackground() {
+        NSApp.setActivationPolicy(.accessory)
+        Self.closeMainWindow()
+        DispatchQueue.main.async {
+            Self.closeMainWindow()
+            DockIconController.shared.update()
+        }
+    }
+
+    private static func closeMainWindow() {
+        for window in NSApp.windows where window.identifier?.rawValue.hasPrefix(AppPreferences.mainWindowID) == true {
+            window.close()
+        }
     }
 
     /// With the menu bar extra shown, closing the window keeps the app (and live sync) running.
@@ -82,6 +112,9 @@ enum AppPreferences {
     /// Settings ▸ General ▸ Hide Dock icon when the window is closed (default
     /// on; applies while the menu bar icon is shown).
     static let hideDockIconWhenClosed = "hideDockIconWhenClosed"
+    /// Settings ▸ General ▸ Start in the background (default on; applies to
+    /// login launches while the menu bar icon is shown).
+    static let startInBackground = "startInBackground"
     static let mainWindowID = "main"
 
     static var isMenuBarShown: Bool {
@@ -90,5 +123,9 @@ enum AppPreferences {
 
     static var hidesDockIconWhenClosed: Bool {
         UserDefaults.standard.object(forKey: hideDockIconWhenClosed) as? Bool ?? true
+    }
+
+    static var startsInBackground: Bool {
+        UserDefaults.standard.object(forKey: startInBackground) as? Bool ?? true
     }
 }

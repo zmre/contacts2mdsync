@@ -284,6 +284,7 @@ General   Device name        [Patrick's MacBook Pro      ]
           Safety check       [Every 2 hours ▾]  full compare in case a change was missed
           Menu bar           [◉] Show in menu bar
           Launch at login    [ ]
+                             [◉] Start in the background (menu bar only)
 
 Folders   Notes root         ~/Notes/Contacts                 [Choose…]
           New contacts in    [Inbox ▾]
@@ -440,6 +441,7 @@ Every review answer is a decision appended to `.c2mdsync/devices/<device>/decisi
 - *Show in menu bar* (`showInMenuBar` in UserDefaults, default on): inserts the `MenuBarExtra`; while it is shown, closing the window keeps the app and live sync running (`applicationShouldTerminateAfterLastWindowClosed`).
 - *Hide Dock icon when the window is closed* (`hideDockIconWhenClosed`, default on; disabled while the menu bar icon is off): `DockIconController` (App) follows window key/main/close notifications and these two settings, and `UIDockIcon.showsDockIcon` (tested) decides: with the menu bar icon shown, the setting on and no titled window open (the main window or Settings; the menu bar panel does not count), the app runs as an accessory (`NSApp.setActivationPolicy(.accessory)`: no Dock icon, not in ⌘-Tab); when a window opens (Open App… from the menu bar, a Dock-less relaunch) it switches back to `.regular` and activates. Without the menu bar icon the Dock icon always stays.
 - *Launch at login*: `SMAppService.mainApp.register()` / `unregister()`, with approval state and errors.
+- *Start in the background (menu bar only)* (`startInBackground`, default on; disabled unless Launch at login is on and the menu bar icon is shown): a login launch (the `oapp` Apple event carries `keyAELaunchedAsLogInItem`, checked in `applicationDidFinishLaunching`) runs as an accessory and closes the main window as SwiftUI creates it; live sync starts as usual. `UILoginLaunch.opensWindow` (tested) decides. Launches from Finder, the Dock or Spotlight always open the window.
 
 **Pause Live Sync** (menu bar): live triggers off until the end (an hour, or the start of the next day), stored in UserDefaults (`livePausedUntil`) so it survives a relaunch; the sweep and Sync Now keep working. The coordinator gets `liveSync = false` through `update`, and a timer restores the saved settings and submits a catch-up run.
 
