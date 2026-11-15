@@ -1,10 +1,15 @@
-# Developer ID signed + notarized release, on pushing a tag vX.Y.Z.
+# Developer ID signed + notarized release:
 #
-#   git tag v0.2.0 && git push origin v0.2.0
+#   - after CI passes on main (every push or merge): version X.Y.<commit count>,
+#     X.Y from MARKETING_VERSION in App/project.yml, tag created by the release
+#   - on pushing a tag vX.Y.Z:  git tag v0.2.0 && git push origin v0.2.0
+#   - by hand (Actions > Release > Run workflow): same as a main build
 #
-# Runs scripts/release.sh (the same script used locally), then creates the
-# GitHub release with Contacts2MdSync-<version>.zip and its .sha256. Afterwards
-# run scripts/update-release-nix.sh <version> and commit nix/release.json.
+# Runs scripts/release.sh (the same script used locally), creates the GitHub
+# release with Contacts2MdSync-<version>.zip and its .sha256, then runs
+# scripts/update-release-nix.sh and pushes nix/release.json to main, so the
+# flake's packages.release (the nix-darwin module's default) is that build.
+# That commit is pushed with GITHUB_TOKEN, which starts no new workflow runs.
 #
 # Secrets (Settings > Secrets and variables > Actions; see docs/release.md):
 #   DEVELOPER_ID_P12_BASE64      base64 of the exported Developer ID Application .p12
@@ -24,16 +29,29 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
-  contents: write # gh release create
+  contents: write # gh release create, push nix/release.json
 
+# One release at a time; they all push nix/release.json to main.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 jobs:
   release:
+    # workflow_run: only after a successful CI run of a push to main;
+    # workflow_dispatch: only from main.
+    if: >-
+      (github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     runs-on: macos-latest
     timeout-minutes: 60
     # Optional but recommended: create a "release" environment with required
@@ -44,7 +62,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history: CFBundleVersion is the commit count.
+          # The commit CI tested (workflow_run), else the pushed tag / main.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # Full history: CFBundleVersion (and a main build's patch) is the commit count.
           fetch-depth: 0
           persist-credentials: false
 
@@ -55,14 +75,33 @@ jobs:
       # Only for the dev shell's xcodegen/xcbeautify; nothing is built by Nix.
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
 
-      - name: Check tag format
+      - name: Choose version and tag
         run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || {
-            echo "::error::tag $GITHUB_REF_NAME is not vX.Y or vX.Y.Z"
-            exit 1
-          }
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || {
+              echo "::error::tag $GITHUB_REF_NAME is not vX.Y or vX.Y.Z"
+              exit 1
+            }
+            version="${GITHUB_REF_NAME#v}"
+          else
+            marketing="$(sed -n 's/^[[:space:]]*MARKETING_VERSION:[[:space:]]*"\{0,1\}\([^"[:space:]]*\)"\{0,1\}.*/\1/p' App/project.yml | head -n1)"
+            [[ "$marketing" =~ ^([0-9]+\.[0-9]+) ]] || {
+              echo "::error::MARKETING_VERSION '$marketing' in App/project.yml is not X.Y or X.Y.Z"
+              exit 1
+            }
+            version="${BASH_REMATCH[1]}.$(git rev-list --count HEAD)"
+            if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+              echo "::notice::v$version is already released; nothing to do"
+              echo "C2M_SKIP=1" >>"$GITHUB_ENV"
+            fi
+          fi
+          echo "C2M_VERSION=$version" >>"$GITHUB_ENV"
+          echo "C2M_RELEASE_SHA=$(git rev-parse HEAD)" >>"$GITHUB_ENV"
+          echo "Releasing $version from $(git rev-parse --short HEAD)"
 
       - name: Import Developer ID certificate into a temporary keychain
+        if: env.C2M_SKIP != '1'
         env:
           P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
@@ -101,7 +140,7 @@ jobs:
           echo "C2M_SIGNING_KEYCHAIN=$keychain" >>"$GITHUB_ENV"
 
       - name: Install Developer ID provisioning profile (ReleaseNotes only)
-        if: env.NOTES_ENTITLEMENT == '1'
+        if: env.NOTES_ENTITLEMENT == '1' && env.C2M_SKIP != '1'
         env:
           PROFILE_BASE64: ${{ secrets.DEVELOPER_ID_PROFILE_BASE64 }}
         run: |
@@ -123,6 +162,7 @@ jobs:
           echo "C2M_PROVISIONING_PROFILE=$uuid" >>"$GITHUB_ENV"
 
       - name: Write the notarization API key
+        if: env.C2M_SKIP != '1'
         env:
           P8_BASE64: ${{ secrets.NOTARY_API_KEY_P8_BASE64 }}
         run: |
@@ -137,6 +177,7 @@ jobs:
           echo "C2M_NOTARY_KEY=$key" >>"$GITHUB_ENV"
 
       - name: Build, sign, notarize, staple
+        if: env.C2M_SKIP != '1'
         id: release
         env:
           C2M_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -156,6 +197,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Create GitHub release
+        if: env.C2M_SKIP != '1'
         env:
           GH_TOKEN: ${{ github.token }}
           ZIP: ${{ steps.release.outputs.zip }}
@@ -164,24 +206,51 @@ jobs:
           SHA256: ${{ steps.release.outputs.sha256 }}
         run: |
           set -euo pipefail
-          [[ "v$VERSION" == "$GITHUB_REF_NAME" ]] || {
-            echo "::error::built version $VERSION does not match tag $GITHUB_REF_NAME"
+          [[ "$VERSION" == "$C2M_VERSION" ]] || {
+            echo "::error::built version $VERSION is not the chosen $C2M_VERSION"
             exit 1
           }
+          tag_args=(--verify-tag)
+          [[ "$GITHUB_REF_TYPE" == tag ]] || tag_args=(--target "$C2M_RELEASE_SHA")
           notes="$RUNNER_TEMP/notes.md"
           {
             echo "Developer ID signed and notarized build of Contacts2MdSync $VERSION."
             echo
             echo "SHA-256 of \`$(basename "$ZIP")\`: \`$SHA256\`"
             echo
-            echo "Nix users: \`scripts/update-release-nix.sh $VERSION\` updates \`nix/release.json\`."
+            echo "Built from \`$C2M_RELEASE_SHA\`. Nix: \`nix/release.json\` on main points at this release."
           } >"$notes"
-          gh release create "$GITHUB_REF_NAME" "$ZIP" "$SHA256_FILE" \
+          gh release create "v$VERSION" "$ZIP" "$SHA256_FILE" \
             --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
+            "${tag_args[@]}" \
             --title "Contacts2MdSync $VERSION" \
             --notes-file "$notes" \
             --generate-notes
+
+      - name: Point nix/release.json at the release and push it to main
+        if: env.C2M_SKIP != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout -B main origin/main
+          nix develop -c scripts/update-release-nix.sh "$C2M_VERSION"
+          if git diff --quiet -- nix/release.json; then
+            echo "nix/release.json already points at $C2M_VERSION"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "nix: release.json -> $C2M_VERSION" -- nix/release.json
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          # main may have moved during the build; retry on top of it.
+          for _ in 1 2 3; do
+            if git push "$remote" HEAD:main; then exit 0; fi
+            git pull --rebase "$remote" main
+          done
+          echo "::error::could not push nix/release.json to main"
+          exit 1
 
       - name: Remove temporary keychain and keys
         if: always()

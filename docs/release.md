@@ -8,7 +8,7 @@ Releases are Developer ID signed, notarized and stapled zips of `Contacts2MdSync
 | `scripts/release.sh`               | Build, sign, verify, notarize, staple, zip. Local and CI.            |
 | `scripts/release.sh --dry-run`     | Same pipeline, ad-hoc signed, never contacts Apple.                  |
 | `scripts/verify-app.sh`            | Signature/entitlement checks shared with `nix/package.nix`.          |
-| `.github/workflows/release.yml`    | On a `v*` tag: runs `release.sh`, creates the GitHub release.        |
+| `.github/workflows/release.yml`    | After green CI on main, or on a `v*` tag: runs `release.sh`, creates the GitHub release, pins `nix/release.json`. |
 | `.github/workflows/ci.yml`         | On push/PR: `nix flake check`, `just test`, `just lint`, shellcheck. |
 | `scripts/update-release-nix.sh`    | Points `nix/release.json` at a published release.                   |
 | `nix/release.nix`, `nix/release.json` | `packages.release` / `pkgs.contacts2mdsync-release`.              |
@@ -60,6 +60,10 @@ macOS ties Contacts access, Automation access (Apple Events to Contacts.app, use
 5. **Only for the notes entitlement** (`com.apple.developer.contacts.notes`, granted by Apple on request): add the *Contacts Notes* capability to the `com.zmre.contacts2mdsync` App ID, create a **Developer ID** provisioning profile for it, install it (double-click), then build with `NOTES_ENTITLEMENT=1 C2M_PROVISIONING_PROFILE="<profile name or UUID>"`. `App/project.yml` must map the profile for the ReleaseNotes config (see [project.yml requirements](#projectyml-requirements)).
 
 ## Releasing
+
+**Automatic (every push or merge to main).** When CI passes for a push to main, `release.yml` builds, signs, notarizes and staples that commit, publishes it as `v<X.Y>.<commit count>` (X.Y from `MARKETING_VERSION`; its patch part is ignored), then runs `scripts/update-release-nix.sh` and pushes the new `nix/release.json` to main as `github-actions[bot]`. That push uses `GITHUB_TOKEN`, so it starts no CI or release run. To pick it up in nix-darwin: `nix flake update contacts2mdsync && darwin-rebuild switch`. Start a new series by bumping `MARKETING_VERSION` (e.g. `0.2.0` gives `0.2.<count>`). Rerun a missed build from Actions › Release › Run workflow (main only); a version that is already released is skipped.
+
+**By hand (a chosen version):**
 
 1. Set the version: `MARKETING_VERSION` in `App/project.yml` (`X.Y.Z`). Commit.
 2. Rehearse: `nix develop -c scripts/release.sh --dry-run`. This runs the whole pipeline with ad-hoc signing and writes `build/release/Contacts2MdSync-<version>-adhoc.zip`.
@@ -128,7 +132,7 @@ gh secret set NOTARY_API_ISSUER_ID --env release                # prompts
 rm DeveloperID.p12                                               # don't leave the exported key around
 ```
 
-The workflow imports the .p12 into a temporary keychain with a random password, grants `codesign` access via `set-key-partition-list`, writes the `.p8` with mode 600 under `$RUNNER_TEMP`, and deletes both in an `always()` step. It only runs on tag pushes; protect `v*` tags with a ruleset so only you can create them.
+The workflow imports the .p12 into a temporary keychain with a random password, grants `codesign` access via `set-key-partition-list`, writes the `.p8` with mode 600 under `$RUNNER_TEMP`, and deletes both in an `always()` step. It runs on tag pushes and after CI passes on main. A `release` environment with required reviewers makes every main build wait for your approval; for unattended builds, leave reviewers off and limit the environment's deployment branches to `main` and `v*` tags. Don't protect `v*` tags against `github-actions[bot]`: main builds create their tag through the release.
 
 ### CI and Nix
 
